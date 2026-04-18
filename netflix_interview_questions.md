@@ -63,10 +63,87 @@ Source: https://www.1point3acres.com/interview/problems/company/netflix
 
 **Type:** Coding Problem
 
-**Problem:** The Netflix homepage organizing structure involves a vertical list of shelves (rows), where each shelf contains a horizontal list of titles (movies or shows). Remove duplicate titles that appear across multiple shelves.
+**Problem:** The Netflix homepage organizing structure involves a vertical list of shelves (rows), where each shelf contains a horizontal list of titles (movies or shows). Remove duplicate titles that appear across multiple shelves, keeping only the first occurrence.
 
-**Sections:**
-- Netflix Homepage: Removing Duplicate Titles
+**Focus:** HashSet, iteration order preservation
+
+### The Challenge
+
+Given a 2D list representing shelves of movie/show titles on the Netflix homepage, remove duplicate titles across all shelves. When a title appears on multiple shelves, keep only its first occurrence.
+
+### Examples
+
+**Example 1:**
+```
+Input: shelves = [
+  ["Stranger Things", "The Crown", "Wednesday"],
+  ["The Crown", "Squid Game", "Wednesday"],
+  ["Money Heist", "Stranger Things"]
+]
+Output: [
+  ["Stranger Things", "The Crown", "Wednesday"],
+  ["Squid Game"],
+  ["Money Heist"]
+]
+```
+
+### Python Solution
+
+```python
+def deduplicateTitles(shelves: list[list[str]]) -> list[list[str]]:
+    seen = set()
+    result = []
+
+    for shelf in shelves:
+        deduped_shelf = []
+        for title in shelf:
+            if title not in seen:
+                seen.add(title)
+                deduped_shelf.append(title)
+        result.append(deduped_shelf)
+
+    return result
+```
+
+### TypeScript Solution
+
+```typescript
+function deduplicateTitles(shelves: string[][]): string[][] {
+    const seen = new Set<string>();
+    const result: string[][] = [];
+
+    for (const shelf of shelves) {
+        const dedupedShelf: string[] = [];
+        for (const title of shelf) {
+            if (!seen.has(title)) {
+                seen.add(title);
+                dedupedShelf.push(title);
+            }
+        }
+        result.push(dedupedShelf);
+    }
+
+    return result;
+}
+```
+
+### Interview Questions
+
+1. **What if we want to keep the last occurrence instead of first?**
+   - Two-pass approach: first pass to record last position of each title, second pass to include only titles at their last position.
+
+2. **How to handle case-insensitive comparison?**
+   - Normalize titles to lowercase when checking the set, but preserve original case in output.
+
+3. **What if shelves are very large?**
+   - Stream processing approach, or partition by title hash for parallel processing.
+
+### Complexity Analysis
+
+| Metric | Value |
+|--------|-------|
+| Time | O(n) where n = total titles |
+| Space | O(n) for the seen set |
 
 ---
 
@@ -295,13 +372,103 @@ For `n = 3, relations = [[1,3], [2,3]]`:
 
 **Problem:** Given an integer array `nums` and an integer `k`, return true if there are two distinct indices `i` and `j` in the array such that `nums[i] == nums[j]` and `abs(i - j) <= k`.
 
-**Sections:**
-- Problem Breakdown
-- Example Scenarios
-- Input Constraints
-- Solution Approach
-- Code Implementation
-- Complexity Analysis
+**Focus:** Sliding window with HashSet, or HashMap with index tracking
+
+### Examples
+
+**Example 1:**
+```
+Input: nums = [1,2,3,1], k = 3
+Output: true
+Explanation: nums[0] == nums[3], and 3 - 0 <= 3
+```
+
+**Example 2:**
+```
+Input: nums = [1,0,1,1], k = 1
+Output: true
+Explanation: nums[2] == nums[3], and 3 - 2 <= 1
+```
+
+**Example 3:**
+```
+Input: nums = [1,2,3,1,2,3], k = 2
+Output: false
+```
+
+### Constraints
+
+- `1 <= nums.length <= 10^5`
+- `-10^9 <= nums[i] <= 10^9`
+- `0 <= k <= 10^5`
+
+### Key Insight
+
+Use a **sliding window** of size k with a HashSet. As you move through the array, maintain only the last k elements in the set. If you find a duplicate within this window, return true.
+
+### Python Solution
+
+```python
+def containsNearbyDuplicate(nums: list[int], k: int) -> bool:
+    window = set()
+
+    for i, num in enumerate(nums):
+        if num in window:
+            return True
+
+        window.add(num)
+
+        # Maintain window size of k
+        if len(window) > k:
+            window.remove(nums[i - k])
+
+    return False
+```
+
+### TypeScript Solution
+
+```typescript
+function containsNearbyDuplicate(nums: number[], k: number): boolean {
+    const window = new Set<number>();
+
+    for (let i = 0; i < nums.length; i++) {
+        if (window.has(nums[i])) {
+            return true;
+        }
+
+        window.add(nums[i]);
+
+        if (window.size > k) {
+            window.delete(nums[i - k]);
+        }
+    }
+
+    return false;
+}
+```
+
+### Alternative: HashMap Approach
+
+```python
+def containsNearbyDuplicateHashMap(nums: list[int], k: int) -> bool:
+    last_seen = {}  # value -> last index
+
+    for i, num in enumerate(nums):
+        if num in last_seen and i - last_seen[num] <= k:
+            return True
+        last_seen[num] = i
+
+    return False
+```
+
+### Complexity Analysis
+
+| Approach | Time | Space |
+|----------|------|-------|
+| Sliding Window | O(n) | O(min(n, k)) |
+| HashMap | O(n) | O(n) |
+
+**Note:** LeetCode problem #219
 
 ---
 
@@ -309,12 +476,123 @@ For `n = 3, relations = [[1,3], [2,3]]`:
 
 **Type:** Coding Problem
 
-**Problem:** Analyze customer movie viewing patterns. Each customer maintains a list representing the movies they've watched in the order they were viewed.
+**Problem:** Two customers are considered "friends" if their recent viewing history contains an exact match of the last k movies. Given customer viewing histories and an integer k, return all pairs of customer IDs that are friends.
 
-**Sections:**
-- Problem Challenge: Movie History Friends
-- Sample Cases
-- Input Limits
+**Focus:** HashSet comparison, tuple hashing, pairwise matching
+
+### The Challenge
+
+Given a dictionary mapping customer IDs to their movie viewing history (in order), and an integer `k`, find all pairs of customers whose last `k` movies are exactly the same (same movies in same order).
+
+### Examples
+
+**Example 1:**
+```
+Input: history = {
+  1: ["A", "B", "C", "D", "E"],
+  2: ["X", "Y", "C", "D", "E"],
+  3: ["P", "Q", "R", "S", "T"]
+}, k = 3
+
+Output: [[1, 2]]
+Explanation: Customers 1 and 2 both have ["C", "D", "E"] as their last 3 movies.
+```
+
+**Example 2:**
+```
+Input: history = {
+  1: ["A", "B"],
+  2: ["A", "B"],
+  3: ["B", "A"]
+}, k = 2
+
+Output: [[1, 2]]
+Explanation: Order matters - [A,B] != [B,A]
+```
+
+### Constraints
+
+- Customers with fewer than k movies in history cannot be friends with anyone
+- Order of movies matters (exact sequence match required)
+- Return pairs sorted by customer ID
+
+### Python Solution
+
+```python
+def findMovieFriends(history: dict[int, list[str]], k: int) -> list[list[int]]:
+    # Group customers by their last k movies (as tuple for hashing)
+    last_k_map = {}
+
+    for customer_id, movies in history.items():
+        if len(movies) >= k:
+            last_k = tuple(movies[-k:])
+            if last_k not in last_k_map:
+                last_k_map[last_k] = []
+            last_k_map[last_k].append(customer_id)
+
+    # Generate all pairs from each group
+    result = []
+    for customers in last_k_map.values():
+        customers.sort()
+        for i in range(len(customers)):
+            for j in range(i + 1, len(customers)):
+                result.append([customers[i], customers[j]])
+
+    result.sort()
+    return result
+```
+
+### TypeScript Solution
+
+```typescript
+function findMovieFriends(
+    history: Map<number, string[]>,
+    k: number
+): number[][] {
+    const lastKMap = new Map<string, number[]>();
+
+    for (const [customerId, movies] of history) {
+        if (movies.length >= k) {
+            const lastK = movies.slice(-k).join('|');
+            if (!lastKMap.has(lastK)) {
+                lastKMap.set(lastK, []);
+            }
+            lastKMap.get(lastK)!.push(customerId);
+        }
+    }
+
+    const result: number[][] = [];
+
+    for (const customers of lastKMap.values()) {
+        customers.sort((a, b) => a - b);
+        for (let i = 0; i < customers.length; i++) {
+            for (let j = i + 1; j < customers.length; j++) {
+                result.push([customers[i], customers[j]]);
+            }
+        }
+    }
+
+    return result.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+}
+```
+
+### Interview Questions
+
+1. **How to optimize for millions of customers?**
+   - Use hash of last-k movies as key, partition by hash, process in parallel.
+
+2. **What if k is very large?**
+   - Use rolling hash (like Rabin-Karp) to compute hash incrementally.
+
+3. **How does this relate to recommendation systems?**
+   - Similar viewing patterns suggest similar preferences; friends could receive cross-recommendations.
+
+### Complexity Analysis
+
+| Metric | Value |
+|--------|-------|
+| Time | O(n × k + p) where n = customers, p = pairs |
+| Space | O(n × k) for storing last-k sequences |
 
 ---
 
@@ -322,17 +600,188 @@ For `n = 3, relations = [[1,3], [2,3]]`:
 
 **Type:** Coding Problem (Data Structure Design)
 
-**Problem:** Design and implement an in-memory file management system with versioning support.
+**Problem:** Design and implement an in-memory file management system with versioning support. Support creating, reading, updating files, and retrieving previous versions.
 
-**Sections:**
-- What We Are Building
-- Step 1: Simple File System
-- Step 2: Adding Versions
-- Step 3: Handling Crashes
-- Real-World Problems
-- Full Code
-- Interview Questions
-- Big-O Summary
+**Focus:** HashMap with version history, copy-on-write semantics
+
+### The Challenge
+
+Implement a `VersionedFileSystem` class with the following methods:
+
+- `create(path, content)` - Create a new file
+- `read(path, version=None)` - Read file content (latest or specific version)
+- `update(path, content)` - Update file, creating a new version
+- `history(path)` - Get all versions of a file
+- `delete(path)` - Delete a file
+
+### Examples
+
+```
+fs = VersionedFileSystem()
+fs.create("/docs/readme.txt", "Hello")      # version 1
+fs.update("/docs/readme.txt", "Hello World") # version 2
+fs.read("/docs/readme.txt")                  # returns "Hello World"
+fs.read("/docs/readme.txt", version=1)       # returns "Hello"
+fs.history("/docs/readme.txt")               # returns [1, 2]
+```
+
+### Python Solution
+
+```python
+from collections import defaultdict
+from typing import Optional
+
+class VersionedFileSystem:
+    def __init__(self):
+        # path -> list of (version, content)
+        self.files: dict[str, list[tuple[int, str]]] = {}
+        self.next_version: dict[str, int] = defaultdict(lambda: 1)
+
+    def create(self, path: str, content: str) -> int:
+        """Create a new file. Returns version number."""
+        if path in self.files:
+            raise FileExistsError(f"File {path} already exists")
+
+        version = self.next_version[path]
+        self.files[path] = [(version, content)]
+        self.next_version[path] += 1
+        return version
+
+    def read(self, path: str, version: Optional[int] = None) -> str:
+        """Read file content. If version not specified, read latest."""
+        if path not in self.files or not self.files[path]:
+            raise FileNotFoundError(f"File {path} not found")
+
+        versions = self.files[path]
+
+        if version is None:
+            return versions[-1][1]  # Latest version
+
+        # Binary search for specific version
+        for v, content in versions:
+            if v == version:
+                return content
+
+        raise ValueError(f"Version {version} not found for {path}")
+
+    def update(self, path: str, content: str) -> int:
+        """Update file with new content. Returns new version number."""
+        if path not in self.files:
+            raise FileNotFoundError(f"File {path} not found")
+
+        version = self.next_version[path]
+        self.files[path].append((version, content))
+        self.next_version[path] += 1
+        return version
+
+    def history(self, path: str) -> list[int]:
+        """Get all version numbers for a file."""
+        if path not in self.files:
+            raise FileNotFoundError(f"File {path} not found")
+
+        return [v for v, _ in self.files[path]]
+
+    def delete(self, path: str) -> None:
+        """Delete a file and all its versions."""
+        if path not in self.files:
+            raise FileNotFoundError(f"File {path} not found")
+
+        del self.files[path]
+```
+
+### TypeScript Solution
+
+```typescript
+class VersionedFileSystem {
+    private files: Map<string, Array<[number, string]>> = new Map();
+    private nextVersion: Map<string, number> = new Map();
+
+    create(path: string, content: string): number {
+        if (this.files.has(path)) {
+            throw new Error(`File ${path} already exists`);
+        }
+
+        const version = this.getNextVersion(path);
+        this.files.set(path, [[version, content]]);
+        return version;
+    }
+
+    read(path: string, version?: number): string {
+        const versions = this.files.get(path);
+        if (!versions || versions.length === 0) {
+            throw new Error(`File ${path} not found`);
+        }
+
+        if (version === undefined) {
+            return versions[versions.length - 1][1];
+        }
+
+        const entry = versions.find(([v]) => v === version);
+        if (!entry) {
+            throw new Error(`Version ${version} not found`);
+        }
+        return entry[1];
+    }
+
+    update(path: string, content: string): number {
+        const versions = this.files.get(path);
+        if (!versions) {
+            throw new Error(`File ${path} not found`);
+        }
+
+        const version = this.getNextVersion(path);
+        versions.push([version, content]);
+        return version;
+    }
+
+    history(path: string): number[] {
+        const versions = this.files.get(path);
+        if (!versions) {
+            throw new Error(`File ${path} not found`);
+        }
+        return versions.map(([v]) => v);
+    }
+
+    delete(path: string): void {
+        if (!this.files.has(path)) {
+            throw new Error(`File ${path} not found`);
+        }
+        this.files.delete(path);
+    }
+
+    private getNextVersion(path: string): number {
+        const current = this.nextVersion.get(path) || 1;
+        this.nextVersion.set(path, current + 1);
+        return current;
+    }
+}
+```
+
+### Interview Questions
+
+1. **How would you implement rollback to a previous version?**
+   - Add a `rollback(path, version)` method that creates a new version with the content of the specified old version.
+
+2. **How to optimize storage for large files with small changes?**
+   - Store diffs instead of full content (delta compression), or use copy-on-write with shared content blocks.
+
+3. **How to make this thread-safe?**
+   - Use read-write locks per file path, or implement MVCC (Multi-Version Concurrency Control).
+
+4. **How to handle directory structure?**
+   - Use a trie or nested dictionary structure for path hierarchy.
+
+### Complexity Analysis
+
+| Operation | Time | Space |
+|-----------|------|-------|
+| create | O(1) | O(content size) |
+| read | O(versions) or O(1) for latest | O(1) |
+| update | O(1) | O(content size) |
+| history | O(versions) | O(versions) |
+| delete | O(1) | O(1) |
+
+**Total Space:** O(total content across all versions)
 
 ---
 
@@ -340,12 +789,160 @@ For `n = 3, relations = [[1,3], [2,3]]`:
 
 **Type:** Coding Problem (Data Structure)
 
-**Problem:** Design a data structure that tracks music listening history with timestamps.
+**Problem:** Design a data structure that tracks music listening history with timestamps. Support adding plays, querying recent plays, and finding the most played songs in a time window.
 
-**Sections:**
-- Problem Requirements
-- Example Walkthrough
-- Input Limits
+**Focus:** HashMap + sorted structure, time-based queries
+
+### The Challenge
+
+Implement a `MusicPlaylist` class:
+
+- `play(songId, timestamp)` - Record a song play
+- `getRecentPlays(k)` - Get the k most recent song plays
+- `getMostPlayed(startTime, endTime)` - Get the most played song in time range
+
+### Examples
+
+```
+playlist = MusicPlaylist()
+playlist.play("song1", 100)
+playlist.play("song2", 200)
+playlist.play("song1", 300)
+playlist.getRecentPlays(2)           # returns ["song1", "song2"]
+playlist.getMostPlayed(0, 400)       # returns "song1" (played twice)
+```
+
+### Python Solution
+
+```python
+from collections import defaultdict
+import heapq
+
+class MusicPlaylist:
+    def __init__(self):
+        self.plays = []  # [(timestamp, songId)]
+        self.song_plays = defaultdict(list)  # songId -> [timestamps]
+
+    def play(self, songId: str, timestamp: int) -> None:
+        """Record a song play at given timestamp."""
+        self.plays.append((timestamp, songId))
+        self.song_plays[songId].append(timestamp)
+
+    def getRecentPlays(self, k: int) -> list[str]:
+        """Get the k most recent song plays."""
+        # Sort by timestamp descending, take first k
+        sorted_plays = sorted(self.plays, key=lambda x: -x[0])
+        return [songId for _, songId in sorted_plays[:k]]
+
+    def getMostPlayed(self, startTime: int, endTime: int) -> str:
+        """Get most played song in time range [startTime, endTime]."""
+        play_count = defaultdict(int)
+
+        for timestamp, songId in self.plays:
+            if startTime <= timestamp <= endTime:
+                play_count[songId] += 1
+
+        if not play_count:
+            return ""
+
+        return max(play_count.keys(), key=lambda x: play_count[x])
+
+
+# Optimized version with better time complexity
+class MusicPlaylistOptimized:
+    def __init__(self):
+        self.plays = []  # [(timestamp, songId)] - kept sorted by timestamp
+        self.song_plays = defaultdict(list)
+
+    def play(self, songId: str, timestamp: int) -> None:
+        # Assume timestamps are given in order (common case)
+        self.plays.append((timestamp, songId))
+        self.song_plays[songId].append(timestamp)
+
+    def getRecentPlays(self, k: int) -> list[str]:
+        # O(k) since plays are in order
+        return [songId for _, songId in self.plays[-k:][::-1]]
+
+    def getMostPlayed(self, startTime: int, endTime: int) -> str:
+        # Binary search for time range
+        import bisect
+        left = bisect.bisect_left(self.plays, (startTime,))
+        right = bisect.bisect_right(self.plays, (endTime + 1,))
+
+        play_count = defaultdict(int)
+        for i in range(left, right):
+            play_count[self.plays[i][1]] += 1
+
+        if not play_count:
+            return ""
+
+        return max(play_count.keys(), key=lambda x: play_count[x])
+```
+
+### TypeScript Solution
+
+```typescript
+class MusicPlaylist {
+    private plays: Array<[number, string]> = [];
+    private songPlays: Map<string, number[]> = new Map();
+
+    play(songId: string, timestamp: number): void {
+        this.plays.push([timestamp, songId]);
+        if (!this.songPlays.has(songId)) {
+            this.songPlays.set(songId, []);
+        }
+        this.songPlays.get(songId)!.push(timestamp);
+    }
+
+    getRecentPlays(k: number): string[] {
+        return this.plays
+            .slice(-k)
+            .reverse()
+            .map(([_, songId]) => songId);
+    }
+
+    getMostPlayed(startTime: number, endTime: number): string {
+        const playCount = new Map<string, number>();
+
+        for (const [timestamp, songId] of this.plays) {
+            if (timestamp >= startTime && timestamp <= endTime) {
+                playCount.set(songId, (playCount.get(songId) || 0) + 1);
+            }
+        }
+
+        let maxSong = "";
+        let maxCount = 0;
+
+        for (const [songId, count] of playCount) {
+            if (count > maxCount) {
+                maxCount = count;
+                maxSong = songId;
+            }
+        }
+
+        return maxSong;
+    }
+}
+```
+
+### Interview Questions
+
+1. **How to handle ties in getMostPlayed?**
+   - Return lexicographically smallest, or most recently played among ties.
+
+2. **How to optimize for real-time top-k queries?**
+   - Use a combination of time-bucketed counts and a heap structure.
+
+3. **How to scale for millions of users?**
+   - Partition by user ID, use streaming aggregation (e.g., Apache Kafka + Flink).
+
+### Complexity Analysis
+
+| Operation | Basic | Optimized |
+|-----------|-------|-----------|
+| play | O(1) | O(1) |
+| getRecentPlays | O(n log n) | O(k) |
+| getMostPlayed | O(n) | O(log n + range size) |
 
 ---
 
@@ -355,13 +952,142 @@ For `n = 3, relations = [[1,3], [2,3]]`:
 
 **Problem:** Create a function named `timer` accepting a single parameter—seconds (non-negative integer)—that outputs a human-readable time string representation.
 
-**Sections:**
-- Building a Recursive Timer
-- Problem Statement
-- Rules to Follow
-- Conversion Values
-- Sample Inputs and Outputs
-- Input Limits
+**Focus:** Integer division, modulo operations, string formatting
+
+### The Challenge
+
+Convert seconds into a human-readable format: "X years, X days, X hours, X minutes, X seconds". Only include non-zero units. Handle singular/plural forms correctly.
+
+### Conversion Values
+
+- 1 minute = 60 seconds
+- 1 hour = 60 minutes = 3600 seconds
+- 1 day = 24 hours = 86400 seconds
+- 1 year = 365 days = 31536000 seconds
+
+### Examples
+
+```
+timer(0)        → "0 seconds"
+timer(1)        → "1 second"
+timer(62)       → "1 minute, 2 seconds"
+timer(3662)     → "1 hour, 1 minute, 2 seconds"
+timer(86400)    → "1 day"
+timer(31536000) → "1 year"
+timer(31622400) → "1 year, 1 day"
+```
+
+### Python Solution
+
+```python
+def timer(seconds: int) -> str:
+    if seconds == 0:
+        return "0 seconds"
+
+    units = [
+        (31536000, "year"),
+        (86400, "day"),
+        (3600, "hour"),
+        (60, "minute"),
+        (1, "second")
+    ]
+
+    parts = []
+
+    for unit_seconds, unit_name in units:
+        if seconds >= unit_seconds:
+            count = seconds // unit_seconds
+            seconds %= unit_seconds
+
+            # Handle singular/plural
+            if count == 1:
+                parts.append(f"{count} {unit_name}")
+            else:
+                parts.append(f"{count} {unit_name}s")
+
+    return ", ".join(parts)
+
+
+# Recursive version
+def timer_recursive(seconds: int) -> str:
+    if seconds == 0:
+        return "0 seconds"
+
+    units = [
+        (31536000, "year"),
+        (86400, "day"),
+        (3600, "hour"),
+        (60, "minute"),
+        (1, "second")
+    ]
+
+    def helper(secs: int, idx: int) -> list[str]:
+        if secs == 0 or idx >= len(units):
+            return []
+
+        unit_secs, unit_name = units[idx]
+
+        if secs >= unit_secs:
+            count = secs // unit_secs
+            remaining = secs % unit_secs
+            plural = "s" if count > 1 else ""
+            return [f"{count} {unit_name}{plural}"] + helper(remaining, idx + 1)
+        else:
+            return helper(secs, idx + 1)
+
+    return ", ".join(helper(seconds, 0))
+```
+
+### TypeScript Solution
+
+```typescript
+function timer(seconds: number): string {
+    if (seconds === 0) {
+        return "0 seconds";
+    }
+
+    const units: Array<[number, string]> = [
+        [31536000, "year"],
+        [86400, "day"],
+        [3600, "hour"],
+        [60, "minute"],
+        [1, "second"]
+    ];
+
+    const parts: string[] = [];
+    let remaining = seconds;
+
+    for (const [unitSeconds, unitName] of units) {
+        if (remaining >= unitSeconds) {
+            const count = Math.floor(remaining / unitSeconds);
+            remaining %= unitSeconds;
+
+            const plural = count === 1 ? "" : "s";
+            parts.push(`${count} ${unitName}${plural}`);
+        }
+    }
+
+    return parts.join(", ");
+}
+```
+
+### Interview Questions
+
+1. **How to handle leap years?**
+   - Use 365.25 days/year on average, or work with actual calendar dates.
+
+2. **How to localize for different languages?**
+   - Use a localization library with plural rules (ICU MessageFormat).
+
+3. **How to parse the string back to seconds?**
+   - Regex to extract numbers and units, multiply and sum.
+
+### Complexity Analysis
+
+| Metric | Value |
+|--------|-------|
+| Time | O(1) - fixed number of units |
+| Space | O(1) |
 
 ---
 
@@ -405,10 +1131,171 @@ For `n = 3, relations = [[1,3], [2,3]]`:
 
 **Type:** Coding Problem
 
-**Problem:** Design a solution that organizes shows from a user interface and returns them as title IDs based on user preferences.
+**Problem:** Given a list of shows and user preference data (genre preferences, watch history, ratings), sort the shows to maximize relevance for the user.
 
-**Sections:**
-- Sorting Shows Based on User Preferences
+**Focus:** Custom sorting, multi-criteria comparison, scoring functions
+
+### The Challenge
+
+Sort a list of shows based on multiple user preference signals:
+1. Preferred genres (ranked list)
+2. Previously watched shows (boost similar content)
+3. User ratings of similar shows
+4. Popularity/trending score
+
+### Examples
+
+```
+Input:
+shows = [
+    {"id": 1, "title": "Show A", "genre": "Drama", "popularity": 80},
+    {"id": 2, "title": "Show B", "genre": "Comedy", "popularity": 90},
+    {"id": 3, "title": "Show C", "genre": "Drama", "popularity": 70}
+]
+user_prefs = {
+    "genre_ranking": ["Drama", "Comedy", "Action"],
+    "watched": [4, 5],  # IDs of watched shows
+    "ratings": {4: 5, 5: 4}  # show_id -> rating
+}
+
+Output: [1, 3, 2]  # Drama shows first (preferred genre), then Comedy
+```
+
+### Python Solution
+
+```python
+from typing import Any
+
+def sortByUserPreference(
+    shows: list[dict[str, Any]],
+    user_prefs: dict[str, Any]
+) -> list[int]:
+    """Sort shows by user preference and return ordered IDs."""
+
+    genre_ranking = {
+        genre: i for i, genre in enumerate(user_prefs.get("genre_ranking", []))
+    }
+    default_genre_rank = len(genre_ranking)
+
+    def calculate_score(show: dict) -> tuple:
+        """
+        Returns a tuple for sorting (lower is better).
+        Tuple: (genre_rank, -popularity, title)
+        """
+        genre = show.get("genre", "")
+        genre_rank = genre_ranking.get(genre, default_genre_rank)
+        popularity = show.get("popularity", 0)
+        title = show.get("title", "")
+
+        # Negative popularity so higher popularity sorts first
+        return (genre_rank, -popularity, title)
+
+    sorted_shows = sorted(shows, key=calculate_score)
+    return [show["id"] for show in sorted_shows]
+
+
+# More sophisticated scoring with weighted factors
+def sortByUserPreferenceWeighted(
+    shows: list[dict[str, Any]],
+    user_prefs: dict[str, Any],
+    weights: dict[str, float] = None
+) -> list[int]:
+    """Sort with weighted scoring across multiple factors."""
+
+    if weights is None:
+        weights = {
+            "genre": 0.4,
+            "popularity": 0.3,
+            "recency": 0.2,
+            "similarity": 0.1
+        }
+
+    genre_ranking = user_prefs.get("genre_ranking", [])
+    genre_scores = {g: 1 - (i / len(genre_ranking))
+                   for i, g in enumerate(genre_ranking)}
+
+    def calculate_score(show: dict) -> float:
+        score = 0.0
+
+        # Genre preference score (0-1)
+        genre = show.get("genre", "")
+        score += weights["genre"] * genre_scores.get(genre, 0)
+
+        # Popularity score (normalized 0-1)
+        popularity = show.get("popularity", 0) / 100
+        score += weights["popularity"] * popularity
+
+        # Could add more factors: recency, similarity to watched, etc.
+
+        return score
+
+    sorted_shows = sorted(shows, key=calculate_score, reverse=True)
+    return [show["id"] for show in sorted_shows]
+```
+
+### TypeScript Solution
+
+```typescript
+interface Show {
+    id: number;
+    title: string;
+    genre: string;
+    popularity: number;
+}
+
+interface UserPrefs {
+    genre_ranking: string[];
+    watched?: number[];
+    ratings?: Record<number, number>;
+}
+
+function sortByUserPreference(shows: Show[], userPrefs: UserPrefs): number[] {
+    const genreRanking = new Map<string, number>();
+    userPrefs.genre_ranking.forEach((genre, index) => {
+        genreRanking.set(genre, index);
+    });
+
+    const defaultRank = userPrefs.genre_ranking.length;
+
+    const sortedShows = [...shows].sort((a, b) => {
+        // Primary: genre preference
+        const genreRankA = genreRanking.get(a.genre) ?? defaultRank;
+        const genreRankB = genreRanking.get(b.genre) ?? defaultRank;
+
+        if (genreRankA !== genreRankB) {
+            return genreRankA - genreRankB;
+        }
+
+        // Secondary: popularity (higher first)
+        if (a.popularity !== b.popularity) {
+            return b.popularity - a.popularity;
+        }
+
+        // Tertiary: alphabetical
+        return a.title.localeCompare(b.title);
+    });
+
+    return sortedShows.map(show => show.id);
+}
+```
+
+### Interview Questions
+
+1. **How to incorporate collaborative filtering?**
+   - Add similarity scores based on what similar users watched; boost shows popular among users with similar taste profiles.
+
+2. **How to handle cold start for new users?**
+   - Fall back to popularity-based ranking, or use demographic-based defaults.
+
+3. **How to A/B test different ranking algorithms?**
+   - Randomly assign users to cohorts, track engagement metrics (watch time, completion rate).
+
+### Complexity Analysis
+
+| Metric | Value |
+|--------|-------|
+| Time | O(n log n) for sorting |
+| Space | O(n) for sorted copy |
 
 ---
 
@@ -416,12 +1303,147 @@ For `n = 3, relations = [[1,3], [2,3]]`:
 
 **Type:** Coding Problem (Array/Sliding Window)
 
-**Problem:** You are given an integer array `nums` and two integers `indexDiff` and `valueDiff`. Find duplicates within index and value constraints.
+**Problem:** Given an integer array `nums` and two integers `indexDiff` and `valueDiff`, return true if there exist two distinct indices `i` and `j` such that `abs(i - j) <= indexDiff` and `abs(nums[i] - nums[j]) <= valueDiff`.
 
-**Sections:**
-- Problem Breakdown
-- Illustrative Examples
-- Technical Constraints
+**Focus:** Bucket sort, sliding window, balanced BST
+
+### Examples
+
+**Example 1:**
+```
+Input: nums = [1,2,3,1], indexDiff = 3, valueDiff = 0
+Output: true
+Explanation: nums[0] == nums[3], indices differ by 3, values differ by 0
+```
+
+**Example 2:**
+```
+Input: nums = [1,5,9,1,5,9], indexDiff = 2, valueDiff = 3
+Output: false
+```
+
+### Constraints
+
+- `2 <= nums.length <= 10^5`
+- `-10^9 <= nums[i] <= 10^9`
+- `1 <= indexDiff <= nums.length`
+- `0 <= valueDiff <= 10^9`
+
+### Key Insight
+
+Use **bucket sort** with bucket size = `valueDiff + 1`. Numbers in the same bucket are within valueDiff. Numbers in adjacent buckets might be within valueDiff. Maintain a sliding window of buckets.
+
+### Python Solution
+
+```python
+def containsNearbyAlmostDuplicate(
+    nums: list[int],
+    indexDiff: int,
+    valueDiff: int
+) -> bool:
+    if valueDiff < 0:
+        return False
+
+    buckets = {}
+    bucket_size = valueDiff + 1  # Avoid division by zero
+
+    def get_bucket_id(num: int) -> int:
+        # Handle negative numbers correctly
+        return num // bucket_size
+
+    for i, num in enumerate(nums):
+        bucket_id = get_bucket_id(num)
+
+        # Check same bucket
+        if bucket_id in buckets:
+            return True
+
+        # Check adjacent buckets
+        if bucket_id - 1 in buckets and abs(num - buckets[bucket_id - 1]) <= valueDiff:
+            return True
+        if bucket_id + 1 in buckets and abs(num - buckets[bucket_id + 1]) <= valueDiff:
+            return True
+
+        # Add to bucket
+        buckets[bucket_id] = num
+
+        # Remove old bucket outside window
+        if i >= indexDiff:
+            old_bucket_id = get_bucket_id(nums[i - indexDiff])
+            del buckets[old_bucket_id]
+
+    return False
+```
+
+### TypeScript Solution
+
+```typescript
+function containsNearbyAlmostDuplicate(
+    nums: number[],
+    indexDiff: number,
+    valueDiff: number
+): boolean {
+    if (valueDiff < 0) return false;
+
+    const buckets = new Map<number, number>();
+    const bucketSize = valueDiff + 1;
+
+    const getBucketId = (num: number): number => {
+        return Math.floor(num / bucketSize);
+    };
+
+    for (let i = 0; i < nums.length; i++) {
+        const num = nums[i];
+        const bucketId = getBucketId(num);
+
+        // Check same bucket
+        if (buckets.has(bucketId)) {
+            return true;
+        }
+
+        // Check adjacent buckets
+        if (buckets.has(bucketId - 1) &&
+            Math.abs(num - buckets.get(bucketId - 1)!) <= valueDiff) {
+            return true;
+        }
+        if (buckets.has(bucketId + 1) &&
+            Math.abs(num - buckets.get(bucketId + 1)!) <= valueDiff) {
+            return true;
+        }
+
+        // Add current number to bucket
+        buckets.set(bucketId, num);
+
+        // Remove element outside window
+        if (i >= indexDiff) {
+            const oldBucketId = getBucketId(nums[i - indexDiff]);
+            buckets.delete(oldBucketId);
+        }
+    }
+
+    return false;
+}
+```
+
+### Interview Questions
+
+1. **Why bucket size is valueDiff + 1?**
+   - Ensures numbers in same bucket differ by at most valueDiff. If bucket size were valueDiff, boundary cases would fail.
+
+2. **Why check adjacent buckets?**
+   - Numbers in adjacent buckets might still be within valueDiff of each other (e.g., bucket boundaries).
+
+3. **Alternative approach?**
+   - Use a balanced BST (TreeSet) to find floor/ceiling in O(log k) per operation.
+
+### Complexity Analysis
+
+| Metric | Value |
+|--------|-------|
+| Time | O(n) |
+| Space | O(min(n, indexDiff)) |
+
+**Note:** LeetCode problem #220
 
 ---
 
@@ -429,12 +1451,120 @@ For `n = 3, relations = [[1,3], [2,3]]`:
 
 **Type:** Coding Problem (Sliding Window)
 
-**Problem:** Find the length of the longest substring without duplicate characters from a given string input.
+**Problem:** Given a string `s`, find the length of the longest substring without repeating characters.
 
-**Sections:**
-- Longest Substring Without Repeating Characters
+**Focus:** Sliding window, HashSet/HashMap for tracking
 
-**Note:** Classic LeetCode problem #3
+### Examples
+
+**Example 1:**
+```
+Input: s = "abcabcbb"
+Output: 3
+Explanation: "abc" is the longest substring without repeating characters.
+```
+
+**Example 2:**
+```
+Input: s = "bbbbb"
+Output: 1
+Explanation: "b" is the longest substring.
+```
+
+**Example 3:**
+```
+Input: s = "pwwkew"
+Output: 3
+Explanation: "wke" is the answer. Note "pwke" is a subsequence, not substring.
+```
+
+### Constraints
+
+- `0 <= s.length <= 5 * 10^4`
+- `s` consists of English letters, digits, symbols, and spaces
+
+### Key Insight
+
+Use a **sliding window** with two pointers. Expand the right pointer to include new characters. When a duplicate is found, shrink from the left until the duplicate is removed.
+
+### Python Solution
+
+```python
+def lengthOfLongestSubstring(s: str) -> int:
+    char_index = {}  # char -> most recent index
+    max_length = 0
+    left = 0
+
+    for right, char in enumerate(s):
+        # If char is in window, move left pointer past its last occurrence
+        if char in char_index and char_index[char] >= left:
+            left = char_index[char] + 1
+
+        char_index[char] = right
+        max_length = max(max_length, right - left + 1)
+
+    return max_length
+
+
+# Alternative using set
+def lengthOfLongestSubstringSet(s: str) -> int:
+    char_set = set()
+    max_length = 0
+    left = 0
+
+    for right in range(len(s)):
+        while s[right] in char_set:
+            char_set.remove(s[left])
+            left += 1
+
+        char_set.add(s[right])
+        max_length = max(max_length, right - left + 1)
+
+    return max_length
+```
+
+### TypeScript Solution
+
+```typescript
+function lengthOfLongestSubstring(s: string): number {
+    const charIndex = new Map<string, number>();
+    let maxLength = 0;
+    let left = 0;
+
+    for (let right = 0; right < s.length; right++) {
+        const char = s[right];
+
+        if (charIndex.has(char) && charIndex.get(char)! >= left) {
+            left = charIndex.get(char)! + 1;
+        }
+
+        charIndex.set(char, right);
+        maxLength = Math.max(maxLength, right - left + 1);
+    }
+
+    return maxLength;
+}
+```
+
+### Interview Questions
+
+1. **Why track index instead of just presence?**
+   - Allows O(1) jump of left pointer instead of incrementally removing characters.
+
+2. **What if we need the actual substring?**
+   - Track `start` and `end` indices of best window, return `s[start:end+1]`.
+
+3. **How to handle Unicode characters?**
+   - Same algorithm works; HashMap handles any character type.
+
+### Complexity Analysis
+
+| Metric | Value |
+|--------|-------|
+| Time | O(n) |
+| Space | O(min(n, alphabet_size)) |
+
+**Note:** LeetCode problem #3
 
 ---
 
@@ -442,10 +1572,173 @@ For `n = 3, relations = [[1,3], [2,3]]`:
 
 **Type:** Coding Problem (Monitoring)
 
-**Problem:** Monitor a system's error rates over time.
+**Problem:** Design a system that monitors error rates over sliding time windows. Track the ratio of errors to total requests and trigger alerts when thresholds are exceeded.
 
-**Sections:**
-- System Health Monitor
+**Focus:** Sliding window, circular buffer, rate calculation
+
+### The Challenge
+
+Implement an `ErrorRateMonitor` class:
+
+- `record(timestamp, isError)` - Record a request (error or success)
+- `getErrorRate(windowSeconds)` - Get error rate in last N seconds
+- `isHealthy(threshold)` - Return true if error rate < threshold
+
+### Examples
+
+```
+monitor = ErrorRateMonitor()
+monitor.record(100, False)  # success at t=100
+monitor.record(101, True)   # error at t=101
+monitor.record(102, False)  # success at t=102
+monitor.record(103, True)   # error at t=103
+
+monitor.getErrorRate(10)    # 2/4 = 0.5 (50% error rate)
+monitor.isHealthy(0.6)      # True (0.5 < 0.6)
+monitor.isHealthy(0.4)      # False (0.5 >= 0.4)
+```
+
+### Python Solution
+
+```python
+from collections import deque
+from typing import Tuple
+
+class ErrorRateMonitor:
+    def __init__(self, max_window: int = 3600):
+        """
+        Args:
+            max_window: Maximum window size to track (default 1 hour)
+        """
+        self.max_window = max_window
+        self.events: deque[Tuple[int, bool]] = deque()  # (timestamp, isError)
+        self.current_time = 0
+
+    def record(self, timestamp: int, isError: bool) -> None:
+        """Record a request event."""
+        self.current_time = max(self.current_time, timestamp)
+        self.events.append((timestamp, isError))
+        self._cleanup()
+
+    def _cleanup(self) -> None:
+        """Remove events outside max window."""
+        cutoff = self.current_time - self.max_window
+        while self.events and self.events[0][0] < cutoff:
+            self.events.popleft()
+
+    def getErrorRate(self, windowSeconds: int) -> float:
+        """Get error rate in the last windowSeconds."""
+        cutoff = self.current_time - windowSeconds
+        total = 0
+        errors = 0
+
+        for timestamp, isError in self.events:
+            if timestamp >= cutoff:
+                total += 1
+                if isError:
+                    errors += 1
+
+        return errors / total if total > 0 else 0.0
+
+    def isHealthy(self, threshold: float, windowSeconds: int = 60) -> bool:
+        """Check if error rate is below threshold."""
+        return self.getErrorRate(windowSeconds) < threshold
+
+
+# Optimized version with bucketed counts
+class ErrorRateMonitorOptimized:
+    def __init__(self, bucket_size: int = 1, num_buckets: int = 3600):
+        self.bucket_size = bucket_size
+        self.num_buckets = num_buckets
+        self.buckets = [(0, 0)] * num_buckets  # (total, errors) per bucket
+        self.current_bucket = 0
+
+    def _get_bucket_index(self, timestamp: int) -> int:
+        return (timestamp // self.bucket_size) % self.num_buckets
+
+    def record(self, timestamp: int, isError: bool) -> None:
+        idx = self._get_bucket_index(timestamp)
+        total, errors = self.buckets[idx]
+        self.buckets[idx] = (total + 1, errors + (1 if isError else 0))
+
+    def getErrorRate(self, windowSeconds: int) -> float:
+        # Sum buckets in window
+        num_buckets = min(windowSeconds // self.bucket_size, self.num_buckets)
+        total = errors = 0
+
+        for i in range(num_buckets):
+            idx = (self.current_bucket - i) % self.num_buckets
+            t, e = self.buckets[idx]
+            total += t
+            errors += e
+
+        return errors / total if total > 0 else 0.0
+```
+
+### TypeScript Solution
+
+```typescript
+class ErrorRateMonitor {
+    private events: Array<[number, boolean]> = [];
+    private currentTime: number = 0;
+    private maxWindow: number;
+
+    constructor(maxWindow: number = 3600) {
+        this.maxWindow = maxWindow;
+    }
+
+    record(timestamp: number, isError: boolean): void {
+        this.currentTime = Math.max(this.currentTime, timestamp);
+        this.events.push([timestamp, isError]);
+        this.cleanup();
+    }
+
+    private cleanup(): void {
+        const cutoff = this.currentTime - this.maxWindow;
+        while (this.events.length > 0 && this.events[0][0] < cutoff) {
+            this.events.shift();
+        }
+    }
+
+    getErrorRate(windowSeconds: number): number {
+        const cutoff = this.currentTime - windowSeconds;
+        let total = 0;
+        let errors = 0;
+
+        for (const [timestamp, isError] of this.events) {
+            if (timestamp >= cutoff) {
+                total++;
+                if (isError) errors++;
+            }
+        }
+
+        return total > 0 ? errors / total : 0;
+    }
+
+    isHealthy(threshold: number, windowSeconds: number = 60): boolean {
+        return this.getErrorRate(windowSeconds) < threshold;
+    }
+}
+```
+
+### Interview Questions
+
+1. **How to handle high throughput?**
+   - Use bucketed aggregation (per-second or per-minute counts) instead of individual events.
+
+2. **How to support multiple metrics?**
+   - Track error codes separately, use labels/tags for different services.
+
+3. **How to implement alerting?**
+   - Check thresholds on each record, use hysteresis to prevent alert flapping.
+
+### Complexity Analysis
+
+| Operation | Basic | Optimized (Bucketed) |
+|-----------|-------|----------------------|
+| record | O(1) amortized | O(1) |
+| getErrorRate | O(window events) | O(window buckets) |
+| Space | O(max events) | O(num buckets) |
 
 ---
 
@@ -453,14 +1746,112 @@ For `n = 3, relations = [[1,3], [2,3]]`:
 
 **Type:** Coding Problem (Intervals)
 
-**Problem:** Given an array of meeting time interval objects consisting of start and end times `[[start1,end1],[start2,end2],...]` (start_i < end_i), determine if a person could add all meetings to their schedule without any conflicts.
+**Problem:** Given an array of meeting time interval objects consisting of start and end times `[[start1,end1],[start2,end2],...]` (start_i < end_i), determine if a person could attend all meetings without any conflicts.
 
-**Sections:**
-- Problem Requirements
-- Sample Cases
-- Input Limits
+**Focus:** Interval sorting, overlap detection
 
-**Note:** Classic interval scheduling problem
+### Examples
+
+**Example 1:**
+```
+Input: intervals = [[0,30],[5,10],[15,20]]
+Output: false
+Explanation: [0,30] overlaps with [5,10] and [15,20]
+```
+
+**Example 2:**
+```
+Input: intervals = [[7,10],[2,4]]
+Output: true
+Explanation: No overlaps after sorting: [2,4], [7,10]
+```
+
+### Constraints
+
+- `0 <= intervals.length <= 10^4`
+- `intervals[i].length == 2`
+- `0 <= start_i < end_i <= 10^6`
+
+### Key Insight
+
+Sort intervals by start time. Two meetings overlap if the current meeting starts before the previous one ends.
+
+### Python Solution
+
+```python
+def canAttendMeetings(intervals: list[list[int]]) -> bool:
+    # Sort by start time
+    intervals.sort(key=lambda x: x[0])
+
+    for i in range(1, len(intervals)):
+        # Check if current meeting starts before previous ends
+        if intervals[i][0] < intervals[i - 1][1]:
+            return False
+
+    return True
+```
+
+### TypeScript Solution
+
+```typescript
+function canAttendMeetings(intervals: number[][]): boolean {
+    // Sort by start time
+    intervals.sort((a, b) => a[0] - b[0]);
+
+    for (let i = 1; i < intervals.length; i++) {
+        if (intervals[i][0] < intervals[i - 1][1]) {
+            return false;
+        }
+    }
+
+    return true;
+}
+```
+
+### Follow-up: Meeting Rooms II (Minimum Rooms)
+
+```python
+import heapq
+
+def minMeetingRooms(intervals: list[list[int]]) -> int:
+    if not intervals:
+        return 0
+
+    intervals.sort(key=lambda x: x[0])
+
+    # Min-heap of end times
+    rooms = []
+    heapq.heappush(rooms, intervals[0][1])
+
+    for i in range(1, len(intervals)):
+        # If earliest ending meeting ends before this one starts, reuse room
+        if rooms[0] <= intervals[i][0]:
+            heapq.heappop(rooms)
+
+        heapq.heappush(rooms, intervals[i][1])
+
+    return len(rooms)
+```
+
+### Interview Questions
+
+1. **What if meetings can be rescheduled?**
+   - This becomes an optimization problem (interval scheduling maximization).
+
+2. **How to find which meetings conflict?**
+   - Build an interval tree or sweep line algorithm to find all overlapping pairs.
+
+3. **Netflix use case?**
+   - Scheduling server maintenance windows, content release slots, user session management.
+
+### Complexity Analysis
+
+| Problem | Time | Space |
+|---------|------|-------|
+| Meeting Rooms I | O(n log n) | O(1) |
+| Meeting Rooms II | O(n log n) | O(n) |
+
+**Note:** LeetCode problems #252 and #253
 
 ---
 
@@ -719,10 +2110,166 @@ class CountdownLatch {
 
 **Type:** Coding Problem
 
-**Problem:** Given a map of customer IDs linked to their viewing history, plus two integers `k` and `m` (with `m <= k`), return all pairs of customer IDs that are friends based on viewing patterns.
+**Problem:** Given a map of customer IDs linked to their viewing history, plus two integers `k` and `m` (with `m <= k`), return all pairs of customer IDs that are "friends" if their last k movies share at least m common titles (order doesn't matter).
 
-**Sections:**
-- Movie History Friends II (main problem)
+**Focus:** Set intersection, pairwise comparison optimization
+
+### The Challenge
+
+Unlike Movie History Friends I (exact sequence match), this version requires at least `m` common movies among the last `k` movies, regardless of order.
+
+### Examples
+
+**Example 1:**
+```
+Input: history = {
+    1: ["A", "B", "C", "D"],
+    2: ["X", "D", "B", "A"],
+    3: ["P", "Q", "R", "S"]
+}, k = 3, m = 2
+
+Output: [[1, 2]]
+Explanation:
+- Customer 1's last 3: {"B", "C", "D"}
+- Customer 2's last 3: {"D", "B", "A"}
+- Common: {"B", "D"} = 2 movies >= m
+- Customer 3 shares nothing with others
+```
+
+**Example 2:**
+```
+Input: history = {
+    1: ["A", "B", "C"],
+    2: ["C", "B", "A"],
+    3: ["A", "B", "C"]
+}, k = 3, m = 3
+
+Output: [[1, 2], [1, 3], [2, 3]]
+Explanation: All three share all three movies (order doesn't matter)
+```
+
+### Python Solution
+
+```python
+def findMovieFriendsII(
+    history: dict[int, list[str]],
+    k: int,
+    m: int
+) -> list[list[int]]:
+    # Filter customers with at least k movies and get their last k as sets
+    customer_sets = {}
+
+    for customer_id, movies in history.items():
+        if len(movies) >= k:
+            customer_sets[customer_id] = set(movies[-k:])
+
+    # Compare all pairs
+    result = []
+    customers = sorted(customer_sets.keys())
+
+    for i in range(len(customers)):
+        for j in range(i + 1, len(customers)):
+            c1, c2 = customers[i], customers[j]
+            common = len(customer_sets[c1] & customer_sets[c2])
+
+            if common >= m:
+                result.append([c1, c2])
+
+    return result
+
+
+# Optimized with inverted index for sparse data
+def findMovieFriendsIIOptimized(
+    history: dict[int, list[str]],
+    k: int,
+    m: int
+) -> list[list[int]]:
+    from collections import defaultdict
+
+    # Build customer sets
+    customer_sets = {}
+    for customer_id, movies in history.items():
+        if len(movies) >= k:
+            customer_sets[customer_id] = set(movies[-k:])
+
+    # Build inverted index: movie -> set of customers
+    movie_to_customers = defaultdict(set)
+    for customer_id, movie_set in customer_sets.items():
+        for movie in movie_set:
+            movie_to_customers[movie].add(customer_id)
+
+    # Count common movies for each pair
+    pair_counts = defaultdict(int)
+    for movie, customers in movie_to_customers.items():
+        customer_list = sorted(customers)
+        for i in range(len(customer_list)):
+            for j in range(i + 1, len(customer_list)):
+                pair_counts[(customer_list[i], customer_list[j])] += 1
+
+    # Filter pairs with at least m common movies
+    result = [[c1, c2] for (c1, c2), count in pair_counts.items() if count >= m]
+    return sorted(result)
+```
+
+### TypeScript Solution
+
+```typescript
+function findMovieFriendsII(
+    history: Map<number, string[]>,
+    k: number,
+    m: number
+): number[][] {
+    const customerSets = new Map<number, Set<string>>();
+
+    // Build sets of last k movies
+    for (const [customerId, movies] of history) {
+        if (movies.length >= k) {
+            customerSets.set(customerId, new Set(movies.slice(-k)));
+        }
+    }
+
+    const result: number[][] = [];
+    const customers = Array.from(customerSets.keys()).sort((a, b) => a - b);
+
+    // Compare all pairs
+    for (let i = 0; i < customers.length; i++) {
+        for (let j = i + 1; j < customers.length; j++) {
+            const set1 = customerSets.get(customers[i])!;
+            const set2 = customerSets.get(customers[j])!;
+
+            // Count intersection
+            let common = 0;
+            for (const movie of set1) {
+                if (set2.has(movie)) common++;
+            }
+
+            if (common >= m) {
+                result.push([customers[i], customers[j]]);
+            }
+        }
+    }
+
+    return result;
+}
+```
+
+### Interview Questions
+
+1. **How does this differ from Part I?**
+   - Part I requires exact sequence match (order matters). Part II requires set overlap (order doesn't matter).
+
+2. **How to optimize for large datasets?**
+   - Use MinHash/LSH for approximate similarity, or inverted index to avoid comparing dissimilar customers.
+
+3. **What if m is very close to k?**
+   - Most pairs will fail quickly. Early termination when common count can't reach m.
+
+### Complexity Analysis
+
+| Approach | Time | Space |
+|----------|------|-------|
+| Brute Force | O(n² × k) | O(n × k) |
+| Inverted Index | O(n × k + pairs) | O(n × k) |
 
 ---
 
@@ -730,15 +2277,143 @@ class CountdownLatch {
 
 **Type:** Coding Problem (Graph)
 
-**Problem:** You are given a list of airline tickets where `tickets[i] = [from_i, to_i]` representing flight departure and arrival airports. Reconstruct the itinerary.
+**Problem:** Given a list of airline tickets where `tickets[i] = [from, to]`, reconstruct the itinerary starting from "JFK". You must use all tickets exactly once. If multiple valid itineraries exist, return the lexicographically smallest one.
 
-**Sections:**
-- Problem Requirements
-- Sample Inputs and Outputs
-- Technical Limits
-- Interview Follow-Up Question
+**Focus:** Eulerian path, Hierholzer's algorithm, DFS with backtracking
 
-**Note:** Classic graph traversal problem (Hierholzer's algorithm)
+### Examples
+
+**Example 1:**
+```
+Input: tickets = [["MUC","LHR"],["JFK","MUC"],["SFO","SJC"],["LHR","SFO"]]
+Output: ["JFK","MUC","LHR","SFO","SJC"]
+```
+
+**Example 2:**
+```
+Input: tickets = [["JFK","SFO"],["JFK","ATL"],["SFO","ATL"],["ATL","JFK"],["ATL","SFO"]]
+Output: ["JFK","ATL","JFK","SFO","ATL","SFO"]
+Explanation: Another valid itinerary is ["JFK","SFO","ATL","JFK","ATL","SFO"] but it's larger lexicographically.
+```
+
+### Constraints
+
+- `1 <= tickets.length <= 300`
+- All airports are 3 uppercase letters
+- `tickets[i][0] != tickets[i][1]`
+- At least one valid itinerary exists
+
+### Key Insight
+
+This is an **Eulerian path** problem. Use Hierholzer's algorithm:
+1. Build adjacency list with destinations sorted in reverse order (for efficient pop)
+2. DFS from JFK, always taking the smallest available destination
+3. Add nodes to result in post-order (after exploring all edges)
+4. Reverse the result
+
+### Python Solution
+
+```python
+from collections import defaultdict
+
+def findItinerary(tickets: list[list[str]]) -> list[str]:
+    # Build adjacency list, sorted in reverse for efficient pop
+    graph = defaultdict(list)
+    for src, dst in sorted(tickets, reverse=True):
+        graph[src].append(dst)
+
+    result = []
+
+    def dfs(airport: str) -> None:
+        while graph[airport]:
+            next_airport = graph[airport].pop()
+            dfs(next_airport)
+        result.append(airport)
+
+    dfs("JFK")
+
+    return result[::-1]
+
+
+# Alternative: iterative with stack
+def findItineraryIterative(tickets: list[list[str]]) -> list[str]:
+    from collections import defaultdict
+
+    graph = defaultdict(list)
+    for src, dst in sorted(tickets, reverse=True):
+        graph[src].append(dst)
+
+    stack = ["JFK"]
+    result = []
+
+    while stack:
+        while graph[stack[-1]]:
+            stack.append(graph[stack[-1]].pop())
+        result.append(stack.pop())
+
+    return result[::-1]
+```
+
+### TypeScript Solution
+
+```typescript
+function findItinerary(tickets: string[][]): string[] {
+    // Build adjacency list
+    const graph = new Map<string, string[]>();
+
+    // Sort tickets and build graph (reverse order for pop efficiency)
+    tickets.sort((a, b) => b[1].localeCompare(a[1]));
+
+    for (const [src, dst] of tickets) {
+        if (!graph.has(src)) {
+            graph.set(src, []);
+        }
+        graph.get(src)!.push(dst);
+    }
+
+    const result: string[] = [];
+
+    function dfs(airport: string): void {
+        const destinations = graph.get(airport) || [];
+        while (destinations.length > 0) {
+            const next = destinations.pop()!;
+            dfs(next);
+        }
+        result.push(airport);
+    }
+
+    dfs("JFK");
+
+    return result.reverse();
+}
+```
+
+### Why Post-Order Works
+
+Building in post-order handles dead-ends correctly:
+- Visit all outgoing edges first
+- Only add to result when stuck (no more edges)
+- This ensures we don't get stuck with unused tickets
+
+### Interview Questions
+
+1. **Why sort in reverse order?**
+   - Pop from end of list is O(1). Sorting reverse means smallest is at end, so we always take lexicographically smallest.
+
+2. **What if no valid itinerary exists?**
+   - Problem guarantees one exists. Otherwise, check if all nodes have in-degree = out-degree (except start/end for path).
+
+3. **How to handle duplicate tickets?**
+   - The algorithm naturally handles duplicates since we pop each ticket once.
+
+### Complexity Analysis
+
+| Metric | Value |
+|--------|-------|
+| Time | O(E log E) for sorting |
+| Space | O(E) for graph and recursion |
+
+**Note:** LeetCode problem #332
 
 ---
 
@@ -746,16 +2421,188 @@ class CountdownLatch {
 
 **Type:** Coding Problem (Data Structure)
 
-**Problem:** Design and implement a key-value cache with automatic expiration.
+**Problem:** Design a key-value cache where entries automatically expire after a TTL (time-to-live). Support get, put with TTL, and efficient cleanup of expired entries.
 
-**Sections:**
-- Problem Requirements
-- Part 1: Basic Implementation
-- Part 2: Fixing Memory Leaks
-- Part 3: Limited Size Cache (LRU)
-- Full Code Examples
-- Extra Interview Topics
-- Summary of Approaches
+**Focus:** HashMap with expiration, lazy vs eager cleanup, priority queue for expiration
+
+### The Challenge
+
+Implement an `AutoExpireCache` class:
+
+- `put(key, value, ttl)` - Store key-value with TTL in seconds
+- `get(key)` - Get value if exists and not expired
+- `cleanup()` - Remove all expired entries
+- `size()` - Number of non-expired entries
+
+### Examples
+
+```
+cache = AutoExpireCache()
+cache.put("a", 1, 10)    # Expires in 10 seconds
+cache.put("b", 2, 5)     # Expires in 5 seconds
+
+# At t=0
+cache.get("a")           # returns 1
+cache.get("b")           # returns 2
+
+# At t=6
+cache.get("a")           # returns 1
+cache.get("b")           # returns None (expired)
+```
+
+### Python Solution
+
+```python
+import time
+import heapq
+from typing import Any, Optional
+
+class AutoExpireCache:
+    def __init__(self):
+        self.cache: dict[str, tuple[Any, float]] = {}  # key -> (value, expire_time)
+        self.expiry_heap: list[tuple[float, str]] = []  # (expire_time, key)
+
+    def put(self, key: str, value: Any, ttl: int) -> None:
+        """Store key-value pair with TTL in seconds."""
+        expire_time = time.time() + ttl
+        self.cache[key] = (value, expire_time)
+        heapq.heappush(self.expiry_heap, (expire_time, key))
+
+    def get(self, key: str) -> Optional[Any]:
+        """Get value if key exists and not expired."""
+        if key not in self.cache:
+            return None
+
+        value, expire_time = self.cache[key]
+
+        if time.time() > expire_time:
+            # Lazy deletion
+            del self.cache[key]
+            return None
+
+        return value
+
+    def cleanup(self) -> int:
+        """Remove all expired entries. Returns count removed."""
+        current_time = time.time()
+        removed = 0
+
+        while self.expiry_heap and self.expiry_heap[0][0] < current_time:
+            expire_time, key = heapq.heappop(self.expiry_heap)
+
+            # Check if this entry is still valid (not overwritten)
+            if key in self.cache:
+                _, stored_expire = self.cache[key]
+                if stored_expire == expire_time:
+                    del self.cache[key]
+                    removed += 1
+
+        return removed
+
+    def size(self) -> int:
+        """Return count of non-expired entries."""
+        self.cleanup()
+        return len(self.cache)
+
+
+# Simpler version without heap (lazy cleanup only)
+class AutoExpireCacheSimple:
+    def __init__(self):
+        self.cache: dict[str, tuple[Any, float]] = {}
+
+    def put(self, key: str, value: Any, ttl: int) -> None:
+        expire_time = time.time() + ttl
+        self.cache[key] = (value, expire_time)
+
+    def get(self, key: str) -> Optional[Any]:
+        if key not in self.cache:
+            return None
+
+        value, expire_time = self.cache[key]
+
+        if time.time() > expire_time:
+            del self.cache[key]
+            return None
+
+        return value
+
+    def cleanup(self) -> int:
+        current_time = time.time()
+        expired_keys = [
+            k for k, (_, exp) in self.cache.items()
+            if exp < current_time
+        ]
+        for key in expired_keys:
+            del self.cache[key]
+        return len(expired_keys)
+```
+
+### TypeScript Solution
+
+```typescript
+class AutoExpireCache<T> {
+    private cache: Map<string, { value: T; expireTime: number }> = new Map();
+
+    put(key: string, value: T, ttlSeconds: number): void {
+        const expireTime = Date.now() + ttlSeconds * 1000;
+        this.cache.set(key, { value, expireTime });
+    }
+
+    get(key: string): T | null {
+        const entry = this.cache.get(key);
+
+        if (!entry) return null;
+
+        if (Date.now() > entry.expireTime) {
+            this.cache.delete(key);
+            return null;
+        }
+
+        return entry.value;
+    }
+
+    cleanup(): number {
+        const now = Date.now();
+        let removed = 0;
+
+        for (const [key, entry] of this.cache) {
+            if (now > entry.expireTime) {
+                this.cache.delete(key);
+                removed++;
+            }
+        }
+
+        return removed;
+    }
+
+    size(): number {
+        this.cleanup();
+        return this.cache.size;
+    }
+}
+```
+
+### Interview Questions
+
+1. **Lazy vs eager expiration?**
+   - Lazy: Check on get(), saves CPU but wastes memory. Eager: Background thread/timer, uses CPU but saves memory.
+
+2. **How to handle high write throughput?**
+   - Batch cleanup periodically, use probabilistic cleanup (random sample check).
+
+3. **How to add LRU eviction on top?**
+   - Combine with doubly-linked list (like LRU Cache). Evict by either LRU or expiration.
+
+4. **Thread safety?**
+   - Use read-write locks, or concurrent hash map with atomic operations.
+
+### Complexity Analysis
+
+| Operation | Simple | With Heap |
+|-----------|--------|-----------|
+| put | O(1) | O(log n) |
+| get | O(1) | O(1) |
+| cleanup | O(n) | O(k log n) where k = expired |
 
 ---
 
@@ -765,13 +2612,100 @@ class CountdownLatch {
 
 **Problem:** Given an integer array `nums`, return true if any value appears more than once in the array, otherwise return false.
 
-**Sections:**
-- Problem Requirements
-- Sample Cases
-- Solution Strategy
-- Code Implementation
+**Focus:** HashSet for O(1) lookups, early termination
 
-**Note:** Classic LeetCode problem #217
+### Examples
+
+**Example 1:**
+```
+Input: nums = [1,2,3,1]
+Output: true
+```
+
+**Example 2:**
+```
+Input: nums = [1,2,3,4]
+Output: false
+```
+
+**Example 3:**
+```
+Input: nums = [1,1,1,3,3,4,3,2,4,2]
+Output: true
+```
+
+### Constraints
+
+- `1 <= nums.length <= 10^5`
+- `-10^9 <= nums[i] <= 10^9`
+
+### Python Solution
+
+```python
+def containsDuplicate(nums: list[int]) -> bool:
+    seen = set()
+    for num in nums:
+        if num in seen:
+            return True
+        seen.add(num)
+    return False
+
+# One-liner
+def containsDuplicateOneLiner(nums: list[int]) -> bool:
+    return len(nums) != len(set(nums))
+```
+
+### TypeScript Solution
+
+```typescript
+function containsDuplicate(nums: number[]): boolean {
+    const seen = new Set<number>();
+
+    for (const num of nums) {
+        if (seen.has(num)) {
+            return true;
+        }
+        seen.add(num);
+    }
+
+    return false;
+}
+
+// One-liner
+function containsDuplicateOneLiner(nums: number[]): boolean {
+    return nums.length !== new Set(nums).size;
+}
+```
+
+### Alternative: Sorting
+
+```python
+def containsDuplicateSorting(nums: list[int]) -> bool:
+    nums.sort()
+    for i in range(1, len(nums)):
+        if nums[i] == nums[i - 1]:
+            return True
+    return False
+```
+
+### Interview Questions
+
+1. **Trade-offs between approaches?**
+   - HashSet: O(n) time, O(n) space
+   - Sorting: O(n log n) time, O(1) space (in-place)
+
+2. **What if the array is very large?**
+   - External sorting, or probabilistic data structures (Bloom filter) for approximate answer.
+
+### Complexity Analysis
+
+| Approach | Time | Space |
+|----------|------|-------|
+| HashSet | O(n) | O(n) |
+| Sorting | O(n log n) | O(1) |
+| One-liner | O(n) | O(n) |
+
+**Note:** LeetCode problem #217
 
 ---
 
@@ -794,14 +2728,196 @@ class CountdownLatch {
 
 **Type:** Coding Problem (Analytics)
 
-**Problem:** Analyze user engagement patterns across different content.
+**Problem:** Given user viewing data (user_id, content_id, watch_duration, timestamp), analyze engagement patterns to identify power users, trending content, and optimal content recommendations.
 
-**Sections:**
-- User Engagement Analysis
-- Data Format
-- The Goal
-- Example Walkthrough
-- Input Constraints
+**Focus:** Data aggregation, grouping, statistical analysis
+
+### The Challenge
+
+Implement functions to analyze user engagement:
+
+1. `getTopUsers(k)` - Get k users with highest total watch time
+2. `getTrendingContent(window)` - Get content with most views in time window
+3. `getUserEngagementScore(user_id)` - Calculate engagement score for user
+
+### Examples
+
+```
+data = [
+    {"user": 1, "content": "A", "duration": 30, "ts": 100},
+    {"user": 1, "content": "B", "duration": 45, "ts": 200},
+    {"user": 2, "content": "A", "duration": 60, "ts": 150},
+    {"user": 1, "content": "A", "duration": 30, "ts": 300},
+]
+
+analyzer = EngagementAnalyzer(data)
+analyzer.getTopUsers(1)           # [1] (total: 105 minutes)
+analyzer.getTrendingContent(100, 250)  # "A" (3 views in window)
+analyzer.getUserEngagementScore(1)     # High (frequent, diverse viewing)
+```
+
+### Python Solution
+
+```python
+from collections import defaultdict
+from typing import Any
+import heapq
+
+class EngagementAnalyzer:
+    def __init__(self, events: list[dict[str, Any]]):
+        self.events = events
+        self._preprocess()
+
+    def _preprocess(self):
+        """Build aggregated data structures."""
+        self.user_watch_time = defaultdict(int)
+        self.user_content = defaultdict(set)
+        self.content_views = defaultdict(list)  # content -> [(timestamp, duration)]
+
+        for event in self.events:
+            user = event["user"]
+            content = event["content"]
+            duration = event["duration"]
+            ts = event["ts"]
+
+            self.user_watch_time[user] += duration
+            self.user_content[user].add(content)
+            self.content_views[content].append((ts, duration))
+
+    def getTopUsers(self, k: int) -> list[int]:
+        """Get k users with highest total watch time."""
+        # Use heap for efficiency
+        return heapq.nlargest(
+            k,
+            self.user_watch_time.keys(),
+            key=lambda u: self.user_watch_time[u]
+        )
+
+    def getTrendingContent(self, start_ts: int, end_ts: int) -> list[str]:
+        """Get content sorted by views in time window."""
+        content_view_count = defaultdict(int)
+
+        for content, views in self.content_views.items():
+            for ts, _ in views:
+                if start_ts <= ts <= end_ts:
+                    content_view_count[content] += 1
+
+        return sorted(
+            content_view_count.keys(),
+            key=lambda c: content_view_count[c],
+            reverse=True
+        )
+
+    def getUserEngagementScore(self, user_id: int) -> float:
+        """
+        Calculate engagement score based on:
+        - Total watch time (normalized)
+        - Content diversity (unique content / total views)
+        - Session frequency
+        """
+        if user_id not in self.user_watch_time:
+            return 0.0
+
+        watch_time = self.user_watch_time[user_id]
+        unique_content = len(self.user_content[user_id])
+
+        # Count sessions (events) for this user
+        session_count = sum(1 for e in self.events if e["user"] == user_id)
+
+        # Simple scoring formula
+        max_watch_time = max(self.user_watch_time.values())
+        max_diversity = max(len(c) for c in self.user_content.values())
+
+        time_score = watch_time / max_watch_time if max_watch_time > 0 else 0
+        diversity_score = unique_content / max_diversity if max_diversity > 0 else 0
+        frequency_score = min(session_count / 10, 1.0)  # Cap at 10 sessions
+
+        return (time_score * 0.4 + diversity_score * 0.3 + frequency_score * 0.3)
+```
+
+### TypeScript Solution
+
+```typescript
+interface ViewEvent {
+    user: number;
+    content: string;
+    duration: number;
+    ts: number;
+}
+
+class EngagementAnalyzer {
+    private userWatchTime: Map<number, number> = new Map();
+    private userContent: Map<number, Set<string>> = new Map();
+    private contentViews: Map<string, Array<[number, number]>> = new Map();
+
+    constructor(events: ViewEvent[]) {
+        this.preprocess(events);
+    }
+
+    private preprocess(events: ViewEvent[]): void {
+        for (const event of events) {
+            // User watch time
+            this.userWatchTime.set(
+                event.user,
+                (this.userWatchTime.get(event.user) || 0) + event.duration
+            );
+
+            // User content set
+            if (!this.userContent.has(event.user)) {
+                this.userContent.set(event.user, new Set());
+            }
+            this.userContent.get(event.user)!.add(event.content);
+
+            // Content views
+            if (!this.contentViews.has(event.content)) {
+                this.contentViews.set(event.content, []);
+            }
+            this.contentViews.get(event.content)!.push([event.ts, event.duration]);
+        }
+    }
+
+    getTopUsers(k: number): number[] {
+        return Array.from(this.userWatchTime.entries())
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, k)
+            .map(([userId]) => userId);
+    }
+
+    getTrendingContent(startTs: number, endTs: number): string[] {
+        const viewCounts = new Map<string, number>();
+
+        for (const [content, views] of this.contentViews) {
+            const count = views.filter(([ts]) => ts >= startTs && ts <= endTs).length;
+            if (count > 0) {
+                viewCounts.set(content, count);
+            }
+        }
+
+        return Array.from(viewCounts.entries())
+            .sort((a, b) => b[1] - a[1])
+            .map(([content]) => content);
+    }
+}
+```
+
+### Interview Questions
+
+1. **How to handle real-time updates?**
+   - Streaming aggregation with windowed counts, use Apache Kafka + Flink.
+
+2. **How to detect binge-watching behavior?**
+   - Look for consecutive views of same series with short gaps.
+
+3. **How to identify churning users?**
+   - Analyze decline in watch time, longer gaps between sessions.
+
+### Complexity Analysis
+
+| Operation | Time | Space |
+|-----------|------|-------|
+| Preprocess | O(n) | O(n) |
+| getTopUsers | O(u log k) | O(k) |
+| getTrendingContent | O(v) | O(c) |
 
 ---
 
@@ -822,10 +2938,205 @@ class CountdownLatch {
 
 **Problem:** Given an array of integers `nums` and an integer `target`, return all pairs of numbers where one of the four arithmetic operations (+, -, *, /) produces exactly the target value.
 
-**Sections:**
-- Problem Statement
-- Sample Cases
-- Input Limits
+**Focus:** Pair enumeration, arithmetic operations, handling edge cases (division by zero)
+
+### Examples
+
+**Example 1:**
+```
+Input: nums = [1, 2, 3, 4, 5], target = 5
+Output: [[1,4], [2,3], [1,5], [5,1], [10,2]]
+Explanation:
+- 1 + 4 = 5 ✓
+- 2 + 3 = 5 ✓
+- 1 * 5 = 5 ✓
+- 5 / 1 = 5 ✓
+- 10 / 2 = 5 (if 10 were in array)
+```
+
+**Example 2:**
+```
+Input: nums = [2, 3, 6, 9], target = 3
+Output: [[6,3], [9,3], [6,2], [9,6]]
+Explanation:
+- 6 / 2 = 3 ✓
+- 9 / 3 = 3 ✓
+- 6 - 3 = 3 ✓
+- 9 - 6 = 3 ✓
+```
+
+### Constraints
+
+- Pairs can use the same index only if there are duplicates at different indices
+- Division must result in an integer (no remainders)
+- Avoid division by zero
+
+### Python Solution
+
+```python
+def findPairsMatchingTarget(nums: list[int], target: int) -> list[list[int]]:
+    result = []
+    n = len(nums)
+    seen_pairs = set()
+
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                continue
+
+            a, b = nums[i], nums[j]
+            pair_key = (min(a, b), max(a, b))  # For deduplication
+
+            # Check all operations
+            operations = []
+
+            # Addition: a + b = target
+            if a + b == target:
+                operations.append((a, b, '+'))
+
+            # Subtraction: a - b = target
+            if a - b == target:
+                operations.append((a, b, '-'))
+
+            # Multiplication: a * b = target
+            if a * b == target:
+                operations.append((a, b, '*'))
+
+            # Division: a / b = target (b != 0, no remainder)
+            if b != 0 and a % b == 0 and a // b == target:
+                operations.append((a, b, '/'))
+
+            for op_a, op_b, op in operations:
+                result_key = (op_a, op_b, op)
+                if result_key not in seen_pairs:
+                    seen_pairs.add(result_key)
+                    result.append([op_a, op_b])
+
+    return result
+
+
+# Optimized with hash lookups
+def findPairsMatchingTargetOptimized(
+    nums: list[int],
+    target: int
+) -> list[tuple[int, int, str]]:
+    """Returns pairs with the operation that achieves target."""
+    from collections import Counter
+
+    result = []
+    num_count = Counter(nums)
+    num_set = set(nums)
+
+    for a in num_set:
+        # Addition: a + b = target -> b = target - a
+        b = target - a
+        if b in num_set:
+            if a != b or num_count[a] >= 2:
+                result.append((a, b, '+'))
+
+        # Subtraction: a - b = target -> b = a - target
+        b = a - target
+        if b in num_set:
+            if a != b or num_count[a] >= 2:
+                result.append((a, b, '-'))
+
+        # Multiplication: a * b = target -> b = target / a
+        if a != 0 and target % a == 0:
+            b = target // a
+            if b in num_set:
+                if a != b or num_count[a] >= 2:
+                    result.append((a, b, '*'))
+
+        # Division: a / b = target -> b = a / target
+        if target != 0 and a % target == 0:
+            b = a // target
+            if b in num_set and b != 0:
+                if a != b or num_count[a] >= 2:
+                    result.append((a, b, '/'))
+
+    return result
+```
+
+### TypeScript Solution
+
+```typescript
+function findPairsMatchingTarget(
+    nums: number[],
+    target: number
+): Array<[number, number, string]> {
+    const result: Array<[number, number, string]> = [];
+    const numSet = new Set(nums);
+    const numCount = new Map<number, number>();
+
+    for (const num of nums) {
+        numCount.set(num, (numCount.get(num) || 0) + 1);
+    }
+
+    const seen = new Set<string>();
+
+    for (const a of numSet) {
+        // Addition
+        const addB = target - a;
+        if (numSet.has(addB) && !seen.has(`${a},${addB},+`)) {
+            if (a !== addB || numCount.get(a)! >= 2) {
+                result.push([a, addB, '+']);
+                seen.add(`${a},${addB},+`);
+            }
+        }
+
+        // Subtraction
+        const subB = a - target;
+        if (numSet.has(subB) && !seen.has(`${a},${subB},-`)) {
+            if (a !== subB || numCount.get(a)! >= 2) {
+                result.push([a, subB, '-']);
+                seen.add(`${a},${subB},-`);
+            }
+        }
+
+        // Multiplication
+        if (a !== 0 && target % a === 0) {
+            const mulB = target / a;
+            if (numSet.has(mulB) && !seen.has(`${a},${mulB},*`)) {
+                if (a !== mulB || numCount.get(a)! >= 2) {
+                    result.push([a, mulB, '*']);
+                    seen.add(`${a},${mulB},*`);
+                }
+            }
+        }
+
+        // Division
+        if (target !== 0 && a % target === 0) {
+            const divB = a / target;
+            if (divB !== 0 && numSet.has(divB) && !seen.has(`${a},${divB},/`)) {
+                if (a !== divB || numCount.get(a)! >= 2) {
+                    result.push([a, divB, '/']);
+                    seen.add(`${a},${divB},/`);
+                }
+            }
+        }
+    }
+
+    return result;
+}
+```
+
+### Interview Questions
+
+1. **How to handle floating point targets?**
+   - Use epsilon comparison for division results.
+
+2. **What if we need triplets instead of pairs?**
+   - Three-sum style approach with two-pointer after sorting.
+
+3. **How to handle very large arrays?**
+   - Hash-based approach is O(n), efficient for large inputs.
+
+### Complexity Analysis
+
+| Approach | Time | Space |
+|----------|------|-------|
+| Brute Force | O(n²) | O(n²) for results |
+| Hash Optimized | O(n) | O(n) |
 
 ---
 
@@ -2111,4 +4422,4 @@ def longestPalindromeDP(s: str) -> str:
 
 ---
 
-*Last updated: 2026-04-17*
+*Last updated: 2026-04-18*
