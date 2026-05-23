@@ -2562,4 +2562,581 @@ Where e = number of events, h = number of unique hashtags.
 
 ---
 
+## 11. Grid Drop and Remove Duplicates (Connect-4 Style)
+
+**Problem Statement:**
+Build a tool that acts like a Connect-4 board. You will work with a grid that has `m` rows and `n` columns.
+
+- An empty spot is marked as `"0"`
+- Spots with pieces are marked with letters like `"R"`, `"Y"`, or `"B"`
+
+**Interview Structure:**
+| Part | Task | Key Technique |
+|------|------|---------------|
+| Part 1 | Drop a piece into a specific column | Column pointers for O(1) drops |
+| Part 2 | Remove groups of same-color pieces (≥2 connected) | BFS/DFS flood fill |
+| Part 3 | Apply gravity after removal | Column compaction + pointer update |
+
+---
+
+### Part 1: Dropping Pieces
+
+**Task Requirements:**
+Write a function `drop(color: str, col: int) -> list[list[str]]`
+
+**Rules:**
+- The piece must fall to the lowest empty row in that column
+- If the column is full, raise an error
+- Return the grid state after the drop
+
+**Example:**
+```
+Imagine a 3x3 empty grid. Calling drop("Y", 1) repeatedly:
+
+0 0 0      0 0 0      0 Y 0      0 Y 0
+0 0 0  ->  0 Y 0  ->  0 Y 0  ->  0 Y 0  (4th call fails: column full)
+0 Y 0      0 Y 0      0 Y 0      0 Y 0
+```
+
+**Key Insight:**
+A naive approach checks the column from bottom to top every time (O(m)). Optimize by tracking `next_free_row[col]` for O(1) drops.
+
+**Python Solution:**
+```python
+class GridGame:
+    def __init__(self, rows: int, cols: int):
+        self.rows = rows
+        self.cols = cols
+        self.grid = [["0"] * cols for _ in range(rows)]
+        # Stores the row index where the next piece falls for column c
+        self.next_free_row = [rows - 1] * cols
+
+    def drop(self, color: str, col: int) -> list[list[str]]:
+        if col < 0 or col >= self.cols:
+            raise ValueError("invalid column")
+
+        r = self.next_free_row[col]
+        if r < 0:
+            raise ValueError("column is full")
+
+        self.grid[r][col] = color
+        self.next_free_row[col] -= 1
+        return self.grid
+```
+
+**Java Solution:**
+```java
+class GridGame {
+    private int rows, cols;
+    private String[][] grid;
+    private int[] nextFreeRow;
+
+    public GridGame(int rows, int cols) {
+        this.rows = rows;
+        this.cols = cols;
+        this.grid = new String[rows][cols];
+        this.nextFreeRow = new int[cols];
+
+        for (int r = 0; r < rows; r++) {
+            for (int c = 0; c < cols; c++) {
+                grid[r][c] = "0";
+            }
+        }
+        for (int c = 0; c < cols; c++) {
+            nextFreeRow[c] = rows - 1;
+        }
+    }
+
+    public String[][] drop(String color, int col) {
+        if (col < 0 || col >= cols) {
+            throw new IllegalArgumentException("invalid column");
+        }
+
+        int r = nextFreeRow[col];
+        if (r < 0) {
+            throw new IllegalArgumentException("column is full");
+        }
+
+        grid[r][col] = color;
+        nextFreeRow[col]--;
+        return grid;
+    }
+}
+```
+
+**TypeScript Solution:**
+```typescript
+class GridGame {
+    private rows: number;
+    private cols: number;
+    private grid: string[][];
+    private nextFreeRow: number[];
+
+    constructor(rows: number, cols: number) {
+        this.rows = rows;
+        this.cols = cols;
+        this.grid = Array.from({ length: rows }, () => Array(cols).fill("0"));
+        this.nextFreeRow = Array(cols).fill(rows - 1);
+    }
+
+    drop(color: string, col: number): string[][] {
+        if (col < 0 || col >= this.cols) {
+            throw new Error("invalid column");
+        }
+
+        const r = this.nextFreeRow[col];
+        if (r < 0) {
+            throw new Error("column is full");
+        }
+
+        this.grid[r][col] = color;
+        this.nextFreeRow[col]--;
+        return this.grid;
+    }
+}
+```
+
+**Complexity - Part 1:**
+| Operation | Time | Space |
+|-----------|------|-------|
+| drop (optimized) | O(1) | O(n) for column pointers |
+
+---
+
+### Part 2: Removing Matching Groups
+
+**Task Requirements:**
+Write a function `remove_duplicate() -> list[list[str]]`
+
+**Rules:**
+- Find groups of the same color that are touching (connected up, down, left, or right)
+- If a group has 2 or more pieces, remove them (change to `"0"`)
+- Return the updated grid
+
+**Example:**
+```
+R Y 0       R 0 0
+B Y Y  =>   0 0 0
+B R 0       0 R 0
+
+Y forms a group of 3 (connected) → removed
+B forms a group of 2 (connected vertically) → removed
+R's are not connected → both stay (groups of size 1)
+```
+
+**Key Insight:**
+Use BFS or DFS to find connected components. Check each component's size and remove if ≥ 2.
+
+**Python Solution:**
+```python
+from collections import deque
+
+class GridGame:
+    # ... (previous code)
+
+    def remove_duplicate(self) -> list[list[str]]:
+        rows, cols = self.rows, self.cols
+        seen = [[False] * cols for _ in range(rows)]
+        to_clear: list[tuple[int, int]] = []
+
+        for r in range(rows):
+            for c in range(cols):
+                color = self.grid[r][c]
+                if color == "0" or seen[r][c]:
+                    continue
+
+                # BFS to find connected component
+                q = deque([(r, c)])
+                seen[r][c] = True
+                comp = [(r, c)]
+
+                while q:
+                    x, y = q.popleft()
+                    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                        nx, ny = x + dx, y + dy
+                        if nx < 0 or nx >= rows or ny < 0 or ny >= cols:
+                            continue
+                        if seen[nx][ny] or self.grid[nx][ny] != color:
+                            continue
+                        seen[nx][ny] = True
+                        q.append((nx, ny))
+                        comp.append((nx, ny))
+
+                # Remove if group size >= 2
+                if len(comp) >= 2:
+                    to_clear.extend(comp)
+
+        for r, c in to_clear:
+            self.grid[r][c] = "0"
+
+        return self.grid
+```
+
+**Java Solution:**
+```java
+import java.util.*;
+
+class GridGame {
+    // ... (previous code)
+
+    public String[][] removeDuplicate() {
+        boolean[][] seen = new boolean[rows][cols];
+        List<int[]> toClear = new ArrayList<>();
+        int[][] dirs = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+
+        for (int r = 0; r < rows; r++) {
+            for (int c = 0; c < cols; c++) {
+                String color = grid[r][c];
+                if (color.equals("0") || seen[r][c]) {
+                    continue;
+                }
+
+                // BFS to find connected component
+                Queue<int[]> q = new LinkedList<>();
+                q.offer(new int[]{r, c});
+                seen[r][c] = true;
+                List<int[]> comp = new ArrayList<>();
+                comp.add(new int[]{r, c});
+
+                while (!q.isEmpty()) {
+                    int[] curr = q.poll();
+                    int x = curr[0], y = curr[1];
+
+                    for (int[] dir : dirs) {
+                        int nx = x + dir[0], ny = y + dir[1];
+                        if (nx < 0 || nx >= rows || ny < 0 || ny >= cols) {
+                            continue;
+                        }
+                        if (seen[nx][ny] || !grid[nx][ny].equals(color)) {
+                            continue;
+                        }
+                        seen[nx][ny] = true;
+                        q.offer(new int[]{nx, ny});
+                        comp.add(new int[]{nx, ny});
+                    }
+                }
+
+                if (comp.size() >= 2) {
+                    toClear.addAll(comp);
+                }
+            }
+        }
+
+        for (int[] cell : toClear) {
+            grid[cell[0]][cell[1]] = "0";
+        }
+
+        return grid;
+    }
+}
+```
+
+**TypeScript Solution:**
+```typescript
+class GridGame {
+    // ... (previous code)
+
+    removeDuplicate(): string[][] {
+        const seen: boolean[][] = Array.from(
+            { length: this.rows },
+            () => Array(this.cols).fill(false)
+        );
+        const toClear: [number, number][] = [];
+        const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+
+        for (let r = 0; r < this.rows; r++) {
+            for (let c = 0; c < this.cols; c++) {
+                const color = this.grid[r][c];
+                if (color === "0" || seen[r][c]) {
+                    continue;
+                }
+
+                // BFS to find connected component
+                const q: [number, number][] = [[r, c]];
+                seen[r][c] = true;
+                const comp: [number, number][] = [[r, c]];
+
+                while (q.length > 0) {
+                    const [x, y] = q.shift()!;
+
+                    for (const [dx, dy] of dirs) {
+                        const nx = x + dx, ny = y + dy;
+                        if (nx < 0 || nx >= this.rows || ny < 0 || ny >= this.cols) {
+                            continue;
+                        }
+                        if (seen[nx][ny] || this.grid[nx][ny] !== color) {
+                            continue;
+                        }
+                        seen[nx][ny] = true;
+                        q.push([nx, ny]);
+                        comp.push([nx, ny]);
+                    }
+                }
+
+                if (comp.length >= 2) {
+                    toClear.push(...comp);
+                }
+            }
+        }
+
+        for (const [r, c] of toClear) {
+            this.grid[r][c] = "0";
+        }
+
+        return this.grid;
+    }
+}
+```
+
+**Complexity - Part 2:**
+| Operation | Time | Space |
+|-----------|------|-------|
+| remove_duplicate | O(m × n) | O(m × n) for seen array |
+
+---
+
+### Part 3: Handling Gravity
+
+**Task Requirements:**
+After removing pieces, the remaining pieces above must fall down to fill the gaps. The `drop` and `remove_duplicate` functions must continue to work correctly in any order.
+
+**Key Insight:**
+After applying gravity, the `next_free_row` pointers must be recalculated based on the new grid state.
+
+**Python Solution:**
+```python
+class GridGame:
+    # ... (previous code)
+
+    def apply_gravity(self) -> list[list[str]]:
+        rows, cols = self.rows, self.cols
+
+        for c in range(cols):
+            write = rows - 1
+
+            # Move non-empty cells to the bottom
+            for r in range(rows - 1, -1, -1):
+                if self.grid[r][c] != "0":
+                    self.grid[write][c] = self.grid[r][c]
+                    if write != r:
+                        self.grid[r][c] = "0"
+                    write -= 1
+
+            # Update the tracker for the next drop
+            self.next_free_row[c] = write
+
+        return self.grid
+
+    def remove_duplicate_and_fall(self) -> list[list[str]]:
+        """Convenience method: remove matching groups then apply gravity."""
+        self.remove_duplicate()
+        self.apply_gravity()
+        return self.grid
+```
+
+**Java Solution:**
+```java
+class GridGame {
+    // ... (previous code)
+
+    public String[][] applyGravity() {
+        for (int c = 0; c < cols; c++) {
+            int write = rows - 1;
+
+            // Move non-empty cells to the bottom
+            for (int r = rows - 1; r >= 0; r--) {
+                if (!grid[r][c].equals("0")) {
+                    grid[write][c] = grid[r][c];
+                    if (write != r) {
+                        grid[r][c] = "0";
+                    }
+                    write--;
+                }
+            }
+
+            // Update the tracker for the next drop
+            nextFreeRow[c] = write;
+        }
+
+        return grid;
+    }
+
+    public String[][] removeDuplicateAndFall() {
+        removeDuplicate();
+        applyGravity();
+        return grid;
+    }
+}
+```
+
+**TypeScript Solution:**
+```typescript
+class GridGame {
+    // ... (previous code)
+
+    applyGravity(): string[][] {
+        for (let c = 0; c < this.cols; c++) {
+            let write = this.rows - 1;
+
+            // Move non-empty cells to the bottom
+            for (let r = this.rows - 1; r >= 0; r--) {
+                if (this.grid[r][c] !== "0") {
+                    this.grid[r][c] = this.grid[write][c];
+                    if (write !== r) {
+                        this.grid[r][c] = "0";
+                    }
+                    write--;
+                }
+            }
+
+            // Update the tracker for the next drop
+            this.nextFreeRow[c] = write;
+        }
+
+        return this.grid;
+    }
+
+    removeDuplicateAndFall(): string[][] {
+        this.removeDuplicate();
+        this.applyGravity();
+        return this.grid;
+    }
+}
+```
+
+**Complexity - Part 3:**
+| Operation | Time | Space |
+|-----------|------|-------|
+| apply_gravity | O(m × n) | O(1) extra |
+| remove_duplicate_and_fall | O(m × n) | O(m × n) from BFS seen array |
+
+---
+
+### Complete Solution (Python)
+
+```python
+from collections import deque
+
+class GridGame:
+    def __init__(self, rows: int, cols: int):
+        self.rows = rows
+        self.cols = cols
+        self.grid = [["0"] * cols for _ in range(rows)]
+        self.next_free_row = [rows - 1] * cols
+
+    def drop(self, color: str, col: int) -> list[list[str]]:
+        if col < 0 or col >= self.cols:
+            raise ValueError("invalid column")
+
+        r = self.next_free_row[col]
+        if r < 0:
+            raise ValueError("column is full")
+
+        self.grid[r][col] = color
+        self.next_free_row[col] -= 1
+        return self.grid
+
+    def remove_duplicate(self) -> list[list[str]]:
+        seen = [[False] * self.cols for _ in range(self.rows)]
+        to_clear: list[tuple[int, int]] = []
+
+        for r in range(self.rows):
+            for c in range(self.cols):
+                color = self.grid[r][c]
+                if color == "0" or seen[r][c]:
+                    continue
+
+                q = deque([(r, c)])
+                seen[r][c] = True
+                comp = [(r, c)]
+
+                while q:
+                    x, y = q.popleft()
+                    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                        nx, ny = x + dx, y + dy
+                        if 0 <= nx < self.rows and 0 <= ny < self.cols:
+                            if not seen[nx][ny] and self.grid[nx][ny] == color:
+                                seen[nx][ny] = True
+                                q.append((nx, ny))
+                                comp.append((nx, ny))
+
+                if len(comp) >= 2:
+                    to_clear.extend(comp)
+
+        for r, c in to_clear:
+            self.grid[r][c] = "0"
+
+        return self.grid
+
+    def apply_gravity(self) -> list[list[str]]:
+        for c in range(self.cols):
+            write = self.rows - 1
+            for r in range(self.rows - 1, -1, -1):
+                if self.grid[r][c] != "0":
+                    self.grid[write][c] = self.grid[r][c]
+                    if write != r:
+                        self.grid[r][c] = "0"
+                    write -= 1
+            self.next_free_row[c] = write
+
+        return self.grid
+
+    def remove_duplicate_and_fall(self) -> list[list[str]]:
+        self.remove_duplicate()
+        self.apply_gravity()
+        return self.grid
+```
+
+**Walkthrough:**
+```
+Initial 4x4 grid:
+
+0 0 0 0
+0 0 0 0
+0 0 0 0
+0 0 0 0
+
+After drop("R", 1), drop("R", 1), drop("Y", 2), drop("Y", 1):
+
+0 0 0 0
+0 Y 0 0
+0 R Y 0
+0 R 0 0
+
+After remove_duplicate():
+  - R's at (2,1) and (3,1) form a group of 2 → removed
+  - Y's at (1,1) and (2,2) are NOT connected → both stay
+
+0 0 0 0
+0 Y 0 0
+0 0 Y 0
+0 0 0 0
+
+After apply_gravity():
+
+0 0 0 0
+0 0 0 0
+0 0 0 0
+0 Y Y 0
+
+next_free_row updated: [3, 2, 2, 3]
+```
+
+---
+
+### Summary
+
+| Part | Operation | Time | Space | Key Point |
+|------|-----------|------|-------|-----------|
+| 1 | drop | O(1) | O(n) | Maintain `next_free_row` pointers |
+| 2 | remove_duplicate | O(m×n) | O(m×n) | BFS/DFS to find connected components |
+| 3 | apply_gravity | O(m×n) | O(1) | Compact columns, update pointers |
+
+**Important Takeaways:**
+- Keep `drop` fast (O(1)) by maintaining the `next_free_row` tracker
+- When the grid changes significantly (gravity), update the column pointers
+- This ensures mixing actions like `drop → remove → gravity → drop` works correctly
+
+---
+
 *Last updated: 2026-04-19*
