@@ -295,6 +295,205 @@ def maxBoxesBothEnds(boxes: list[int], warehouse: list[int]) -> int:
 
 ---
 
+### Cheapest Flights Within K Stops (LC 787)
+
+**Problem:** Find the cheapest price from `src` to `dst` with at most `k` stops (k+1 edges). Return -1 if no such route exists.
+
+**Example 1:**
+```
+n = 4, flights = [[0,1,100],[1,2,100],[2,0,100],[1,3,600],[2,3,200]]
+src = 0, dst = 3, k = 1
+
+    100     600
+0 -----> 1 -----> 3
+|        |        ^
+|100     |100     |200
+v        v        |
+2 <----- 2 -------+
+
+Output: 700 (0 -> 1 -> 3)
+With k=1 stop, can only use 2 flights
+```
+
+**Example 2:**
+```
+Same graph, but k = 2
+Output: 400 (0 -> 1 -> 2 -> 3)
+With k=2 stops, can use 3 flights
+```
+
+**Solution 1: BFS (Level-by-Level)**
+
+```python
+from collections import defaultdict, deque
+
+def findCheapestPrice(n: int, flights: list[list[int]], src: int, dst: int, k: int) -> int:
+    """
+    BFS level-by-level where each level = one flight.
+    Track minimum cost to reach each node.
+
+    Time: O(k * E) where E = number of flights
+    Space: O(n)
+    """
+    graph = defaultdict(list)
+    for u, v, price in flights:
+        graph[u].append((v, price))
+
+    # prices[i] = minimum cost to reach node i
+    prices = [float('inf')] * n
+    prices[src] = 0
+
+    queue = deque([(src, 0)])  # (node, cost)
+    stops = 0
+
+    while queue and stops <= k:
+        # Process all nodes at current level (same number of stops)
+        for _ in range(len(queue)):
+            node, cost = queue.popleft()
+
+            for neighbor, price in graph[node]:
+                new_cost = cost + price
+
+                # Only add to queue if we found a better price
+                if new_cost < prices[neighbor]:
+                    prices[neighbor] = new_cost
+                    queue.append((neighbor, new_cost))
+
+        stops += 1
+
+    return prices[dst] if prices[dst] != float('inf') else -1
+```
+
+**Solution 2: Bellman-Ford (K+1 Relaxations)**
+
+```python
+def findCheapestPrice(n: int, flights: list[list[int]], src: int, dst: int, k: int) -> int:
+    """
+    Bellman-Ford limited to k+1 iterations (at most k+1 edges).
+
+    Key: Use previous iteration's prices to avoid using more edges than allowed.
+
+    Time: O(k * E)
+    Space: O(n)
+    """
+    # prices[i] = min cost to reach node i
+    prices = [float('inf')] * n
+    prices[src] = 0
+
+    # Relax edges k+1 times (k stops = k+1 edges)
+    for _ in range(k + 1):
+        # Use copy to ensure we only use paths from previous iteration
+        temp = prices[:]
+
+        for u, v, price in flights:
+            if prices[u] != float('inf'):
+                temp[v] = min(temp[v], prices[u] + price)
+
+        prices = temp
+
+    return prices[dst] if prices[dst] != float('inf') else -1
+```
+
+**Solution 3: Modified Dijkstra**
+
+```python
+import heapq
+from collections import defaultdict
+
+def findCheapestPrice(n: int, flights: list[list[int]], src: int, dst: int, k: int) -> int:
+    """
+    Dijkstra's with stops constraint.
+
+    Key difference from standard Dijkstra: A node can be visited multiple times
+    with different stop counts (might find cheaper path with more stops later).
+
+    Time: O(E * k * log(E * k))
+    Space: O(n * k)
+    """
+    graph = defaultdict(list)
+    for u, v, price in flights:
+        graph[u].append((v, price))
+
+    # (cost, node, stops_remaining)
+    heap = [(0, src, k + 1)]
+
+    # Track minimum stops to reach each node
+    # (can revisit with more stops if cheaper path exists)
+    visited = {}  # node -> min stops used to reach it with better/equal cost
+
+    while heap:
+        cost, node, stops = heapq.heappop(heap)
+
+        if node == dst:
+            return cost
+
+        if stops <= 0:
+            continue
+
+        # Skip if we've visited this node with more stops remaining
+        # (we already found a path that's at least as good)
+        if node in visited and visited[node] >= stops:
+            continue
+        visited[node] = stops
+
+        for neighbor, price in graph[node]:
+            heapq.heappush(heap, (cost + price, neighbor, stops - 1))
+
+    return -1
+```
+
+**Solution 4: Dynamic Programming**
+
+```python
+def findCheapestPrice(n: int, flights: list[list[int]], src: int, dst: int, k: int) -> int:
+    """
+    DP: dp[t][i] = min cost to reach node i using exactly t flights.
+
+    Time: O(k * E)
+    Space: O(n) with space optimization
+    """
+    # dp[i] = min cost to reach node i
+    dp = [float('inf')] * n
+    dp[src] = 0
+
+    for _ in range(k + 1):
+        temp = dp[:]
+        for u, v, price in flights:
+            if dp[u] != float('inf'):
+                temp[v] = min(temp[v], dp[u] + price)
+        dp = temp
+
+    return dp[dst] if dp[dst] != float('inf') else -1
+```
+
+**Comparison:**
+
+| Approach | Time | Space | Notes |
+|----------|------|-------|-------|
+| BFS | O(k * E) | O(n) | Level-by-level, intuitive |
+| Bellman-Ford | O(k * E) | O(n) | Simple, uses temp array |
+| Dijkstra | O(Ek log Ek) | O(nk) | Fastest for sparse graphs |
+| DP | O(k * E) | O(n) | Same as Bellman-Ford |
+
+**Key Insight: Why Standard Dijkstra Fails**
+
+Standard Dijkstra marks nodes as visited once. But here, a path with more stops might be cheaper:
+```
+src=0, dst=2, k=2
+0 --500--> 2 (1 flight, cost 500)
+0 --100--> 1 --100--> 2 (2 flights, cost 200)
+
+Standard Dijkstra might visit node 2 first with cost 500,
+then never explore the cheaper path through node 1.
+```
+
+**Edge Cases:**
+- `src == dst`: Return 0
+- No path exists: Return -1
+- k = 0: Direct flight only
+
+---
+
 ### Odd Even Linked List (LC 328)
 
 **Problem:** Given the head of a singly linked list, group all nodes at odd indices together followed by nodes at even indices. The first node is odd (index 1), second is even (index 2), etc. Preserve relative order within each group.
