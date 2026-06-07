@@ -295,6 +295,141 @@ def maxBoxesBothEnds(boxes: list[int], warehouse: list[int]) -> int:
 
 ---
 
+### Reconstruct Itinerary (LC 332)
+
+**Problem:** Given a list of airline tickets `[from, to]`, reconstruct the itinerary starting from "JFK". Return the itinerary with the smallest lexical order. All tickets must be used exactly once.
+
+**Example 1:**
+```
+Input: tickets = [["MUC","LHR"],["JFK","MUC"],["SFO","SJC"],["LHR","SFO"]]
+Output: ["JFK","MUC","LHR","SFO","SJC"]
+```
+
+**Example 2:**
+```
+Input: tickets = [["JFK","SFO"],["JFK","ATL"],["SFO","ATL"],["ATL","JFK"],["ATL","SFO"]]
+Output: ["JFK","ATL","JFK","SFO","ATL","SFO"]
+
+Explanation: ["JFK","ATL","JFK","SFO","ATL","SFO"] < ["JFK","SFO","ATL","JFK","ATL","SFO"]
+```
+
+**Key Insight:** This is finding an **Eulerian Path** (visit every edge exactly once). Use **Hierholzer's Algorithm**.
+
+**Why Hierholzer's Algorithm?**
+- Greedy DFS might get stuck at dead ends
+- Solution: Build path in reverse (post-order), add node to result when backtracking
+- When stuck (no outgoing edges), that node must be the end of the path
+
+**Solution 1: Hierholzer's Algorithm (Recursive)**
+
+```python
+from collections import defaultdict
+
+def findItinerary(tickets: list[list[str]]) -> list[str]:
+    """
+    Hierholzer's algorithm for Eulerian path.
+
+    Key insight: Add nodes to result in post-order (after visiting all edges).
+    This handles dead-ends correctly - they get added to result first.
+
+    Time: O(E log E) for sorting edges
+    Space: O(E) for graph and result
+    """
+    # Build adjacency list with sorted destinations (reverse for pop efficiency)
+    graph = defaultdict(list)
+    for src, dst in sorted(tickets, reverse=True):
+        graph[src].append(dst)
+
+    result = []
+
+    def dfs(airport):
+        # Visit all outgoing edges in lexical order
+        while graph[airport]:
+            next_airport = graph[airport].pop()  # Pop smallest (we sorted reverse)
+            dfs(next_airport)
+        # Add to result when no more outgoing edges (backtracking)
+        result.append(airport)
+
+    dfs("JFK")
+
+    return result[::-1]  # Reverse to get correct order
+```
+
+**Solution 2: Iterative with Stack**
+
+```python
+from collections import defaultdict
+
+def findItinerary(tickets: list[list[str]]) -> list[str]:
+    """
+    Iterative version using explicit stack.
+
+    Time: O(E log E)
+    Space: O(E)
+    """
+    # Build graph with sorted destinations (reverse order)
+    graph = defaultdict(list)
+    for src, dst in sorted(tickets, reverse=True):
+        graph[src].append(dst)
+
+    stack = ["JFK"]
+    result = []
+
+    while stack:
+        # If current airport has outgoing flights, continue DFS
+        while graph[stack[-1]]:
+            next_airport = graph[stack[-1]].pop()
+            stack.append(next_airport)
+
+        # No more outgoing flights, add to result (backtrack)
+        result.append(stack.pop())
+
+    return result[::-1]
+```
+
+**Walkthrough Example 2:**
+```
+tickets = [["JFK","SFO"],["JFK","ATL"],["SFO","ATL"],["ATL","JFK"],["ATL","SFO"]]
+
+Graph (sorted reverse):
+  JFK -> [SFO, ATL]  (will pop ATL first)
+  ATL -> [SFO, JFK]  (will pop JFK first)
+  SFO -> [ATL]
+
+DFS trace:
+  JFK -> ATL (pop ATL from JFK)
+  ATL -> JFK (pop JFK from ATL)
+  JFK -> SFO (pop SFO from JFK, JFK now empty)
+  SFO -> ATL (pop ATL from SFO, SFO now empty)
+  ATL -> SFO (pop SFO from ATL, ATL now empty)
+  SFO has no edges -> add SFO to result
+  backtrack to ATL -> add ATL to result
+  backtrack to SFO -> add SFO to result
+  backtrack to JFK -> add JFK to result
+  backtrack to ATL -> add ATL to result
+  backtrack to JFK -> add JFK to result
+
+result (reverse order built): [SFO, ATL, SFO, JFK, ATL, JFK]
+final (reversed): [JFK, ATL, JFK, SFO, ATL, SFO]
+```
+
+**Why This Works:**
+1. When we have no more outgoing edges, we're at a "dead end"
+2. Dead ends must be at the END of the final path
+3. By adding nodes post-order, dead ends get added first
+4. Reversing gives us the correct path order
+
+**Common Mistakes:**
+1. Using simple DFS without post-order addition (gets stuck at dead ends)
+2. Not sorting in reverse (efficiency for pop)
+3. Forgetting to reverse the result
+
+**Complexity:**
+- Time: O(E log E) where E = number of tickets (sorting)
+- Space: O(E) for graph storage and result
+
+---
+
 ### Violation Log Counter
 
 **Problem:** Given a list of log entries where each entry contains a `timestamp` and `user_id`, implement a system to detect violations.
