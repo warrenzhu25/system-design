@@ -295,6 +295,294 @@ def maxBoxesBothEnds(boxes: list[int], warehouse: list[int]) -> int:
 
 ---
 
+### Escape Room / Room-by-Room Race (Pinterest Custom)
+
+**Problem:** Design a game-state data structure with `n` rooms and `m` players starting in room 0.
+
+```python
+Game(n_rooms, n_players)              # All players start in room 0
+void proceedToNextRoom(playerId)      # Player advances by one room
+int  getPeople(roomId)                # Current headcount in roomId
+vector<int> getTop(k)                 # Top-k player IDs by rank
+```
+
+**Ranking Rules:**
+1. Higher-numbered room = higher rank
+2. Same room: earlier arrival ranks higher (FIFO tiebreaker)
+
+**Complexity Targets:**
+- `proceedToNextRoom(playerId)` → O(1) amortized
+- `getPeople(roomId)` → O(1)
+- `getTop(k)` → O(rooms + k) or O(k)
+
+**Example:**
+```
+Game(5, 3)
+proceedToNextRoom(0)  // player 0: room 0 → 1
+proceedToNextRoom(1)  // player 1: room 0 → 1
+proceedToNextRoom(2)  // player 2: room 0 → 1
+proceedToNextRoom(0)  // player 0: room 1 → 2
+
+getTop(2)             // [0, 1] — player 0 in room 2, player 1 arrived in room 1 before player 2
+getPeople(1)          // 2 (players 1 and 2)
+getPeople(2)          // 1 (player 0)
+```
+
+**Solution: Doubly-Linked List Per Room + Player Map**
+
+```python
+class ListNode:
+    """Node in doubly-linked list for a room."""
+    def __init__(self, player_id: int):
+        self.player_id = player_id
+        self.prev = None
+        self.next = None
+
+
+class RoomList:
+    """Doubly-linked list tracking players in arrival order (FIFO)."""
+    def __init__(self):
+        # Sentinel nodes for easier insert/remove
+        self.head = ListNode(-1)  # dummy head
+        self.tail = ListNode(-1)  # dummy tail
+        self.head.next = self.tail
+        self.tail.prev = self.head
+        self.count = 0
+
+    def append(self, node: ListNode) -> None:
+        """Add player to end of list (most recent arrival). O(1)"""
+        node.prev = self.tail.prev
+        node.next = self.tail
+        self.tail.prev.next = node
+        self.tail.prev = node
+        self.count += 1
+
+    def remove(self, node: ListNode) -> None:
+        """Remove player from list. O(1)"""
+        node.prev.next = node.next
+        node.next.prev = node.prev
+        node.prev = None
+        node.next = None
+        self.count -= 1
+
+    def __len__(self) -> int:
+        return self.count
+
+    def __iter__(self):
+        """Iterate players in arrival order (head to tail)."""
+        curr = self.head.next
+        while curr != self.tail:
+            yield curr.player_id
+            curr = curr.next
+
+
+class Game:
+    def __init__(self, n_rooms: int, n_players: int):
+        self.n_rooms = n_rooms
+        self.n_players = n_players
+
+        # Per-room doubly-linked list of players (arrival order)
+        self.rooms = [RoomList() for _ in range(n_rooms)]
+
+        # Player -> (current_room, ListNode)
+        self.player_info = {}
+
+        # Initialize: all players in room 0
+        for player_id in range(n_players):
+            node = ListNode(player_id)
+            self.rooms[0].append(node)
+            self.player_info[player_id] = (0, node)
+
+    def proceedToNextRoom(self, player_id: int) -> None:
+        """
+        Move player to the next room. O(1)
+        """
+        current_room, node = self.player_info[player_id]
+
+        # Check if already in last room
+        if current_room >= self.n_rooms - 1:
+            return  # Can't proceed further
+
+        next_room = current_room + 1
+
+        # Remove from current room's list
+        self.rooms[current_room].remove(node)
+
+        # Add to next room's list (at tail = most recent arrival)
+        self.rooms[next_room].append(node)
+
+        # Update player info
+        self.player_info[player_id] = (next_room, node)
+
+    def getPeople(self, room_id: int) -> int:
+        """
+        Get headcount in a room. O(1)
+        """
+        if 0 <= room_id < self.n_rooms:
+            return len(self.rooms[room_id])
+        return 0
+
+    def getTop(self, k: int) -> list[int]:
+        """
+        Get top-k players by rank. O(rooms + k)
+
+        Walk rooms from highest to lowest, emit players in arrival order.
+        """
+        result = []
+
+        # Iterate from highest room to lowest
+        for room_id in range(self.n_rooms - 1, -1, -1):
+            for player_id in self.rooms[room_id]:
+                result.append(player_id)
+                if len(result) >= k:
+                    return result
+
+        return result
+```
+
+**Optimized Version: Track Non-Empty Rooms**
+
+For sparse rooms (many empty), maintain a sorted set of non-empty room IDs:
+
+```python
+from sortedcontainers import SortedList
+
+class GameOptimized:
+    def __init__(self, n_rooms: int, n_players: int):
+        self.n_rooms = n_rooms
+        self.rooms = [RoomList() for _ in range(n_rooms)]
+        self.player_info = {}
+
+        # Track non-empty rooms (sorted in descending order for leaderboard)
+        self.non_empty_rooms = SortedList()
+
+        # Initialize all players in room 0
+        for player_id in range(n_players):
+            node = ListNode(player_id)
+            self.rooms[0].append(node)
+            self.player_info[player_id] = (0, node)
+
+        if n_players > 0:
+            self.non_empty_rooms.add(0)
+
+    def proceedToNextRoom(self, player_id: int) -> None:
+        """O(log N) where N = non-empty rooms, due to sorted set operations."""
+        current_room, node = self.player_info[player_id]
+
+        if current_room >= self.n_rooms - 1:
+            return
+
+        next_room = current_room + 1
+
+        # Remove from current room
+        self.rooms[current_room].remove(node)
+
+        # Update non-empty rooms tracking
+        if len(self.rooms[current_room]) == 0:
+            self.non_empty_rooms.remove(current_room)
+
+        # Add to next room
+        if len(self.rooms[next_room]) == 0:
+            self.non_empty_rooms.add(next_room)
+
+        self.rooms[next_room].append(node)
+        self.player_info[player_id] = (next_room, node)
+
+    def getPeople(self, room_id: int) -> int:
+        """O(1)"""
+        return len(self.rooms[room_id]) if 0 <= room_id < self.n_rooms else 0
+
+    def getTop(self, k: int) -> list[int]:
+        """O(N + k) where N = number of non-empty rooms."""
+        result = []
+
+        # Iterate non-empty rooms from highest to lowest
+        for room_id in reversed(self.non_empty_rooms):
+            for player_id in self.rooms[room_id]:
+                result.append(player_id)
+                if len(result) >= k:
+                    return result
+
+        return result
+```
+
+**Walkthrough:**
+```
+Game(5, 3)  # rooms 0-4, players 0-2
+
+Initial state:
+  Room 0: [0, 1, 2] (all players, arrival order)
+  Room 1-4: []
+  player_info: {0: (0, node0), 1: (0, node1), 2: (0, node2)}
+
+proceedToNextRoom(0):
+  Remove player 0 from room 0, add to room 1
+  Room 0: [1, 2]
+  Room 1: [0]
+
+proceedToNextRoom(1):
+  Room 0: [2]
+  Room 1: [0, 1]
+
+proceedToNextRoom(2):
+  Room 0: []
+  Room 1: [0, 1, 2]
+
+proceedToNextRoom(0):
+  Room 1: [1, 2]
+  Room 2: [0]
+
+getTop(2):
+  Start from room 4 (empty) → room 3 (empty) → room 2: yield 0
+  → room 1: yield 1
+  Result: [0, 1]
+
+getPeople(1) → 2
+getPeople(2) → 1
+```
+
+**Common Bugs to Avoid:**
+1. **Shared list node state** - Each room must have independent doubly-linked list
+2. **Forgetting to update both prev and next pointers** on remove/insert
+3. **Not handling boundary** (player in last room trying to proceed)
+4. **Off-by-one in room iteration** for getTop
+
+**Complexity Summary:**
+
+| Operation | Basic | Optimized |
+|-----------|-------|-----------|
+| proceedToNextRoom | O(1) | O(log N)* |
+| getPeople | O(1) | O(1) |
+| getTop(k) | O(rooms + k) | O(N + k)** |
+
+*N = non-empty rooms (due to sorted set)
+**N = non-empty rooms only
+
+**Simpler Phone Screen Variant (No Leaderboard):**
+
+```python
+class GameSimple:
+    """Phone screen version: just proceedToNextRoom + getPeople."""
+
+    def __init__(self, n_rooms: int, n_players: int):
+        self.room_count = [0] * n_rooms
+        self.room_count[0] = n_players
+        self.player_room = {i: 0 for i in range(n_players)}
+        self.n_rooms = n_rooms
+
+    def proceedToNextRoom(self, player_id: int) -> None:
+        current = self.player_room[player_id]
+        if current < self.n_rooms - 1:
+            self.room_count[current] -= 1
+            self.room_count[current + 1] += 1
+            self.player_room[player_id] = current + 1
+
+    def getPeople(self, room_id: int) -> int:
+        return self.room_count[room_id]
+```
+
+---
+
 ### Cheapest Flights Within K Stops (LC 787)
 
 **Problem:** Find the cheapest price from `src` to `dst` with at most `k` stops (k+1 edges). Return -1 if no such route exists.
