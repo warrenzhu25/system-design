@@ -295,6 +295,320 @@ def maxBoxesBothEnds(boxes: list[int], warehouse: list[int]) -> int:
 
 ---
 
+### Convert BST to Sorted Doubly Linked List (LC 426)
+
+**Problem:** Convert a BST into a sorted **circular** doubly-linked list **in place**.
+- `left` pointer → predecessor
+- `right` pointer → successor
+- Return the head (smallest element)
+- The list should be circular (head.left = tail, tail.right = head)
+
+**Example:**
+```
+        4
+       / \
+      2   5
+     / \
+    1   3
+
+Output: 1 <-> 2 <-> 3 <-> 4 <-> 5 (circular)
+        ^                       |
+        |_______________________|
+```
+
+**Solution 1: Recursive In-Order Traversal**
+
+```python
+class Node:
+    def __init__(self, val=0, left=None, right=None):
+        self.val = val
+        self.left = left   # predecessor in DLL
+        self.right = right # successor in DLL
+
+
+def treeToDoublyList(root: Node) -> Node:
+    """
+    In-order traversal with prev pointer to link nodes.
+
+    Key: Process left subtree BEFORE modifying current node's pointers,
+    since the tree structure is destroyed during conversion.
+
+    Time: O(n)
+    Space: O(h) recursion stack, where h = height
+    """
+    if not root:
+        return None
+
+    # Track first (head) and last (prev) nodes
+    first = None
+    prev = None
+
+    def inorder(node):
+        nonlocal first, prev
+
+        if not node:
+            return
+
+        # Process left subtree first (before modifying pointers!)
+        inorder(node.left)
+
+        # Process current node
+        if prev:
+            # Link prev <-> current
+            prev.right = node
+            node.left = prev
+        else:
+            # First node (smallest) - save as head
+            first = node
+
+        prev = node
+
+        # Process right subtree
+        inorder(node.right)
+
+    inorder(root)
+
+    # Close the circular link: connect head <-> tail
+    first.left = prev
+    prev.right = first
+
+    return first
+```
+
+**Solution 2: Iterative In-Order (Explicit Stack)**
+
+```python
+def treeToDoublyList(root: Node) -> Node:
+    """
+    Iterative in-order using stack.
+    Useful when recursion depth is a concern (skewed tree).
+
+    Time: O(n)
+    Space: O(h) for stack
+    """
+    if not root:
+        return None
+
+    first = None
+    prev = None
+    stack = []
+    current = root
+
+    while stack or current:
+        # Go to leftmost node
+        while current:
+            stack.append(current)
+            current = current.left
+
+        # Process current node
+        current = stack.pop()
+
+        if prev:
+            prev.right = current
+            current.left = prev
+        else:
+            first = current
+
+        prev = current
+
+        # Move to right subtree
+        current = current.right
+
+    # Close circular link
+    first.left = prev
+    prev.right = first
+
+    return first
+```
+
+**Walkthrough:**
+```
+        4
+       / \
+      2   5
+     / \
+    1   3
+
+In-order: 1, 2, 3, 4, 5
+
+Step 1: Visit 1 (leftmost)
+  first = 1, prev = 1
+
+Step 2: Visit 2
+  prev(1).right = 2, 2.left = 1
+  prev = 2
+  Result: 1 <-> 2
+
+Step 3: Visit 3
+  prev(2).right = 3, 3.left = 2
+  prev = 3
+  Result: 1 <-> 2 <-> 3
+
+Step 4: Visit 4
+  prev(3).right = 4, 4.left = 3
+  prev = 4
+  Result: 1 <-> 2 <-> 3 <-> 4
+
+Step 5: Visit 5
+  prev(4).right = 5, 5.left = 4
+  prev = 5
+  Result: 1 <-> 2 <-> 3 <-> 4 <-> 5
+
+Close circular:
+  first(1).left = prev(5)
+  prev(5).right = first(1)
+```
+
+---
+
+**Follow-up: Insert into Circular Sorted DLL**
+
+```python
+def insert(head: Node, new_val: int) -> Node:
+    """
+    Insert a new node into circular sorted DLL while maintaining order.
+
+    Cases:
+    1. Empty list: create single-node circular list
+    2. Insert at head (new_val <= head.val)
+    3. Insert at tail (new_val >= tail.val)
+    4. Insert in middle (find position where prev.val <= new_val <= next.val)
+
+    Time: O(n) - linear search
+    Space: O(1)
+    """
+    new_node = Node(new_val)
+
+    # Case 1: Empty list
+    if not head:
+        new_node.left = new_node
+        new_node.right = new_node
+        return new_node
+
+    # Find insertion point
+    prev = head
+    curr = head.right
+
+    while curr != head:
+        # Found position: prev <= new_val <= curr
+        if prev.val <= new_val <= curr.val:
+            break
+
+        # Handle wrap-around (insert at tail/head boundary)
+        # This is when we're at the max->min transition
+        if prev.val > curr.val:  # At the wrap point
+            if new_val >= prev.val or new_val <= curr.val:
+                break
+
+        prev = curr
+        curr = curr.right
+
+    # Insert between prev and curr
+    new_node.left = prev
+    new_node.right = curr
+    prev.right = new_node
+    curr.left = new_node
+
+    # Update head if new node is smallest
+    if new_val < head.val:
+        return new_node
+
+    return head
+
+
+def insert_simple(head: Node, new_val: int) -> Node:
+    """
+    Simplified version: always find correct position.
+
+    Time: O(n)
+    Space: O(1)
+    """
+    new_node = Node(new_val)
+
+    if not head:
+        new_node.left = new_node
+        new_node.right = new_node
+        return new_node
+
+    # Find tail (node before head in circular list)
+    tail = head.left
+
+    # Case: insert before head (new smallest)
+    if new_val <= head.val:
+        new_node.right = head
+        new_node.left = tail
+        tail.right = new_node
+        head.left = new_node
+        return new_node
+
+    # Case: insert after tail (new largest)
+    if new_val >= tail.val:
+        new_node.left = tail
+        new_node.right = head
+        tail.right = new_node
+        head.left = new_node
+        return head
+
+    # Case: insert in middle - find position
+    curr = head
+    while curr.right != head and curr.right.val < new_val:
+        curr = curr.right
+
+    # Insert after curr
+    new_node.left = curr
+    new_node.right = curr.right
+    curr.right.left = new_node
+    curr.right = new_node
+
+    return head
+```
+
+**Insert Examples:**
+```
+List: 1 <-> 3 <-> 5 (circular)
+
+insert(head, 2):
+  Find: 1.val <= 2 <= 3.val
+  Result: 1 <-> 2 <-> 3 <-> 5
+
+insert(head, 0):
+  New smallest, becomes new head
+  Result: 0 <-> 1 <-> 2 <-> 3 <-> 5
+
+insert(head, 6):
+  New largest, insert at tail
+  Result: 0 <-> 1 <-> 2 <-> 3 <-> 5 <-> 6
+```
+
+---
+
+**Common Bugs:**
+1. **Forgetting empty tree check** - return None
+2. **Forgetting circular link** - must connect head.left = tail and tail.right = head
+3. **Modifying pointers before recursive call** - tree structure destroyed mid-traversal
+4. **Insert wrap-around case** - circular list has no natural "end"
+
+**Complexity:**
+
+| Operation | Time | Space |
+|-----------|------|-------|
+| treeToDoublyList | O(n) | O(h) |
+| insert | O(n) | O(1) |
+
+**Edge Cases:**
+```python
+# Empty tree
+root = None → return None
+
+# Single node
+root = Node(1) → circular self-loop: 1.left = 1.right = 1
+
+# Skewed tree (all left or all right)
+# Recursion depth = n, consider iterative for large trees
+```
+
+---
+
 ### Escape Room / Room-by-Room Race (Pinterest Custom)
 
 **Problem:** Design a game-state data structure with `n` rooms and `m` players starting in room 0.
