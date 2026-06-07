@@ -295,6 +295,364 @@ def maxBoxesBothEnds(boxes: list[int], warehouse: list[int]) -> int:
 
 ---
 
+### Lighthouse Light Propagation (Pinterest Custom)
+
+**Problem:** Simulate light propagation on a 2D grid. Lighthouses emit beams in defined directions. Beams travel in straight lines until hitting a wall or grid edge. Determine which cells receive light.
+
+**Grid Encoding (Example):**
+```
+0 = empty cell
+1 = wall
+2 = lighthouse (emits in all 4 directions)
+3 = lighthouse (emits right and down only)
+... (clarify with interviewer)
+```
+
+**Example:**
+```
+Grid:
+  0 1 2 3 4
+0 . . L . .
+1 . W . . .
+2 . . . W .
+3 L . . . .
+4 . . . . .
+
+L = lighthouse (all directions)
+W = wall
+. = empty
+
+Light reaches:
+  0 1 2 3 4
+0 * * L * *    (row 0: lighthouse lights entire row except blocked)
+1 . W * . .    (wall blocks, but column 2 lit from above)
+2 * . * W .    (row 2, col 0 from lighthouse at (3,0))
+3 L * * * *    (lighthouse lights right)
+4 * . . . .    (column 0 lit from lighthouse above)
+```
+
+**Clarifying Questions to Ask:**
+1. What directions can lighthouses emit? (4-directional, 8-directional, specific?)
+2. Can light pass through other lighthouses?
+3. Are there reflective surfaces (mirrors)?
+4. What happens at corners/edges?
+5. Can lighthouses rotate (state changes over time)?
+
+---
+
+**Solution 1: Ray Casting (Per-Lighthouse)**
+
+```python
+def simulate_light(grid: list[list[int]]) -> list[list[bool]]:
+    """
+    For each lighthouse, cast rays in all valid directions.
+    Mark cells until hitting wall or boundary.
+
+    Time: O(L * max(R, C)) where L = lighthouses
+    Space: O(R * C) for lit matrix
+    """
+    rows, cols = len(grid), len(grid[0])
+    lit = [[False] * cols for _ in range(rows)]
+
+    # Direction vectors: up, down, left, right
+    DIRECTIONS = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+
+    # For 8-directional, add diagonals:
+    # DIRECTIONS += [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+
+    EMPTY = 0
+    WALL = 1
+    LIGHTHOUSE = 2
+
+    def cast_ray(start_r: int, start_c: int, dr: int, dc: int):
+        """Cast a ray from (start_r, start_c) in direction (dr, dc)."""
+        r, c = start_r + dr, start_c + dc
+
+        while 0 <= r < rows and 0 <= c < cols:
+            if grid[r][c] == WALL:
+                break  # Wall blocks light
+
+            lit[r][c] = True
+
+            # Optional: if lighthouses block light
+            # if grid[r][c] == LIGHTHOUSE:
+            #     break
+
+            r += dr
+            c += dc
+
+    # Find all lighthouses and cast rays
+    for r in range(rows):
+        for c in range(cols):
+            if grid[r][c] == LIGHTHOUSE:
+                lit[r][c] = True  # Lighthouse itself is lit
+
+                for dr, dc in DIRECTIONS:
+                    cast_ray(r, c, dr, dc)
+
+    return lit
+```
+
+**Solution 2: Directional BFS**
+
+```python
+from collections import deque
+
+def simulate_light_bfs(grid: list[list[int]]) -> list[list[bool]]:
+    """
+    BFS where each entry carries (cell, direction).
+    Light propagates only along its direction.
+
+    Useful when light can change direction (reflections).
+
+    Time: O(R * C * D) where D = directions
+    Space: O(R * C * D) for visited states
+    """
+    rows, cols = len(grid), len(grid[0])
+    lit = [[False] * cols for _ in range(rows)]
+
+    DIRECTIONS = {
+        'U': (-1, 0),
+        'D': (1, 0),
+        'L': (0, -1),
+        'R': (0, 1),
+    }
+
+    EMPTY = 0
+    WALL = 1
+    LIGHTHOUSE = 2
+
+    # State: (row, col, direction)
+    visited = set()
+    queue = deque()
+
+    # Initialize: add all lighthouse beams
+    for r in range(rows):
+        for c in range(cols):
+            if grid[r][c] == LIGHTHOUSE:
+                lit[r][c] = True
+                for dir_name, (dr, dc) in DIRECTIONS.items():
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < rows and 0 <= nc < cols:
+                        queue.append((nr, nc, dir_name))
+                        visited.add((nr, nc, dir_name))
+
+    while queue:
+        r, c, direction = queue.popleft()
+
+        if grid[r][c] == WALL:
+            continue
+
+        lit[r][c] = True
+
+        # Continue in same direction
+        dr, dc = DIRECTIONS[direction]
+        nr, nc = r + dr, c + dc
+
+        if 0 <= nr < rows and 0 <= nc < cols:
+            state = (nr, nc, direction)
+            if state not in visited:
+                visited.add(state)
+                queue.append(state)
+
+    return lit
+```
+
+---
+
+**Variation: Reflective Mirrors**
+
+```python
+def simulate_with_mirrors(grid: list[list[int]]) -> list[list[bool]]:
+    """
+    Grid includes mirrors that reflect light 90 degrees.
+
+    Mirror types:
+    '/' : U->R, D->L, L->D, R->U
+    '\\': U->L, D->R, L->U, R->D
+    """
+    rows, cols = len(grid), len(grid[0])
+    lit = [[False] * cols for _ in range(rows)]
+
+    DIRECTIONS = {
+        'U': (-1, 0),
+        'D': (1, 0),
+        'L': (0, -1),
+        'R': (0, 1),
+    }
+
+    # Reflection mappings
+    REFLECT_SLASH = {'U': 'R', 'D': 'L', 'L': 'D', 'R': 'U'}    # '/'
+    REFLECT_BACK = {'U': 'L', 'D': 'R', 'L': 'U', 'R': 'D'}     # '\'
+
+    EMPTY = '.'
+    WALL = '#'
+    LIGHTHOUSE = 'L'
+    MIRROR_SLASH = '/'
+    MIRROR_BACK = '\\'
+
+    visited = set()
+    queue = deque()
+
+    # Initialize lighthouses
+    for r in range(rows):
+        for c in range(cols):
+            if grid[r][c] == LIGHTHOUSE:
+                lit[r][c] = True
+                for dir_name in DIRECTIONS:
+                    queue.append((r, c, dir_name))
+                    visited.add((r, c, dir_name))
+
+    while queue:
+        r, c, direction = queue.popleft()
+
+        dr, dc = DIRECTIONS[direction]
+        nr, nc = r + dr, c + dc
+
+        if not (0 <= nr < rows and 0 <= nc < cols):
+            continue
+
+        cell = grid[nr][nc]
+
+        if cell == WALL:
+            continue
+
+        lit[nr][nc] = True
+
+        # Determine next direction
+        if cell == MIRROR_SLASH:
+            next_dir = REFLECT_SLASH[direction]
+        elif cell == MIRROR_BACK:
+            next_dir = REFLECT_BACK[direction]
+        else:
+            next_dir = direction
+
+        state = (nr, nc, next_dir)
+        if state not in visited:
+            visited.add(state)
+            queue.append(state)
+
+    return lit
+```
+
+---
+
+**Variation: Rotating Lighthouses**
+
+```python
+def simulate_rotating(
+    grid: list[list[int]],
+    lighthouse_dirs: dict[tuple[int, int], str],
+    steps: int
+) -> list[list[set]]:
+    """
+    Lighthouses rotate 90° clockwise each step.
+    Track which cells are lit at each step.
+
+    lighthouse_dirs: {(r, c): initial_direction}
+    """
+    rows, cols = len(grid), len(grid[0])
+
+    DIRECTIONS = ['U', 'R', 'D', 'L']  # Clockwise order
+    DIR_VECTORS = {'U': (-1, 0), 'R': (0, 1), 'D': (1, 0), 'L': (0, -1)}
+
+    def rotate_cw(d):
+        idx = DIRECTIONS.index(d)
+        return DIRECTIONS[(idx + 1) % 4]
+
+    def cast_single_ray(r, c, direction):
+        """Cast ray in one direction, return lit cells."""
+        lit_cells = set()
+        dr, dc = DIR_VECTORS[direction]
+        r, c = r + dr, c + dc
+
+        while 0 <= r < rows and 0 <= c < cols and grid[r][c] != 1:
+            lit_cells.add((r, c))
+            r += dr
+            c += dc
+
+        return lit_cells
+
+    results = []  # List of lit cells per step
+
+    current_dirs = lighthouse_dirs.copy()
+
+    for step in range(steps):
+        lit = set()
+
+        for (r, c), direction in current_dirs.items():
+            lit.add((r, c))
+            lit.update(cast_single_ray(r, c, direction))
+
+        results.append(lit)
+
+        # Rotate all lighthouses
+        current_dirs = {pos: rotate_cw(d) for pos, d in current_dirs.items()}
+
+    return results
+```
+
+---
+
+**Helper: Count Lit Cells**
+
+```python
+def count_lit_cells(grid: list[list[int]]) -> int:
+    """Count total cells that receive light."""
+    lit = simulate_light(grid)
+    return sum(sum(row) for row in lit)
+
+
+def get_lit_positions(grid: list[list[int]]) -> list[tuple[int, int]]:
+    """Return list of (row, col) positions that receive light."""
+    lit = simulate_light(grid)
+    return [(r, c) for r in range(len(lit))
+                   for c in range(len(lit[0])) if lit[r][c]]
+```
+
+---
+
+**Complexity Analysis:**
+
+| Approach | Time | Space | Use Case |
+|----------|------|-------|----------|
+| Ray Casting | O(L × max(R,C)) | O(R×C) | Simple, no reflections |
+| Directional BFS | O(R×C×D) | O(R×C×D) | With reflections |
+| Rotating | O(S×L×max(R,C)) | O(R×C) | Time-varying simulation |
+
+L = lighthouses, R = rows, C = cols, D = directions, S = steps
+
+**Common Bugs:**
+1. Off-by-one in boundary checks
+2. Forgetting to mark lighthouse cell itself as lit
+3. Infinite loop with mirrors (cycle detection needed)
+4. Not handling light passing through lighthouses
+
+**Testing:**
+```python
+# Test 1: Simple horizontal beam
+grid = [
+    [2, 0, 0, 1, 0],  # Lighthouse at (0,0), wall at (0,3)
+]
+# Expected: cells (0,0), (0,1), (0,2) lit
+
+# Test 2: Multiple lighthouses, overlapping beams
+grid = [
+    [2, 0, 0],
+    [0, 0, 0],
+    [0, 0, 2],
+]
+# Both lighthouses contribute
+
+# Test 3: Lighthouse blocked immediately
+grid = [
+    [1, 2, 1],  # Walls on both sides
+]
+# Only lighthouse cell lit
+```
+
+---
+
 ### Convert BST to Sorted Doubly Linked List (LC 426)
 
 **Problem:** Convert a BST into a sorted **circular** doubly-linked list **in place**.
