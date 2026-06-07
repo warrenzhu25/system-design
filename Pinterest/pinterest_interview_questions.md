@@ -295,6 +295,114 @@ def maxBoxesBothEnds(boxes: list[int], warehouse: list[int]) -> int:
 
 ---
 
+### Odd Even Linked List (LC 328)
+
+**Problem:** Given the head of a singly linked list, group all nodes at odd indices together followed by nodes at even indices. The first node is odd (index 1), second is even (index 2), etc. Preserve relative order within each group.
+
+**Example 1:**
+```
+Input:  1 -> 2 -> 3 -> 4 -> 5
+Output: 1 -> 3 -> 5 -> 2 -> 4
+
+Odd indices:  1, 3, 5 (positions 1, 3, 5)
+Even indices: 2, 4    (positions 2, 4)
+```
+
+**Example 2:**
+```
+Input:  2 -> 1 -> 3 -> 5 -> 6 -> 4 -> 7
+Output: 2 -> 3 -> 6 -> 7 -> 1 -> 5 -> 4
+```
+
+**Solution: Two Pointers**
+
+```python
+class ListNode:
+    def __init__(self, val=0, next=None):
+        self.val = val
+        self.next = next
+
+def oddEvenList(head: ListNode) -> ListNode:
+    """
+    Build two separate lists (odd and even), then connect them.
+
+    Time: O(n) - single pass
+    Space: O(1) - only pointers, no extra nodes
+    """
+    if not head or not head.next:
+        return head
+
+    odd = head          # First node (odd index)
+    even = head.next    # Second node (even index)
+    even_head = even    # Save to connect later
+
+    while even and even.next:
+        # Link odd to next odd (skip one)
+        odd.next = even.next
+        odd = odd.next
+
+        # Link even to next even (skip one)
+        even.next = odd.next
+        even = even.next
+
+    # Connect odd list to even list
+    odd.next = even_head
+
+    return head
+```
+
+**Walkthrough:**
+```
+Initial: 1 -> 2 -> 3 -> 4 -> 5
+         ^    ^
+        odd  even
+        even_head = 2
+
+Step 1: odd.next = 3, odd = 3
+        even.next = 4, even = 4
+        1 -> 3 -> 4 -> 5
+             ^    ^
+            odd  even
+        2 -> 4 (even list)
+
+Step 2: odd.next = 5, odd = 5
+        even.next = None, even = None
+        1 -> 3 -> 5
+                  ^
+                 odd
+        2 -> 4 -> None (even list)
+
+Connect: odd.next = even_head
+         1 -> 3 -> 5 -> 2 -> 4
+```
+
+**Why `while even and even.next`?**
+- `even` check: handles odd-length lists (even becomes None)
+- `even.next` check: ensures there's a next odd node to process
+
+**Edge Cases:**
+```python
+# Empty list
+head = None → return None
+
+# Single node
+head = [1] → return [1]
+
+# Two nodes
+head = [1, 2] → return [1, 2]  # Already odd, even order
+```
+
+**Common Mistakes:**
+1. Forgetting to save `even_head` before modifying pointers
+2. Wrong loop condition (causes null pointer)
+3. Not handling edge cases (empty, single node)
+
+**Complexity:**
+- Time: O(n) - visit each node once
+- Space: O(1) - only use pointers
+
+---
+
 ### Reconstruct Itinerary (LC 332)
 
 **Problem:** Given a list of airline tickets `[from, to]`, reconstruct the itinerary starting from "JFK". Return the itinerary with the smallest lexical order. All tickets must be used exactly once.
