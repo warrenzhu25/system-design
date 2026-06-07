@@ -295,6 +295,180 @@ def maxBoxesBothEnds(boxes: list[int], warehouse: list[int]) -> int:
 
 ---
 
+### Violation Log Counter
+
+**Problem:** Given a list of log entries where each entry contains a `timestamp` and `user_id`, implement a system to detect violations.
+
+**Part 1:** Count total actions per user.
+
+**Part 2:** Find all users who performed more than `k` actions within any `t` second window.
+
+**Example:**
+```
+Input:
+logs = [
+    (1, "user1"),   # timestamp=1, user_id="user1"
+    (2, "user1"),
+    (3, "user2"),
+    (4, "user1"),
+    (5, "user1"),
+    (10, "user1"),
+    (11, "user2"),
+]
+k = 3, t = 5
+
+Output: ["user1"]
+
+Explanation:
+- user1 has actions at timestamps [1, 2, 4, 5] within window [1, 5] -> 4 actions > 3
+- user2 only has 1-2 actions in any 5-second window
+```
+
+**Part 1 Solution: HashMap Count**
+
+```python
+from collections import defaultdict
+
+def count_actions_per_user(logs: list[tuple[int, str]]) -> dict[str, int]:
+    """
+    Simple hashmap to count total actions per user.
+
+    Time: O(n)
+    Space: O(u) where u = unique users
+    """
+    counts = defaultdict(int)
+    for timestamp, user_id in logs:
+        counts[user_id] += 1
+    return dict(counts)
+```
+
+**Part 2 Solution: Binary Search for Sliding Window**
+
+```python
+from collections import defaultdict
+import bisect
+
+def find_violating_users(
+    logs: list[tuple[int, str]],
+    k: int,
+    t: int
+) -> list[str]:
+    """
+    Find users with more than k actions in any t-second window.
+
+    Approach:
+    1. Group timestamps by user
+    2. Sort timestamps for each user
+    3. For each timestamp, use binary search to count actions in [ts, ts+t]
+    4. If count > k, user is violating
+
+    Time: O(n log n) for sorting + O(n log n) for binary searches
+    Space: O(n)
+    """
+    # Group timestamps by user
+    user_timestamps = defaultdict(list)
+    for timestamp, user_id in logs:
+        user_timestamps[user_id].append(timestamp)
+
+    violating_users = []
+
+    for user_id, timestamps in user_timestamps.items():
+        timestamps.sort()
+
+        # Check each timestamp as start of window
+        for i, ts in enumerate(timestamps):
+            # Find rightmost timestamp <= ts + t
+            window_end = ts + t
+            right_idx = bisect.bisect_right(timestamps, window_end)
+
+            # Count actions in window [ts, ts+t]
+            count = right_idx - i
+
+            if count > k:
+                violating_users.append(user_id)
+                break  # Found violation, no need to check more
+
+    return violating_users
+```
+
+**Alternative: Sliding Window with Two Pointers**
+
+```python
+def find_violating_users_two_pointers(
+    logs: list[tuple[int, str]],
+    k: int,
+    t: int
+) -> list[str]:
+    """
+    Two pointers approach - more efficient if checking all windows.
+
+    Time: O(n log n) for sorting, O(n) for scanning
+    Space: O(n)
+    """
+    user_timestamps = defaultdict(list)
+    for timestamp, user_id in logs:
+        user_timestamps[user_id].append(timestamp)
+
+    violating_users = []
+
+    for user_id, timestamps in user_timestamps.items():
+        timestamps.sort()
+
+        left = 0
+        max_count = 0
+
+        for right in range(len(timestamps)):
+            # Shrink window if too large
+            while timestamps[right] - timestamps[left] > t:
+                left += 1
+
+            # Current window size
+            max_count = max(max_count, right - left + 1)
+
+            if max_count > k:
+                violating_users.append(user_id)
+                break
+
+    return violating_users
+```
+
+**Follow-up: Real-time Violation Detection**
+
+```python
+from collections import defaultdict, deque
+
+class ViolationDetector:
+    """
+    Real-time violation detection with streaming logs.
+
+    Uses deque to maintain sliding window per user.
+    """
+    def __init__(self, k: int, t: int):
+        self.k = k
+        self.t = t
+        self.user_windows = defaultdict(deque)  # user_id -> deque of timestamps
+
+    def process_log(self, timestamp: int, user_id: str) -> bool:
+        """
+        Process a log entry and return True if user is now violating.
+
+        Time: O(w) where w = window size, amortized O(1)
+        """
+        window = self.user_windows[user_id]
+
+        # Remove expired timestamps
+        while window and window[0] < timestamp - self.t:
+            window.popleft()
+
+        # Add new timestamp
+        window.append(timestamp)
+
+        # Check violation
+        return len(window) > self.k
+```
+
+---
+
 ## System Design Questions
 
 ### Design Pinterest Home Feed
@@ -312,19 +486,287 @@ def maxBoxesBothEnds(boxes: list[int], warehouse: list[int]) -> int:
 4. **Caching**: Multi-layer caching for hot pins
 5. **CDN**: Image delivery optimization
 
-### Design Pinterest Search
+### Design Pinterest Search Engine
 
 **Requirements:**
 - Text search for pins, boards, users
 - Visual search (search by image)
 - Autocomplete and suggestions
 - Handle typos and synonyms
+- Scale: 500M+ users, billions of pins
+
+**Functional Requirements:**
+1. Text-based search with ranking
+2. Image-based visual search
+3. Real-time autocomplete (<100ms)
+4. Personalized results
+5. Filter by category, time, popularity
+
+**Non-Functional Requirements:**
+- Latency: P99 < 200ms
+- Availability: 99.99%
+- Scale: 100K QPS
+
+**High-Level Architecture:**
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────────────┐
+│   Client    │────▶│  API Gateway │────▶│  Search Service     │
+└─────────────┘     └─────────────┘     └──────────┬──────────┘
+                                                    │
+                    ┌───────────────────────────────┼───────────────────────┐
+                    │                               │                       │
+                    ▼                               ▼                       ▼
+          ┌─────────────────┐           ┌─────────────────┐      ┌─────────────────┐
+          │ Query Processing│           │  Text Search    │      │ Visual Search   │
+          │    Service      │           │  (Elasticsearch)│      │ (Vector DB)     │
+          └─────────────────┘           └─────────────────┘      └─────────────────┘
+                    │                               │                       │
+                    │                               ▼                       ▼
+                    │                   ┌─────────────────────────────────────────┐
+                    │                   │           Ranking Service               │
+                    │                   │    (ML-based personalized ranking)     │
+                    │                   └─────────────────────────────────────────┘
+                    │                                       │
+                    ▼                                       ▼
+          ┌─────────────────┐                   ┌─────────────────┐
+          │  Autocomplete   │                   │   Result Cache  │
+          │   (Trie/Redis)  │                   │     (Redis)     │
+          └─────────────────┘                   └─────────────────┘
+```
 
 **Key Components:**
-1. **Inverted Index**: Elasticsearch for text search
-2. **Visual Embeddings**: CNN-based image feature extraction
-3. **Vector Search**: Approximate nearest neighbor search
-4. **Query Understanding**: NLP for intent classification
+
+**1. Query Processing Service**
+- Tokenization, stemming, lemmatization
+- Spell correction (edit distance, phonetic matching)
+- Query expansion (synonyms, related terms)
+- Intent classification (product, board, user search)
+
+**2. Text Search (Elasticsearch)**
+```json
+{
+  "index": "pins",
+  "mappings": {
+    "properties": {
+      "title": {"type": "text", "analyzer": "english"},
+      "description": {"type": "text"},
+      "tags": {"type": "keyword"},
+      "category": {"type": "keyword"},
+      "created_at": {"type": "date"},
+      "engagement_score": {"type": "float"},
+      "embedding": {"type": "dense_vector", "dims": 512}
+    }
+  }
+}
+```
+
+**3. Visual Search Pipeline**
+```
+Image Upload → CNN Feature Extraction → Vector Embedding (512d)
+                      ↓
+              Vector Database (Pinecone/Milvus)
+                      ↓
+              Approximate Nearest Neighbor (HNSW/IVF)
+                      ↓
+              Top-K Similar Images
+```
+
+**4. Ranking Service**
+- Two-stage ranking: Candidate retrieval → Fine ranking
+- Features: Relevance score, freshness, engagement, personalization
+- Model: Learning-to-Rank (LambdaMART, Neural ranker)
+
+**5. Autocomplete**
+- Trie-based prefix matching
+- Popularity-weighted suggestions
+- Personalized based on user history
+- Redis sorted sets for hot queries
+
+**Data Flow:**
+1. User enters query
+2. Query processing: spell check, tokenize, expand
+3. Parallel fetch: text search + visual search (if image)
+4. Merge and dedupe results
+5. Ranking service applies personalization
+6. Cache results, return to user
+
+**Scaling Considerations:**
+- Elasticsearch: Shard by pin_id hash, replicas for read scaling
+- Vector DB: Partition by category, approximate search for speed
+- Caching: Query result cache (Redis), embedding cache
+- CDN: Cache autocomplete suggestions
+
+---
+
+### Design Personalized Pin Recommendation Chatbot
+
+**Requirements:**
+- Conversational interface for pin discovery
+- Understand user intent from natural language
+- Recommend relevant pins based on conversation context
+- Learn from user feedback (likes, saves, dismisses)
+
+**Functional Requirements:**
+1. Natural language understanding
+2. Context-aware recommendations
+3. Multi-turn conversations
+4. Explain recommendations
+5. Handle follow-up queries ("show me more like this")
+
+**Non-Functional Requirements:**
+- Response time: < 2 seconds
+- Personalization: Based on user history
+- Scale: 10M daily active chatbot users
+
+**High-Level Architecture:**
+
+```
+┌─────────────┐     ┌─────────────────────────────────────────────────────┐
+│   Client    │────▶│                  Chatbot Service                    │
+└─────────────┘     └──────────────────────────┬──────────────────────────┘
+                                               │
+          ┌────────────────────────────────────┼────────────────────────────┐
+          │                                    │                            │
+          ▼                                    ▼                            ▼
+┌─────────────────┐              ┌─────────────────────┐        ┌─────────────────┐
+│   NLU Service   │              │ Conversation Manager│        │  Response Gen   │
+│  (Intent/Entity)│              │  (Context Tracking) │        │    (LLM)        │
+└─────────────────┘              └─────────────────────┘        └─────────────────┘
+          │                                    │                            │
+          │                                    ▼                            │
+          │                      ┌─────────────────────┐                    │
+          │                      │   User Profile      │                    │
+          │                      │   Service           │                    │
+          │                      └─────────────────────┘                    │
+          │                                    │                            │
+          ▼                                    ▼                            ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                           Recommendation Engine                                  │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐│
+│  │ Collaborative│  │Content-Based│  │  Knowledge  │  │   Real-time Ranking    ││
+│  │  Filtering   │  │  Filtering  │  │   Graph     │  │   (Context + Intent)   ││
+│  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────────────────┘│
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                               │
+                                               ▼
+                                    ┌─────────────────┐
+                                    │   Pin Database  │
+                                    │   (Metadata +   │
+                                    │   Embeddings)   │
+                                    └─────────────────┘
+```
+
+**Key Components:**
+
+**1. NLU Service (Natural Language Understanding)**
+```python
+# Intent Classification Examples
+intents = {
+    "explore": "Show me home decor ideas",
+    "similar": "More like this one",
+    "filter": "Only show DIY projects",
+    "specific": "Find minimalist kitchen designs",
+    "feedback": "I don't like this style"
+}
+
+# Entity Extraction
+entities = {
+    "category": "home decor",
+    "style": "minimalist",
+    "color": "blue",
+    "room": "kitchen"
+}
+```
+
+**2. Conversation Manager**
+```python
+class ConversationContext:
+    user_id: str
+    session_id: str
+    turns: list[Turn]  # History of user/bot messages
+    current_intent: str
+    entities: dict[str, str]  # Accumulated entities
+    shown_pins: set[str]  # Avoid repeats
+    liked_pins: list[str]
+    disliked_pins: list[str]
+
+    def update(self, user_message: str, extracted_intent: str, entities: dict):
+        # Merge new entities, update intent
+        # Track context for multi-turn
+        pass
+```
+
+**3. Recommendation Engine**
+
+```python
+def get_recommendations(context: ConversationContext) -> list[Pin]:
+    # 1. Build query from context
+    query_embedding = encode_query(context)
+
+    # 2. Candidate retrieval
+    candidates = []
+    candidates += collaborative_filter(context.user_id)
+    candidates += content_based_filter(context.liked_pins)
+    candidates += semantic_search(query_embedding)
+
+    # 3. Filter shown/disliked
+    candidates = [p for p in candidates
+                  if p.id not in context.shown_pins
+                  and p.id not in context.disliked_pins]
+
+    # 4. Rank with context
+    ranked = rank_with_context(
+        candidates,
+        user_profile=get_profile(context.user_id),
+        conversation_context=context,
+        intent=context.current_intent
+    )
+
+    return ranked[:10]
+```
+
+**4. Response Generation (LLM)**
+```python
+def generate_response(pins: list[Pin], context: ConversationContext) -> str:
+    prompt = f"""
+    User is looking for: {context.current_intent}
+    Preferences: {context.entities}
+
+    Recommended pins:
+    {format_pins(pins)}
+
+    Generate a friendly response introducing these pins.
+    Explain why they match the user's request.
+    """
+    return llm.generate(prompt)
+```
+
+**Personalization Signals:**
+- Historical pin interactions (saves, clicks, time spent)
+- Board themes
+- Search history
+- Explicit preferences from conversation
+- Real-time session behavior
+
+**Feedback Loop:**
+```
+User Action (like/save/dismiss)
+         ↓
+Update User Profile (short-term + long-term)
+         ↓
+Retrain Recommendation Models (batch)
+         ↓
+A/B Test New Models
+```
+
+**Scaling Considerations:**
+- LLM inference: Batch requests, model serving with GPUs
+- Embeddings: Pre-compute and cache pin embeddings
+- Conversation state: Redis for session storage
+- Recommendations: Pre-compute candidate sets, real-time ranking
+
+---
 
 ### Design Pinterest Notifications
 
