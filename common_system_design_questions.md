@@ -50,71 +50,35 @@ A comprehensive guide to frequently asked system design questions with detailed 
 
 ### Capacity Estimation
 
-```
-Write: 100M / 86400 ≈ 1,200 URLs/second
-Read: 1B / 86400 ≈ 12,000 redirects/second
+**Write load:** 100M URLs per day divided by 86,400 seconds equals approximately 1,200 URLs per second.
 
-Storage (5 years):
-- 100M × 365 × 5 = 182.5B URLs
-- Average URL: 500 bytes
-- Total: 182.5B × 500 = ~90 TB
-```
+**Read load:** 1B redirects per day divided by 86,400 seconds equals approximately 12,000 redirects per second.
+
+**Storage for 5 years:** 100M URLs per day times 365 days times 5 years equals 182.5 billion URLs. With an average URL size of 500 bytes, total storage is approximately 90 TB.
 
 ### High-Level Architecture
 
-```
-┌──────────┐     ┌──────────────┐     ┌─────────────┐
-│  Client  │────▶│ Load Balancer│────▶│  API Server │
-└──────────┘     └──────────────┘     └──────┬──────┘
-                                             │
-                      ┌──────────────────────┼──────────────────────┐
-                      │                      │                      │
-               ┌──────▼──────┐       ┌───────▼───────┐      ┌───────▼───────┐
-               │    Cache    │       │   Database    │      │  Analytics    │
-               │   (Redis)   │       │  (Cassandra)  │      │   (Kafka)     │
-               └─────────────┘       └───────────────┘      └───────────────┘
-```
+**Architecture Flow:**
+1. Client sends request to Load Balancer
+2. Load Balancer routes to API Server
+3. API Server connects to three main backend services:
+   - Cache (Redis) for fast URL lookups
+   - Database (Cassandra) for persistent storage
+   - Analytics (Kafka) for tracking clicks and metrics
 
 ### URL Encoding Approaches
 
 **Option 1: Base62 Encoding**
-```python
-CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
-def encode(num: int) -> str:
-    if num == 0:
-        return CHARSET[0]
-    result = []
-    while num > 0:
-        result.append(CHARSET[num % 62])
-        num //= 62
-    return ''.join(reversed(result))
+The Base62 encoding algorithm converts a numeric ID to a short alphanumeric string using characters 0-9, A-Z, and a-z (62 total characters). The algorithm works by repeatedly dividing the number by 62 and mapping each remainder to the corresponding character. The result is reversed since digits are generated least-significant first. With 7 characters, this provides 62^7 (approximately 3.5 trillion) unique URLs.
 
-# 7 characters = 62^7 = 3.5 trillion unique URLs
-```
+**Option 2: MD5/SHA256 Hash with Truncation**
 
-**Option 2: MD5/SHA256 Hash + Truncation**
-```python
-import hashlib
-
-def generate_short_url(long_url: str) -> str:
-    hash_bytes = hashlib.md5(long_url.encode()).digest()
-    # Take first 7 characters of base62 encoding
-    return base62_encode(int.from_bytes(hash_bytes[:6], 'big'))[:7]
-```
+This approach takes the MD5 hash of the long URL, converts the first 6 bytes to base62, and takes the first 7 characters. This is simpler to implement but requires collision handling.
 
 **Option 3: Pre-generated Keys (Key Generation Service)**
-```python
-class KeyGenerationService:
-    def __init__(self):
-        self.unused_keys = Queue()  # Pre-generated keys
-        self.used_keys = set()
 
-    def get_key(self) -> str:
-        key = self.unused_keys.get()
-        self.used_keys.add(key)
-        return key
-```
+A separate service pre-generates unique keys and stores them in an unused keys queue. When a new short URL is needed, a key is retrieved from the queue and moved to the used keys set. This eliminates runtime collision handling but requires separate key management infrastructure.
 
 ### Tradeoffs: Encoding Approaches
 
@@ -127,19 +91,17 @@ class KeyGenerationService:
 
 ### Database Schema
 
-```sql
-CREATE TABLE urls (
-    short_code VARCHAR(10) PRIMARY KEY,
-    long_url TEXT NOT NULL,
-    user_id UUID,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    expires_at TIMESTAMPTZ,
-    click_count BIGINT DEFAULT 0
-);
+**URL Table Schema:**
+- short_code (primary key, VARCHAR(10)): The 7-character shortened URL identifier
+- long_url (TEXT, NOT NULL): The original destination URL
+- user_id (UUID): Optional owner of the URL
+- created_at (TIMESTAMPTZ): Timestamp of creation, defaults to current time
+- expires_at (TIMESTAMPTZ): Optional expiration time
+- click_count (BIGINT): Number of redirects, defaults to 0
 
-CREATE INDEX idx_urls_user ON urls(user_id);
-CREATE INDEX idx_urls_expires ON urls(expires_at) WHERE expires_at IS NOT NULL;
-```
+**Indexes:**
+- Index on user_id for user-based queries
+- Partial index on expires_at for non-null expiration values
 
 ### Database Choice Tradeoffs
 
@@ -151,22 +113,12 @@ CREATE INDEX idx_urls_expires ON urls(expires_at) WHERE expires_at IS NOT NULL;
 
 ### Caching Strategy
 
-```python
-class URLShortener:
-    def redirect(self, short_code: str) -> str:
-        # Check cache first
-        cached = self.redis.get(f"url:{short_code}")
-        if cached:
-            return cached
-
-        # Cache miss - query database
-        url = self.db.get_url(short_code)
-        if url:
-            self.redis.setex(f"url:{short_code}", 3600, url.long_url)
-            return url.long_url
-
-        raise NotFoundError()
-```
+**Redirect Flow with Caching:**
+1. Check Redis cache for the short code
+2. If found (cache hit), return the cached long URL
+3. If not found (cache miss), query the database
+4. If found in database, cache the result with a 1-hour TTL and return the long URL
+5. If not found anywhere, raise a NotFoundError
 
 ### Key Design Decisions
 
@@ -180,17 +132,11 @@ class URLShortener:
 
 ### Handling Collisions
 
-```python
-def create_short_url(long_url: str, max_retries: int = 3) -> str:
-    for attempt in range(max_retries):
-        short_code = generate_code(long_url + str(attempt))
-        try:
-            self.db.insert(short_code, long_url)
-            return short_code
-        except DuplicateKeyError:
-            continue
-    raise CollisionError("Max retries exceeded")
-```
+**Collision Handling Algorithm:**
+1. Generate a short code from the long URL
+2. Attempt to insert into the database
+3. If a duplicate key error occurs, retry with a modified input (append attempt number as salt)
+4. After 3 failed attempts, raise a CollisionError
 
 ### Interview Discussion Points
 
@@ -309,7 +255,7 @@ def create_short_url(long_url: str, max_retries: int = 3) -> str:
    - Option to redirect to archived version
 
 7. **How to implement geographic-specific redirects?**
-   - Store geo-rules in URL metadata: `{US: url1, EU: url2, default: url3}`
+   - Store geo-rules in URL metadata: {US: url1, EU: url2, default: url3}
    - GeoIP lookup at redirect time
    - CDN-level geo-routing for edge performance
    - Allow creators to configure per URL
@@ -345,84 +291,24 @@ def create_short_url(long_url: str, max_retries: int = 3) -> str:
 
 #### 1. Token Bucket
 
-```python
-class TokenBucket:
-    def __init__(self, capacity: int, refill_rate: float):
-        self.capacity = capacity
-        self.tokens = capacity
-        self.refill_rate = refill_rate  # tokens per second
-        self.last_refill = time.time()
-
-    def allow_request(self, tokens: int = 1) -> bool:
-        self._refill()
-        if self.tokens >= tokens:
-            self.tokens -= tokens
-            return True
-        return False
-
-    def _refill(self):
-        now = time.time()
-        elapsed = now - self.last_refill
-        self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_rate)
-        self.last_refill = now
-```
+**Token Bucket Algorithm:**
+The token bucket maintains a bucket with a maximum capacity and a refill rate (tokens per second). When a request arrives, tokens are first refilled based on elapsed time since the last refill. If enough tokens are available, they are consumed and the request is allowed. Otherwise, the request is denied. This algorithm allows bursts up to the bucket capacity while maintaining an average rate.
 
 **Pros:** Allows bursts, smooth rate limiting, memory efficient
 **Cons:** Harder to reason about exact limits
 
 #### 2. Sliding Window Log
 
-```python
-class SlidingWindowLog:
-    def __init__(self, window_size: int, max_requests: int):
-        self.window_size = window_size  # seconds
-        self.max_requests = max_requests
-        self.requests = []  # timestamps
-
-    def allow_request(self) -> bool:
-        now = time.time()
-        cutoff = now - self.window_size
-
-        # Remove old entries
-        self.requests = [ts for ts in self.requests if ts > cutoff]
-
-        if len(self.requests) < self.max_requests:
-            self.requests.append(now)
-            return True
-        return False
-```
+**Sliding Window Log Algorithm:**
+This approach stores the timestamp of every request within the current window. When a new request arrives, old entries outside the window are removed, and if the count is under the limit, the request is allowed and its timestamp is added. This provides exact rate limiting with no boundary issues.
 
 **Pros:** Precise, no boundary issues
 **Cons:** Memory intensive for high-volume APIs
 
 #### 3. Sliding Window Counter
 
-```python
-class SlidingWindowCounter:
-    def __init__(self, window_size: int, max_requests: int):
-        self.window_size = window_size
-        self.max_requests = max_requests
-
-    def allow_request(self, redis, key: str) -> bool:
-        now = time.time()
-        current_window = int(now // self.window_size)
-        previous_window = current_window - 1
-
-        # Get counts from current and previous windows
-        current_count = int(redis.get(f"{key}:{current_window}") or 0)
-        previous_count = int(redis.get(f"{key}:{previous_window}") or 0)
-
-        # Calculate weighted count
-        elapsed_in_window = now % self.window_size
-        weight = elapsed_in_window / self.window_size
-        weighted_count = current_count + previous_count * (1 - weight)
-
-        if weighted_count < self.max_requests:
-            redis.incr(f"{key}:{current_window}")
-            redis.expire(f"{key}:{current_window}", self.window_size * 2)
-            return True
-        return False
-```
+**Sliding Window Counter Algorithm:**
+This hybrid approach divides time into fixed windows and stores counts for each window. When checking a request, it calculates a weighted count using both the current and previous window counts, where the weight is based on how far into the current window we are. This provides a good approximation with O(1) memory per key.
 
 **Pros:** Memory efficient, relatively precise
 **Cons:** Approximate (but usually acceptable)
@@ -439,70 +325,25 @@ class SlidingWindowCounter:
 
 ### Distributed Rate Limiting
 
-```python
-class DistributedRateLimiter:
-    def __init__(self, redis_cluster):
-        self.redis = redis_cluster
-
-    def is_allowed(self, key: str, limit: int, window: int) -> bool:
-        # Lua script for atomic check-and-increment
-        lua_script = """
-        local key = KEYS[1]
-        local limit = tonumber(ARGV[1])
-        local window = tonumber(ARGV[2])
-
-        local current = redis.call('INCR', key)
-        if current == 1 then
-            redis.call('EXPIRE', key, window)
-        end
-
-        if current > limit then
-            return 0
-        end
-        return 1
-        """
-        return bool(self.redis.eval(lua_script, 1, key, limit, window))
-```
+**Distributed Rate Limiter with Redis:**
+The distributed implementation uses a Lua script for atomic check-and-increment operations on Redis. The script increments a counter for the key, sets an expiration on first increment, and returns whether the request is within the limit. This ensures atomicity even across multiple application servers.
 
 ### High-Level Architecture
 
-```
-┌──────────┐     ┌──────────────┐     ┌─────────────┐
-│  Client  │────▶│   Gateway    │────▶│  API Server │
-└──────────┘     │ (Rate Check) │     └─────────────┘
-                 └──────┬───────┘
-                        │
-         ┌──────────────┼──────────────┐
-         │              │              │
-  ┌──────▼──────┐ ┌─────▼─────┐ ┌──────▼──────┐
-  │ Redis Node 1│ │Redis Node 2│ │Redis Node 3│
-  └─────────────┘ └───────────┘ └─────────────┘
-                        │
-                 ┌──────▼──────┐
-                 │   Config    │
-                 │   Service   │
-                 └─────────────┘
-```
+**Architecture Flow:**
+1. Client sends request to Gateway
+2. Gateway performs rate check before routing
+3. Gateway connects to Redis Cluster (multiple nodes) for distributed state
+4. If allowed, request proceeds to API Server
+5. Config Service provides rate limit rules to the Gateway
 
 ### Handling Failures
 
-```python
-class ResilientRateLimiter:
-    def is_allowed(self, key: str) -> bool:
-        try:
-            return self._check_redis(key)
-        except RedisConnectionError:
-            # Fallback strategies:
-
-            # Option 1: Fail open (allow all)
-            return True
-
-            # Option 2: Fail closed (deny all)
-            # return False
-
-            # Option 3: Local rate limiting
-            # return self._local_limiter.is_allowed(key)
-```
+**Resilient Rate Limiter Strategies:**
+When Redis is unavailable, the rate limiter can use one of three fallback strategies:
+- **Fail open:** Allow all requests (better UX, risk of abuse during outage)
+- **Fail closed:** Deny all requests (protects backend, blocks legitimate traffic)
+- **Local fallback:** Use in-memory rate limiting per node (inconsistent limits but functional)
 
 ### Tradeoffs: Fail Open vs Fail Closed
 
@@ -514,13 +355,8 @@ class ResilientRateLimiter:
 
 ### Response Headers
 
-```http
-HTTP/1.1 429 Too Many Requests
-X-RateLimit-Limit: 100
-X-RateLimit-Remaining: 0
-X-RateLimit-Reset: 1640000000
-Retry-After: 60
-```
+**Rate Limit Response Format:**
+When a rate limit is exceeded, the response includes HTTP status 429 (Too Many Requests) with headers indicating: the rate limit (X-RateLimit-Limit: 100), remaining requests (X-RateLimit-Remaining: 0), reset timestamp (X-RateLimit-Reset: 1640000000), and suggested retry delay (Retry-After: 60).
 
 ### Interview Discussion Points
 
@@ -613,7 +449,7 @@ Retry-After: 60
 ### Interview Deep-Dive Questions
 
 4. **How to rate limit by multiple keys simultaneously (IP + user + endpoint)?**
-   - Check all limits in parallel: `MULTI/EXEC` in Redis
+   - Check all limits in parallel: MULTI/EXEC in Redis
    - Use composite keys: `{ip}:{user}:{endpoint}`
    - Hierarchical limits: global → tenant → user → endpoint
    - Return most restrictive limit in response headers
@@ -666,115 +502,25 @@ Retry-After: 60
 
 ### High-Level Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Clients                                  │
-└────────────────────────────┬────────────────────────────────────┘
-                             │
-                    ┌────────▼────────┐
-                    │  Client Library │
-                    │ (Consistent Hash)│
-                    └────────┬────────┘
-                             │
-        ┌────────────────────┼────────────────────┐
-        │                    │                    │
-┌───────▼───────┐   ┌────────▼────────┐  ┌────────▼────────┐
-│  Cache Node 1 │   │  Cache Node 2   │  │  Cache Node 3   │
-│   (Primary)   │   │   (Primary)     │  │   (Primary)     │
-└───────┬───────┘   └────────┬────────┘  └────────┬────────┘
-        │                    │                    │
-┌───────▼───────┐   ┌────────▼────────┐  ┌────────▼────────┐
-│   Replica 1   │   │    Replica 2    │  │    Replica 3    │
-└───────────────┘   └─────────────────┘  └─────────────────┘
-```
+**Architecture Flow:**
+1. Clients connect through a Client Library that implements consistent hashing
+2. Client Library routes requests to the appropriate Cache Node based on key hash
+3. Three Cache Nodes (each a Primary) handle different key ranges
+4. Each Primary has a Replica for fault tolerance
+5. Consistent hashing minimizes key redistribution when nodes are added or removed
 
 ### Data Partitioning: Consistent Hashing
 
-```python
-import hashlib
-from bisect import bisect_right
-
-class ConsistentHash:
-    def __init__(self, nodes: list, virtual_nodes: int = 150):
-        self.virtual_nodes = virtual_nodes
-        self.ring = []
-        self.node_map = {}
-
-        for node in nodes:
-            self.add_node(node)
-
-    def _hash(self, key: str) -> int:
-        return int(hashlib.md5(key.encode()).hexdigest(), 16)
-
-    def add_node(self, node: str):
-        for i in range(self.virtual_nodes):
-            virtual_key = f"{node}:{i}"
-            hash_val = self._hash(virtual_key)
-            self.ring.append(hash_val)
-            self.node_map[hash_val] = node
-        self.ring.sort()
-
-    def remove_node(self, node: str):
-        for i in range(self.virtual_nodes):
-            virtual_key = f"{node}:{i}"
-            hash_val = self._hash(virtual_key)
-            self.ring.remove(hash_val)
-            del self.node_map[hash_val]
-
-    def get_node(self, key: str) -> str:
-        if not self.ring:
-            return None
-        hash_val = self._hash(key)
-        idx = bisect_right(self.ring, hash_val) % len(self.ring)
-        return self.node_map[self.ring[idx]]
-```
+**Consistent Hashing Algorithm:**
+The consistent hash ring places both nodes and keys on a circular hash space. Each physical node is represented by multiple virtual nodes (e.g., 150) distributed around the ring to ensure even load distribution. To find the node for a key, hash the key and walk clockwise around the ring until finding the first node. When nodes are added or removed, only keys that hash between the affected node and its predecessor need to move.
 
 ### Eviction Policies
 
-```python
-class LRUCache:
-    """Least Recently Used - evict oldest accessed item"""
-    def __init__(self, capacity: int):
-        self.capacity = capacity
-        self.cache = OrderedDict()
+**LRU (Least Recently Used) Algorithm:**
+Maintains an ordered dictionary where the most recently accessed items are at the end. On get, the item is moved to the end. On put, if capacity is exceeded, the oldest item (front) is evicted. This works well when recent access patterns predict future access.
 
-    def get(self, key: str):
-        if key in self.cache:
-            self.cache.move_to_end(key)
-            return self.cache[key]
-        return None
-
-    def put(self, key: str, value: any):
-        if key in self.cache:
-            self.cache.move_to_end(key)
-        self.cache[key] = value
-        if len(self.cache) > self.capacity:
-            self.cache.popitem(last=False)
-
-
-class LFUCache:
-    """Least Frequently Used - evict least accessed item"""
-    def __init__(self, capacity: int):
-        self.capacity = capacity
-        self.cache = {}
-        self.freq = defaultdict(OrderedDict)
-        self.min_freq = 0
-
-    def get(self, key: str):
-        if key not in self.cache:
-            return None
-
-        value, freq = self.cache[key]
-        del self.freq[freq][key]
-        if not self.freq[freq]:
-            del self.freq[freq]
-            if self.min_freq == freq:
-                self.min_freq += 1
-
-        self.freq[freq + 1][key] = True
-        self.cache[key] = (value, freq + 1)
-        return value
-```
+**LFU (Least Frequently Used) Algorithm:**
+Tracks access frequency for each item using a frequency map with ordered dictionaries at each frequency level. On access, items move to the next frequency level. Eviction removes items from the lowest non-empty frequency level. This keeps popular items longer but is slower to adapt to changing patterns.
 
 ### Eviction Policy Comparison
 
@@ -788,30 +534,11 @@ class LFUCache:
 
 ### Cache Invalidation Strategies
 
-```python
-class CacheInvalidation:
-    # 1. Write-through: Write to cache and DB simultaneously
-    def write_through(self, key: str, value: any):
-        self.cache.set(key, value)
-        self.db.write(key, value)
+**Write-through:** Write to cache and database simultaneously. Ensures consistency but slows writes.
 
-    # 2. Write-behind: Write to cache, async write to DB
-    def write_behind(self, key: str, value: any):
-        self.cache.set(key, value)
-        self.queue.enqueue(WriteTask(key, value))
+**Write-behind (Write-back):** Write to cache immediately, queue database write for async processing. Fast writes but risk of data loss and complexity.
 
-    # 3. Cache-aside: Application manages cache
-    def cache_aside_read(self, key: str):
-        value = self.cache.get(key)
-        if value is None:
-            value = self.db.read(key)
-            self.cache.set(key, value)
-        return value
-
-    def cache_aside_write(self, key: str, value: any):
-        self.db.write(key, value)
-        self.cache.delete(key)  # Invalidate, not update
-```
+**Cache-aside (Lazy loading):** On read, check cache first; on miss, read from database and populate cache. On write, update database and invalidate (delete) cache entry. Simple and flexible but has potential for stale reads.
 
 ### Invalidation Strategy Tradeoffs
 
@@ -824,61 +551,20 @@ class CacheInvalidation:
 
 ### Replication Strategies
 
-```python
-class ReplicatedCache:
-    def __init__(self, primary, replicas):
-        self.primary = primary
-        self.replicas = replicas
+**Synchronous Replication:** Write to primary and wait for all replicas to acknowledge before returning success. Ensures strong consistency but increases write latency.
 
-    # Synchronous replication
-    def sync_write(self, key: str, value: any):
-        self.primary.set(key, value)
-        for replica in self.replicas:
-            replica.set(key, value)  # Wait for all
+**Asynchronous Replication:** Write to primary and immediately return success, then queue replication to followers. Lower latency but risks data loss if primary fails before replication completes.
 
-    # Asynchronous replication
-    def async_write(self, key: str, value: any):
-        self.primary.set(key, value)
-        for replica in self.replicas:
-            self.queue.enqueue(ReplicateTask(replica, key, value))
-
-    # Read from replica (load distribution)
-    def read(self, key: str, prefer_replica: bool = True):
-        if prefer_replica and self.replicas:
-            return random.choice(self.replicas).get(key)
-        return self.primary.get(key)
-```
+**Read Distribution:** For reads, optionally prefer replicas to distribute load, falling back to primary if needed.
 
 ### Hot Key Handling
 
-```python
-class HotKeyHandler:
-    def __init__(self):
-        self.local_cache = TTLCache(maxsize=1000, ttl=1)
-        self.hot_keys = set()
-
-    def get(self, key: str):
-        # Check local cache for hot keys
-        if key in self.hot_keys:
-            value = self.local_cache.get(key)
-            if value:
-                return value
-
-        # Fetch from distributed cache
-        value = self.distributed_cache.get(key)
-
-        # Detect and cache hot keys locally
-        if self._is_hot(key):
-            self.hot_keys.add(key)
-            self.local_cache[key] = value
-
-        return value
-
-    def _is_hot(self, key: str) -> bool:
-        # Track access frequency
-        self.access_count[key] += 1
-        return self.access_count[key] > HOT_THRESHOLD
-```
+**Hot Key Detection and Mitigation:**
+1. Maintain a local cache (short TTL, e.g., 1 second) for hot keys
+2. Track access frequency per key
+3. When a key exceeds a threshold, mark it as hot
+4. For hot keys, serve from local cache to avoid hammering the distributed cache
+5. Periodically sync hot key values from the distributed cache
 
 ### Interview Discussion Points
 
@@ -1026,107 +712,33 @@ class HotKeyHandler:
 
 ### CAP Theorem Considerations
 
-```
-         Consistency
-            /\
-           /  \
-          /    \
-         /  CA  \
-        /________\
-       /\        /\
-      /  \  CP  /  \
-     / AP \    /    \
-    /______\  /______\
-Availability  Partition Tolerance
-```
+The CAP theorem states that a distributed system can only guarantee two of three properties: Consistency, Availability, and Partition Tolerance. Since network partitions are inevitable, the real choice is between CP (consistent but may be unavailable during partitions) and AP (available but may return stale data during partitions).
 
-**Design Choice:** AP with tunable consistency (like Cassandra/DynamoDB)
+**Design Choice:** AP with tunable consistency (like Cassandra/DynamoDB), allowing applications to choose their consistency level per operation.
 
 ### High-Level Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                          Clients                                 │
-└────────────────────────────┬────────────────────────────────────┘
-                             │
-                    ┌────────▼────────┐
-                    │   Coordinator   │
-                    │     Node        │
-                    └────────┬────────┘
-                             │
-        ┌────────────────────┼────────────────────┐
-        │                    │                    │
-┌───────▼───────┐   ┌────────▼────────┐  ┌────────▼────────┐
-│   Storage     │   │    Storage      │  │    Storage      │
-│   Node 1      │   │    Node 2       │  │    Node 3       │
-│ [A-F keys]    │   │  [G-M keys]     │  │  [N-Z keys]     │
-└───────────────┘   └─────────────────┘  └─────────────────┘
-```
+**Architecture Flow:**
+1. Clients connect to any Coordinator Node
+2. Coordinator routes requests to appropriate Storage Nodes based on key hash
+3. Storage Nodes are partitioned by key range (e.g., Node 1 handles A-F, Node 2 handles G-M, Node 3 handles N-Z)
+4. Each key is replicated to multiple nodes for fault tolerance
+5. Coordinator handles quorum-based reads and writes
 
 ### Data Partitioning
 
-```python
-class PartitionManager:
-    def __init__(self, nodes: list, replication_factor: int = 3):
-        self.hash_ring = ConsistentHash(nodes)
-        self.rf = replication_factor
-
-    def get_nodes_for_key(self, key: str) -> list:
-        """Return N nodes responsible for this key (N = replication factor)"""
-        primary = self.hash_ring.get_node(key)
-        replicas = self._get_next_nodes(primary, self.rf - 1)
-        return [primary] + replicas
-
-    def _get_next_nodes(self, start_node: str, count: int) -> list:
-        """Get next N unique physical nodes on the ring"""
-        nodes = []
-        # Walk the ring to find next unique nodes
-        # (skip virtual nodes of same physical node)
-        ...
-        return nodes
-```
+**Partition Manager Algorithm:**
+Uses consistent hashing with a configurable replication factor (default 3). For any key, the manager identifies the primary node using the hash ring, then walks the ring to find the next N-1 distinct physical nodes for replicas. This ensures replicas are on different physical machines, ideally in different racks.
 
 ### Quorum-Based Consistency
 
-```python
-class QuorumCoordinator:
-    def __init__(self, n: int = 3, w: int = 2, r: int = 2):
-        self.n = n  # Total replicas
-        self.w = w  # Write quorum
-        self.r = r  # Read quorum
-        # Note: W + R > N ensures consistency
+**Quorum Coordination:**
+With N total replicas, W write quorum, and R read quorum:
+- **Write:** Send to all N nodes, succeed if W acknowledge
+- **Read:** Query all N nodes, return if R respond, pick value with highest version
+- **Consistency guarantee:** If W + R > N, reads will see the latest write
 
-    def write(self, key: str, value: any) -> bool:
-        nodes = self.get_replica_nodes(key)
-        responses = []
-
-        for node in nodes:
-            try:
-                response = node.write(key, value, version=time.time())
-                responses.append(response)
-            except NodeUnavailable:
-                continue
-
-        # Success if W nodes acknowledged
-        return len([r for r in responses if r.success]) >= self.w
-
-    def read(self, key: str) -> any:
-        nodes = self.get_replica_nodes(key)
-        responses = []
-
-        for node in nodes:
-            try:
-                response = node.read(key)
-                responses.append(response)
-            except NodeUnavailable:
-                continue
-
-        if len(responses) < self.r:
-            raise InsufficientReplicas()
-
-        # Return most recent version
-        return max(responses, key=lambda r: r.version).value
-```
+For example, with N=3, W=2, R=2: any read must overlap with at least one node that has the latest write.
 
 ### Consistency Level Tradeoffs
 
@@ -1139,130 +751,37 @@ class QuorumCoordinator:
 
 ### Write Path (LSM-Tree)
 
-```python
-class LSMTree:
-    def __init__(self):
-        self.memtable = SortedDict()  # In-memory, sorted
-        self.wal = WriteAheadLog()    # Durability
-        self.sstables = []            # On-disk, immutable
+**LSM-Tree Write Algorithm:**
+1. **Write to WAL:** Append to write-ahead log for durability
+2. **Write to Memtable:** Insert into in-memory sorted structure
+3. **Flush when full:** When memtable exceeds threshold, write to immutable SSTable on disk
+4. **Clear and continue:** Clear memtable and WAL, start fresh
 
-    def write(self, key: str, value: any):
-        # 1. Write to WAL for durability
-        self.wal.append(key, value)
-
-        # 2. Write to memtable
-        self.memtable[key] = value
-
-        # 3. Flush to SSTable if memtable is full
-        if len(self.memtable) > MEMTABLE_THRESHOLD:
-            self._flush_to_sstable()
-
-    def _flush_to_sstable(self):
-        # Create new SSTable from memtable
-        sstable = SSTable.from_dict(self.memtable)
-        self.sstables.append(sstable)
-        self.memtable.clear()
-        self.wal.clear()
-
-    def read(self, key: str):
-        # 1. Check memtable first
-        if key in self.memtable:
-            return self.memtable[key]
-
-        # 2. Search SSTables (newest first)
-        for sstable in reversed(self.sstables):
-            value = sstable.get(key)
-            if value is not None:
-                return value
-
-        return None
-```
+This provides fast writes (sequential I/O) at the cost of slower reads (may need to check multiple SSTables).
 
 ### SSTable with Bloom Filter
 
-```python
-class SSTable:
-    def __init__(self, data: dict):
-        self.data = sorted(data.items())
-        self.index = self._build_sparse_index()
-        self.bloom_filter = BloomFilter()
+**SSTable Read Optimization:**
+Each SSTable includes a sparse index and Bloom filter. On read:
+1. Check Bloom filter first (quick negative lookup)
+2. If Bloom filter says "maybe present," use sparse index for binary search
+3. Bloom filters have false positives but no false negatives, avoiding unnecessary disk reads
 
-        for key in data:
-            self.bloom_filter.add(key)
-
-    def get(self, key: str):
-        # Quick negative check
-        if not self.bloom_filter.might_contain(key):
-            return None
-
-        # Binary search using sparse index
-        return self._binary_search(key)
-
-
-class BloomFilter:
-    def __init__(self, size: int = 10000, hash_count: int = 3):
-        self.size = size
-        self.hash_count = hash_count
-        self.bits = bitarray(size)
-
-    def add(self, key: str):
-        for i in range(self.hash_count):
-            idx = self._hash(key, i) % self.size
-            self.bits[idx] = 1
-
-    def might_contain(self, key: str) -> bool:
-        for i in range(self.hash_count):
-            idx = self._hash(key, i) % self.size
-            if not self.bits[idx]:
-                return False
-        return True  # Might be false positive
-```
+**Bloom Filter Operation:**
+Uses multiple hash functions to set bits in a bit array. To check membership, all corresponding bits must be set. False positives are possible (all bits set by different keys) but false negatives are not.
 
 ### Conflict Resolution
 
-```python
-class VectorClock:
-    """Track causality for conflict detection"""
-    def __init__(self):
-        self.clock = defaultdict(int)
+**Vector Clock Algorithm:**
+Tracks causality using a map of node IDs to logical timestamps. When comparing two vector clocks:
+- If all entries in A ≤ corresponding entries in B, A happened BEFORE B
+- If all entries in A ≥ corresponding entries in B, A happened AFTER B
+- If neither, the events are CONCURRENT (conflict!)
 
-    def increment(self, node_id: str):
-        self.clock[node_id] += 1
-
-    def merge(self, other: 'VectorClock'):
-        for node, time in other.clock.items():
-            self.clock[node] = max(self.clock[node], time)
-
-    def compare(self, other: 'VectorClock') -> str:
-        less = more = equal = True
-        for node in set(self.clock.keys()) | set(other.clock.keys()):
-            if self.clock[node] < other.clock[node]:
-                more = False
-            elif self.clock[node] > other.clock[node]:
-                less = False
-            if self.clock[node] != other.clock[node]:
-                equal = False
-
-        if equal:
-            return "EQUAL"
-        if less:
-            return "BEFORE"
-        if more:
-            return "AFTER"
-        return "CONCURRENT"  # Conflict!
-
-
-class ConflictResolver:
-    def resolve(self, values: list) -> any:
-        # Strategy 1: Last-write-wins (timestamp)
-        return max(values, key=lambda v: v.timestamp).value
-
-        # Strategy 2: Return all (let application decide)
-        # return [v.value for v in values]
-
-        # Strategy 3: Merge (for CRDTs)
-        # return self.merge_crdt(values)
-```
+**Conflict Resolution Strategies:**
+- **Last-write-wins:** Use timestamp, simpler but may lose data
+- **Return all versions:** Let application merge (like shopping carts)
+- **CRDTs:** Use conflict-free replicated data types for automatic merge
 
 ### Interview Discussion Points
 
@@ -1419,167 +938,41 @@ class ConflictResolver:
 
 ### High-Level Architecture
 
-```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│  Producer 1  │     │  Producer 2  │     │  Producer 3  │
-└──────┬───────┘     └──────┬───────┘     └──────┬───────┘
-       │                    │                    │
-       └────────────────────┼────────────────────┘
-                            │
-                   ┌────────▼────────┐
-                   │  Load Balancer  │
-                   └────────┬────────┘
-                            │
-        ┌───────────────────┼───────────────────┐
-        │                   │                   │
-┌───────▼───────┐  ┌────────▼────────┐  ┌───────▼───────┐
-│   Broker 1    │  │    Broker 2     │  │   Broker 3    │
-│ ┌───────────┐ │  │ ┌───────────┐   │  │ ┌───────────┐ │
-│ │Partition 0│ │  │ │Partition 1│   │  │ │Partition 2│ │
-│ │ (Leader)  │ │  │ │ (Leader)  │   │  │ │ (Leader)  │ │
-│ └───────────┘ │  │ └───────────┘   │  │ └───────────┘ │
-│ ┌───────────┐ │  │ ┌───────────┐   │  │ ┌───────────┐ │
-│ │Partition 1│ │  │ │Partition 2│   │  │ │Partition 0│ │
-│ │ (Replica) │ │  │ │ (Replica) │   │  │ │ (Replica) │ │
-│ └───────────┘ │  │ └───────────┘   │  │ └───────────┘ │
-└───────────────┘  └─────────────────┘  └───────────────┘
-        │                   │                   │
-        └───────────────────┼───────────────────┘
-                            │
-       ┌────────────────────┼────────────────────┐
-       │                    │                    │
-┌──────▼───────┐     ┌──────▼───────┐     ┌──────▼───────┐
-│  Consumer 1  │     │  Consumer 2  │     │  Consumer 3  │
-│ (Group A)    │     │ (Group A)    │     │ (Group B)    │
-└──────────────┘     └──────────────┘     └──────────────┘
-```
+**Architecture Flow:**
+1. Multiple Producers send messages through a Load Balancer
+2. Load Balancer routes to Brokers based on partition assignment
+3. Each Broker hosts multiple Partitions, each being either a Leader or Replica
+4. Within a Broker: Partition 0 might be Leader, Partition 1 might be Replica
+5. Replication ensures each partition's data exists on multiple Brokers
+6. Consumers organized into Consumer Groups subscribe to partitions
+7. Each partition is consumed by exactly one consumer per group
 
 ### Message Storage
 
-```python
-class Partition:
-    def __init__(self, partition_id: int):
-        self.id = partition_id
-        self.log = []  # Append-only log
-        self.offset = 0
-        self.index = {}  # offset -> file position
-
-    def append(self, message: bytes) -> int:
-        """Append message, return offset"""
-        entry = LogEntry(
-            offset=self.offset,
-            timestamp=time.time(),
-            key_size=len(message.key),
-            value_size=len(message.value),
-            key=message.key,
-            value=message.value
-        )
-        self.log.append(entry)
-        self.index[self.offset] = len(self.log) - 1
-        self.offset += 1
-        return entry.offset
-
-    def read(self, start_offset: int, max_bytes: int) -> list:
-        """Read messages starting from offset"""
-        messages = []
-        current_bytes = 0
-
-        for i in range(start_offset, self.offset):
-            entry = self.log[self.index[i]]
-            entry_size = entry.size()
-
-            if current_bytes + entry_size > max_bytes:
-                break
-
-            messages.append(entry)
-            current_bytes += entry_size
-
-        return messages
-```
+**Partition Storage Model:**
+Each partition maintains an append-only log with monotonically increasing offsets. Messages are appended with metadata (offset, timestamp, key size, value size, key, value) and indexed by offset for efficient seeking. Reading fetches messages starting from a given offset up to a byte limit.
 
 ### Consumer Groups
 
-```python
-class ConsumerGroup:
-    def __init__(self, group_id: str, topic: str):
-        self.group_id = group_id
-        self.topic = topic
-        self.consumers = {}  # consumer_id -> assigned partitions
-        self.offsets = {}    # partition -> committed offset
-
-    def rebalance(self):
-        """Redistribute partitions among consumers"""
-        partitions = self.get_topic_partitions()
-        consumers = list(self.consumers.keys())
-
-        if not consumers:
-            return
-
-        # Round-robin assignment
-        assignments = defaultdict(list)
-        for i, partition in enumerate(partitions):
-            consumer = consumers[i % len(consumers)]
-            assignments[consumer].append(partition)
-
-        self.consumers = dict(assignments)
-
-    def commit_offset(self, consumer_id: str, partition: int, offset: int):
-        """Commit consumed offset"""
-        self.offsets[partition] = offset
-
-    def get_offset(self, partition: int) -> int:
-        """Get last committed offset"""
-        return self.offsets.get(partition, 0)
-```
+**Consumer Group Coordination:**
+1. Track which partitions are assigned to which consumers
+2. Store committed offsets per partition
+3. On rebalance (consumer join/leave), redistribute partitions using round-robin or range assignment
+4. Consumers commit offsets after processing to track progress
 
 ### Delivery Guarantees
 
-```python
-class Producer:
-    def send(self, topic: str, key: bytes, value: bytes,
-             acks: str = "all") -> Future:
-        """
-        acks options:
-        - "0": Fire and forget (no guarantee)
-        - "1": Leader acknowledged (at-least-once)
-        - "all": All replicas acknowledged (strongest)
-        """
-        partition = self._select_partition(topic, key)
-        broker = self._get_leader(topic, partition)
+**Producer Acknowledgment Levels:**
+- **acks=0 (fire and forget):** No guarantee, highest throughput
+- **acks=1 (leader acknowledged):** At-least-once, leader confirms
+- **acks=all:** Strongest guarantee, all in-sync replicas confirm
 
-        request = ProduceRequest(topic, partition, key, value)
-        return broker.send(request, acks=acks)
+**Partition Selection:**
+- With key: hash(key) % num_partitions for consistent routing
+- Without key: round-robin for load distribution
 
-    def _select_partition(self, topic: str, key: bytes) -> int:
-        if key:
-            # Hash key for consistent partition
-            return hash(key) % self.num_partitions[topic]
-        else:
-            # Round-robin for keyless messages
-            return self._round_robin_counter.next() % self.num_partitions[topic]
-
-
-class Consumer:
-    def poll(self, timeout_ms: int) -> list:
-        """Fetch messages from assigned partitions"""
-        messages = []
-
-        for partition in self.assigned_partitions:
-            offset = self.group.get_offset(partition)
-            batch = self.broker.fetch(
-                self.topic, partition, offset, self.max_bytes
-            )
-            messages.extend(batch)
-
-        return messages
-
-    def commit(self):
-        """Commit current offsets"""
-        for partition in self.assigned_partitions:
-            self.group.commit_offset(
-                self.consumer_id, partition, self.current_offset[partition]
-            )
-```
+**Consumer Processing:**
+Poll messages from assigned partitions, process, then commit offsets to record progress.
 
 ### Delivery Guarantee Tradeoffs
 
@@ -1591,47 +984,14 @@ class Consumer:
 
 ### Replication
 
-```python
-class ReplicationManager:
-    def __init__(self, replication_factor: int = 3):
-        self.rf = replication_factor
+**Replication Process:**
+1. Write to leader partition first
+2. Replicate to followers (can be sync or async)
+3. Track acknowledgments from replicas
+4. Fail if not enough replicas acknowledge (based on min.insync.replicas)
 
-    def replicate(self, partition: Partition, message: bytes):
-        leader = partition.leader
-        followers = partition.followers
-
-        # Write to leader first
-        offset = leader.append(message)
-
-        # Replicate to followers
-        acks = 1  # Leader already acked
-        for follower in followers:
-            try:
-                follower.replicate(message, offset)
-                acks += 1
-            except FollowerUnavailable:
-                continue
-
-        # Check if enough replicas acknowledged
-        if acks < self.min_insync_replicas:
-            raise InsufficientReplicas()
-
-        return offset
-
-    def elect_leader(self, partition: Partition):
-        """Elect new leader from in-sync replicas"""
-        isr = partition.in_sync_replicas
-
-        if not isr:
-            # Unclean leader election (may lose data)
-            new_leader = partition.followers[0]
-        else:
-            # Clean election from ISR
-            new_leader = isr[0]
-
-        partition.leader = new_leader
-        self._notify_clients(partition)
-```
+**Leader Election:**
+On leader failure, elect new leader from in-sync replicas (ISR). If ISR is empty, may perform unclean election from any follower (risks data loss). Notify clients of new leader assignment.
 
 ### Key Design Decisions
 
@@ -1796,243 +1156,82 @@ class ReplicationManager:
 
 ### High-Level Architecture
 
-```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│   Service A  │     │   Service B  │     │   Service C  │
-└──────┬───────┘     └──────┬───────┘     └──────┬───────┘
-       │                    │                    │
-       └────────────────────┼────────────────────┘
-                            │
-                   ┌────────▼────────┐
-                   │ Notification API │
-                   └────────┬────────┘
-                            │
-                   ┌────────▼────────┐
-                   │   Kafka Queue   │
-                   └────────┬────────┘
-                            │
-        ┌───────────────────┼───────────────────┐
-        │                   │                   │
-┌───────▼───────┐  ┌────────▼────────┐  ┌───────▼───────┐
-│  Push Worker  │  │   SMS Worker    │  │ Email Worker  │
-└───────┬───────┘  └────────┬────────┘  └───────┬───────┘
-        │                   │                   │
-┌───────▼───────┐  ┌────────▼────────┐  ┌───────▼───────┐
-│  APNs / FCM   │  │ Twilio/Nexmo    │  │  SendGrid     │
-└───────────────┘  └─────────────────┘  └───────────────┘
-```
+**Architecture Flow:**
+1. Services (A, B, C) send notification requests to Notification API
+2. Notification API validates and publishes to Kafka Queue
+3. Kafka routes to channel-specific Workers (Push, SMS, Email)
+4. Push Worker connects to APNs/FCM for mobile delivery
+5. SMS Worker connects to Twilio/Nexmo for text messages
+6. Email Worker connects to SendGrid for email delivery
 
 ### Data Model
 
-```sql
--- User notification preferences
-CREATE TABLE notification_preferences (
-    user_id UUID PRIMARY KEY,
-    push_enabled BOOLEAN DEFAULT TRUE,
-    email_enabled BOOLEAN DEFAULT TRUE,
-    sms_enabled BOOLEAN DEFAULT FALSE,
-    quiet_hours_start TIME,
-    quiet_hours_end TIME,
-    frequency_limit INTEGER DEFAULT 10,  -- per hour
-    channel_preferences JSONB,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
+**Notification Preferences Table:**
+- user_id (primary key, UUID)
+- push_enabled (boolean, default true)
+- email_enabled (boolean, default true)
+- sms_enabled (boolean, default false)
+- quiet_hours_start/end (TIME)
+- frequency_limit (integer, per hour)
+- channel_preferences (JSONB for granular settings)
 
--- Device tokens for push notifications
-CREATE TABLE device_tokens (
-    id UUID PRIMARY KEY,
-    user_id UUID NOT NULL,
-    platform VARCHAR(20) NOT NULL,  -- ios, android, web
-    token TEXT NOT NULL,
-    app_version VARCHAR(20),
-    is_active BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
+**Device Tokens Table:**
+- id (UUID primary key)
+- user_id (UUID, foreign key)
+- platform (ios, android, web)
+- token (device push token)
+- app_version, is_active
+- Unique constraint on (user_id, token)
 
-    UNIQUE(user_id, token)
-);
-
--- Notification log
-CREATE TABLE notifications (
-    id UUID PRIMARY KEY,
-    user_id UUID NOT NULL,
-    type VARCHAR(50) NOT NULL,
-    channel VARCHAR(20) NOT NULL,  -- push, sms, email
-    title VARCHAR(255),
-    body TEXT,
-    data JSONB,
-    status VARCHAR(20) DEFAULT 'pending',
-    sent_at TIMESTAMPTZ,
-    delivered_at TIMESTAMPTZ,
-    read_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-
-    INDEX idx_notifications_user (user_id, created_at DESC)
-);
-```
+**Notifications Log Table:**
+- id (UUID primary key)
+- user_id, type, channel (push/sms/email)
+- title, body, data (payload)
+- status (pending/sent/delivered/read)
+- sent_at, delivered_at, read_at timestamps
+- Index on (user_id, created_at DESC)
 
 ### Notification Service
 
-```python
-class NotificationService:
-    def __init__(self):
-        self.queue = KafkaProducer()
-        self.rate_limiter = RateLimiter()
-        self.preference_cache = RedisCache()
+**Send Flow:**
+1. Check user preferences (cached in Redis)
+2. Apply rate limiting per user
+3. Check for duplicate notifications (deduplication)
+4. If all checks pass, queue to appropriate channel topic
+5. Return status (queued, filtered, rate_limited, deduplicated)
 
-    async def send(self, request: NotificationRequest):
-        # 1. Check user preferences
-        prefs = await self._get_preferences(request.user_id)
-        if not self._should_send(request, prefs):
-            return NotificationResult(status="filtered")
-
-        # 2. Rate limiting
-        if not self.rate_limiter.allow(request.user_id):
-            return NotificationResult(status="rate_limited")
-
-        # 3. Deduplication
-        if self._is_duplicate(request):
-            return NotificationResult(status="deduplicated")
-
-        # 4. Queue for async processing
-        await self.queue.send(
-            topic=f"notifications.{request.channel}",
-            key=request.user_id,
-            value=request.to_json()
-        )
-
-        return NotificationResult(status="queued")
-
-    def _should_send(self, request, prefs) -> bool:
-        # Check channel enabled
-        if request.channel == "push" and not prefs.push_enabled:
-            return False
-
-        # Check quiet hours
-        if self._in_quiet_hours(prefs):
-            if request.priority != "urgent":
-                return False
-
-        return True
-```
+**Should Send Logic:**
+- Check if channel is enabled in preferences
+- Check quiet hours (allow urgent messages through)
+- Check notification type preferences
 
 ### Push Notification Worker
 
-```python
-class PushWorker:
-    def __init__(self):
-        self.apns = APNsClient()
-        self.fcm = FCMClient()
-
-    async def process(self, notification: Notification):
-        # Get user's device tokens
-        tokens = await self.get_device_tokens(notification.user_id)
-
-        results = []
-        for token in tokens:
-            try:
-                if token.platform == "ios":
-                    result = await self.apns.send(
-                        token=token.token,
-                        payload=self._build_apns_payload(notification)
-                    )
-                elif token.platform == "android":
-                    result = await self.fcm.send(
-                        token=token.token,
-                        payload=self._build_fcm_payload(notification)
-                    )
-
-                results.append(result)
-
-            except InvalidTokenError:
-                # Mark token as inactive
-                await self.deactivate_token(token)
-
-            except ProviderError as e:
-                # Retry with backoff
-                await self.retry_queue.send(notification, delay=60)
-
-        return results
-
-    def _build_apns_payload(self, notification):
-        return {
-            "aps": {
-                "alert": {
-                    "title": notification.title,
-                    "body": notification.body
-                },
-                "sound": "default",
-                "badge": notification.badge_count
-            },
-            "data": notification.data
-        }
-```
+**Push Delivery Process:**
+1. Fetch user's device tokens from database
+2. For each token, send to appropriate provider:
+   - iOS: Apple Push Notification service (APNs)
+   - Android: Firebase Cloud Messaging (FCM)
+3. Handle errors:
+   - Invalid token: Mark as inactive, remove from future sends
+   - Provider error: Queue for retry with exponential backoff
+4. Build platform-specific payloads with title, body, sound, badge, custom data
 
 ### Priority and Batching
 
-```python
-class NotificationBatcher:
-    def __init__(self):
-        self.batches = defaultdict(list)
-        self.batch_size = 1000
-        self.flush_interval = 5  # seconds
-
-    async def add(self, notification: Notification):
-        priority = notification.priority
-
-        if priority == "urgent":
-            # Send immediately
-            await self.send_single(notification)
-        else:
-            # Batch for efficiency
-            self.batches[notification.channel].append(notification)
-
-            if len(self.batches[notification.channel]) >= self.batch_size:
-                await self.flush(notification.channel)
-
-    async def flush(self, channel: str):
-        batch = self.batches[channel]
-        self.batches[channel] = []
-
-        if channel == "email":
-            # Batch send via SendGrid
-            await self.email_client.send_batch(batch)
-        elif channel == "sms":
-            # SMS typically not batched
-            for notification in batch:
-                await self.sms_client.send(notification)
-```
+**Notification Batching Strategy:**
+- **Urgent priority:** Send immediately, no batching
+- **Normal priority:** Batch for efficiency, flush when batch reaches size limit or time interval expires
+- **Email:** Typically batched for cost efficiency
+- **SMS:** Usually not batched due to urgency expectations
 
 ### Delivery Tracking
 
-```python
-class DeliveryTracker:
-    def __init__(self):
-        self.metrics = PrometheusMetrics()
-
-    async def track_sent(self, notification_id: str, channel: str):
-        await self.db.update(
-            notification_id,
-            status="sent",
-            sent_at=datetime.now()
-        )
-        self.metrics.increment("notifications_sent", channel=channel)
-
-    async def track_delivered(self, notification_id: str):
-        """Called via webhook from provider"""
-        await self.db.update(
-            notification_id,
-            status="delivered",
-            delivered_at=datetime.now()
-        )
-
-    async def track_failed(self, notification_id: str, reason: str):
-        await self.db.update(
-            notification_id,
-            status="failed",
-            error=reason
-        )
-        self.metrics.increment("notifications_failed", reason=reason)
-```
+**Tracking Metrics:**
+- Track sent timestamp when notification is dispatched
+- Track delivered timestamp via provider webhooks
+- Track failed status with error reason
+- Emit Prometheus metrics for sent/failed counts by channel
 
 ### Channel Selection Strategy
 
@@ -2198,236 +1397,72 @@ class DeliveryTracker:
 
 ### High-Level Architecture
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                          Clients                                  │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │ WebSocket
-                    ┌────────▼────────┐
-                    │  Load Balancer  │
-                    │  (L4 / Sticky)  │
-                    └────────┬────────┘
-                             │
-        ┌────────────────────┼────────────────────┐
-        │                    │                    │
-┌───────▼───────┐   ┌────────▼────────┐   ┌───────▼───────┐
-│  Chat Server 1│   │  Chat Server 2  │   │  Chat Server 3│
-│  (WebSocket)  │   │   (WebSocket)   │   │  (WebSocket)  │
-└───────┬───────┘   └────────┬────────┘   └───────┬───────┘
-        │                    │                    │
-        └────────────────────┼────────────────────┘
-                             │
-                    ┌────────▼────────┐
-                    │   Redis Pub/Sub │
-                    │  (Message Bus)  │
-                    └────────┬────────┘
-                             │
-        ┌────────────────────┼────────────────────┐
-        │                    │                    │
-┌───────▼───────┐   ┌────────▼────────┐   ┌───────▼───────┐
-│  Message DB   │   │  Presence       │   │  Media Store  │
-│  (Cassandra)  │   │  Service        │   │    (S3)       │
-└───────────────┘   └─────────────────┘   └───────────────┘
-```
+**Architecture Flow:**
+1. Clients establish WebSocket connections through L4/Sticky Load Balancer
+2. Load Balancer routes to Chat Servers that maintain WebSocket connections
+3. Chat Servers communicate through Redis Pub/Sub for cross-server message routing
+4. Backend services include:
+   - Message DB (Cassandra) for persistent storage
+   - Presence Service for online status
+   - Media Store (S3) for file attachments
 
 ### Connection Management
 
-```python
-class ChatServer:
-    def __init__(self):
-        self.connections = {}  # user_id -> WebSocket
-        self.redis = Redis()
+**Chat Server Connection Handling:**
+1. On connect: Store WebSocket in local connections map
+2. Register user→server mapping in Redis for cross-server routing
+3. Update presence service to mark user online
+4. Subscribe to user's Redis channel for incoming messages
+5. On disconnect: Clean up all registrations and mark offline
 
-    async def handle_connect(self, websocket, user_id: str):
-        # Store connection
-        self.connections[user_id] = websocket
-
-        # Register in Redis (for cross-server routing)
-        await self.redis.hset("user_servers", user_id, self.server_id)
-
-        # Update presence
-        await self.presence_service.set_online(user_id)
-
-        # Subscribe to user's message channel
-        await self.redis.subscribe(f"user:{user_id}")
-
-    async def handle_disconnect(self, user_id: str):
-        del self.connections[user_id]
-        await self.redis.hdel("user_servers", user_id)
-        await self.presence_service.set_offline(user_id)
-
-    async def send_to_user(self, user_id: str, message: dict):
-        if user_id in self.connections:
-            # User connected to this server
-            await self.connections[user_id].send_json(message)
-        else:
-            # Route to correct server via Redis
-            await self.redis.publish(f"user:{user_id}", json.dumps(message))
-```
+**Message Routing:**
+- If recipient connected to same server: Send directly via WebSocket
+- If recipient on different server: Publish to Redis channel for their server to deliver
 
 ### Message Flow
 
-```python
-class MessageService:
-    async def send_message(self, sender_id: str, chat_id: str,
-                          content: str, message_type: str = "text"):
-        # 1. Generate message ID and timestamp
-        message = Message(
-            id=snowflake.generate(),
-            chat_id=chat_id,
-            sender_id=sender_id,
-            content=content,
-            type=message_type,
-            timestamp=time.time(),
-            status="sent"
-        )
-
-        # 2. Persist message
-        await self.db.insert(message)
-
-        # 3. Get chat participants
-        participants = await self.get_chat_participants(chat_id)
-
-        # 4. Deliver to online recipients
-        for user_id in participants:
-            if user_id != sender_id:
-                await self.deliver_message(user_id, message)
-
-        # 5. Send delivery confirmation to sender
-        await self.send_ack(sender_id, message.id, "sent")
-
-        return message
-
-    async def deliver_message(self, user_id: str, message: Message):
-        # Check if user is online
-        server_id = await self.redis.hget("user_servers", user_id)
-
-        if server_id:
-            # User is online - deliver in real-time
-            await self.redis.publish(
-                f"user:{user_id}",
-                message.to_json()
-            )
-        else:
-            # User offline - queue for push notification
-            await self.push_queue.send(
-                PushNotification(user_id, message)
-            )
-```
+**Send Message Process:**
+1. Generate unique message ID (Snowflake) and timestamp
+2. Persist message to database
+3. Get all chat participants
+4. For each recipient (except sender):
+   - If online: Deliver via real-time channel
+   - If offline: Queue push notification
+5. Send delivery acknowledgment to sender
 
 ### Message Storage Schema
 
-```sql
--- Cassandra schema (optimized for chat queries)
-CREATE TABLE messages (
-    chat_id UUID,
-    message_id TIMEUUID,
-    sender_id UUID,
-    content TEXT,
-    message_type VARCHAR,
-    status VARCHAR,
-    created_at TIMESTAMP,
-    PRIMARY KEY ((chat_id), message_id)
-) WITH CLUSTERING ORDER BY (message_id DESC);
+**Messages Table (Cassandra, optimized for chat queries):**
+- chat_id (partition key): Groups messages by conversation
+- message_id (TIMEUUID, clustering key): Ordered by time
+- sender_id, content, message_type, status, created_at
+- Clustering order by message_id DESC for efficient recent queries
 
--- Chat metadata
-CREATE TABLE chats (
-    chat_id UUID PRIMARY KEY,
-    type VARCHAR,  -- direct, group
-    name VARCHAR,
-    participants SET<UUID>,
-    created_at TIMESTAMP,
-    last_message_at TIMESTAMP
-);
+**Chats Table:**
+- chat_id (primary key)
+- type (direct/group), name, participants (SET)
+- created_at, last_message_at
 
--- User's chat list (denormalized for fast access)
-CREATE TABLE user_chats (
-    user_id UUID,
-    last_message_at TIMESTAMP,
-    chat_id UUID,
-    unread_count INT,
-    PRIMARY KEY ((user_id), last_message_at, chat_id)
-) WITH CLUSTERING ORDER BY (last_message_at DESC);
-```
+**User Chats Table (denormalized):**
+- user_id (partition key)
+- last_message_at, chat_id (clustering keys)
+- unread_count
+- Clustering order by last_message_at DESC for inbox view
 
 ### Read Receipts
 
-```python
-class ReadReceiptService:
-    async def mark_read(self, user_id: str, chat_id: str, message_id: str):
-        # Update read pointer
-        await self.redis.hset(
-            f"read_pointers:{chat_id}",
-            user_id,
-            message_id
-        )
-
-        # Notify other participants
-        participants = await self.get_participants(chat_id)
-        for participant_id in participants:
-            if participant_id != user_id:
-                await self.send_receipt(
-                    participant_id,
-                    ReadReceipt(chat_id, user_id, message_id)
-                )
-
-    async def get_read_status(self, chat_id: str, message_id: str):
-        """Get who has read this message"""
-        pointers = await self.redis.hgetall(f"read_pointers:{chat_id}")
-        readers = []
-        for user_id, last_read in pointers.items():
-            if last_read >= message_id:
-                readers.append(user_id)
-        return readers
-```
+**Read Receipt Flow:**
+1. Update read pointer in Redis hash: chat_id → user_id → last_read_message_id
+2. Notify other participants of read status change
+3. To check who has read a message: Compare all read pointers with message_id
 
 ### Presence Service
 
-```python
-class PresenceService:
-    def __init__(self):
-        self.redis = Redis()
-        self.heartbeat_interval = 30  # seconds
-
-    async def set_online(self, user_id: str):
-        await self.redis.setex(
-            f"presence:{user_id}",
-            self.heartbeat_interval * 2,
-            "online"
-        )
-        await self._notify_contacts(user_id, "online")
-
-    async def heartbeat(self, user_id: str):
-        await self.redis.expire(
-            f"presence:{user_id}",
-            self.heartbeat_interval * 2
-        )
-
-    async def set_offline(self, user_id: str):
-        await self.redis.delete(f"presence:{user_id}")
-        await self.redis.set(
-            f"last_seen:{user_id}",
-            time.time()
-        )
-        await self._notify_contacts(user_id, "offline")
-
-    async def get_presence(self, user_ids: list) -> dict:
-        pipe = self.redis.pipeline()
-        for user_id in user_ids:
-            pipe.get(f"presence:{user_id}")
-            pipe.get(f"last_seen:{user_id}")
-
-        results = await pipe.execute()
-        presence = {}
-        for i, user_id in enumerate(user_ids):
-            status = results[i * 2]
-            last_seen = results[i * 2 + 1]
-            presence[user_id] = {
-                "status": status or "offline",
-                "last_seen": last_seen
-            }
-        return presence
-```
+**Presence Management:**
+- On online: Set presence key with TTL (2× heartbeat interval), notify contacts
+- On heartbeat: Refresh TTL
+- On offline: Delete presence key, set last_seen timestamp, notify contacts
+- To get presence for multiple users: Pipeline Redis queries for efficiency
 
 ### Scaling WebSocket Connections
 
@@ -2594,154 +1629,70 @@ class PresenceService:
 
 #### 1. Pull Model (Fan-out on Read)
 
-```python
-class PullFeedService:
-    def get_feed(self, user_id: str, limit: int = 20) -> list:
-        # 1. Get users I follow
-        following = self.get_following(user_id)
-
-        # 2. Fetch recent posts from each
-        all_posts = []
-        for followed_id in following:
-            posts = self.get_posts(followed_id, limit=100)
-            all_posts.extend(posts)
-
-        # 3. Sort and truncate
-        all_posts.sort(key=lambda p: p.timestamp, reverse=True)
-        return all_posts[:limit]
-```
+**Pull Feed Algorithm:**
+1. Get list of users the viewer follows
+2. For each followed user, fetch their recent posts
+3. Merge all posts, sort by timestamp (descending)
+4. Return top N posts
 
 **Pros:** Simple, no storage overhead, fresh data
 **Cons:** Slow for users following many accounts, high read latency
 
 #### 2. Push Model (Fan-out on Write)
 
-```python
-class PushFeedService:
-    async def create_post(self, user_id: str, content: str):
-        post = Post(id=generate_id(), author=user_id, content=content)
-        await self.post_db.insert(post)
+**Push Feed Algorithm:**
+On post creation:
+1. Insert post into post database
+2. Get all followers of the author
+3. For each follower, prepend post ID to their feed cache (Redis list)
+4. Trim feed cache to keep only recent N posts
 
-        # Fan-out to all followers
-        followers = await self.get_followers(user_id)
-        for follower_id in followers:
-            await self.feed_cache.lpush(
-                f"feed:{follower_id}",
-                post.id
-            )
-            # Trim to keep only recent posts
-            await self.feed_cache.ltrim(f"feed:{follower_id}", 0, 1000)
-
-    def get_feed(self, user_id: str, limit: int = 20) -> list:
-        # Just read from pre-computed feed
-        post_ids = self.feed_cache.lrange(f"feed:{user_id}", 0, limit)
-        return self.post_db.get_batch(post_ids)
-```
+On feed read:
+1. Fetch post IDs from pre-computed feed cache
+2. Batch fetch post details
 
 **Pros:** Fast reads, simple feed retrieval
 **Cons:** Expensive for celebrities (millions of followers), storage heavy
 
 #### 3. Hybrid Model
 
-```python
-class HybridFeedService:
-    CELEBRITY_THRESHOLD = 10000
+**Hybrid Feed Algorithm:**
+Define celebrity threshold (e.g., 10,000 followers).
 
-    async def create_post(self, user_id: str, content: str):
-        post = Post(id=generate_id(), author=user_id, content=content)
-        await self.post_db.insert(post)
+On post creation:
+- If author has fewer followers than threshold: Fan-out to all followers (push)
+- If author is celebrity: Store in celebrity posts table (no fan-out)
 
-        follower_count = await self.get_follower_count(user_id)
-
-        if follower_count < self.CELEBRITY_THRESHOLD:
-            # Regular user: push to all followers
-            await self._fan_out_to_followers(user_id, post)
-        else:
-            # Celebrity: store in celebrity posts table
-            await self.celebrity_posts.insert(post)
-
-    async def get_feed(self, user_id: str, limit: int = 20) -> list:
-        # Get pre-computed feed (from regular users)
-        feed_posts = await self.feed_cache.lrange(f"feed:{user_id}", 0, limit)
-
-        # Get celebrity posts (pull on read)
-        celebrities = await self.get_followed_celebrities(user_id)
-        celebrity_posts = await self.get_recent_celebrity_posts(celebrities)
-
-        # Merge and sort
-        all_posts = feed_posts + celebrity_posts
-        all_posts.sort(key=lambda p: p.timestamp, reverse=True)
-        return all_posts[:limit]
-```
+On feed read:
+1. Get pre-computed feed (from regular users' push)
+2. Get followed celebrities list
+3. Pull recent posts from celebrities
+4. Merge, sort, and return top N
 
 ### Architecture
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                           Clients                                 │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │
-                    ┌────────▼────────┐
-                    │   API Gateway   │
-                    └────────┬────────┘
-                             │
-        ┌────────────────────┼────────────────────┐
-        │                    │                    │
-┌───────▼───────┐   ┌────────▼────────┐   ┌───────▼───────┐
-│ Feed Service  │   │  Post Service   │   │ Graph Service │
-│ (Read Path)   │   │  (Write Path)   │   │ (Following)   │
-└───────┬───────┘   └────────┬────────┘   └───────┬───────┘
-        │                    │                    │
-        │           ┌────────▼────────┐           │
-        │           │   Fan-out       │           │
-        │           │   Workers       │           │
-        │           └────────┬────────┘           │
-        │                    │                    │
-┌───────▼───────┐   ┌────────▼────────┐   ┌───────▼───────┐
-│  Feed Cache   │   │   Post Store    │   │  Graph Store  │
-│   (Redis)     │   │  (Cassandra)    │   │   (Neo4j)     │
-└───────────────┘   └─────────────────┘   └───────────────┘
-```
+**Architecture Flow:**
+1. Clients connect through API Gateway
+2. Three main services:
+   - Feed Service (Read Path): Assembles and returns feeds
+   - Post Service (Write Path): Creates posts and triggers fan-out
+   - Graph Service (Following): Manages follow relationships
+3. Fan-out Workers process post distribution asynchronously
+4. Storage layer:
+   - Feed Cache (Redis): Pre-computed feed lists
+   - Post Store (Cassandra): Post content
+   - Graph Store (Neo4j): Follow relationships
 
 ### Ranking Algorithm
 
-```python
-class FeedRanker:
-    def rank(self, posts: list, user_id: str) -> list:
-        scored_posts = []
+**Feed Ranking Score Calculation:**
+The score combines multiple signals with weights:
+- **Time decay (30%):** Newer posts score higher, exponential decay by hours
+- **Engagement (30%):** Weighted sum of likes (1x), comments (2x), shares (3x)
+- **Affinity (30%):** Pre-computed relationship strength with author
+- **Content boost (10%):** Posts with media get 1.2x multiplier
 
-        for post in posts:
-            score = self._calculate_score(post, user_id)
-            scored_posts.append((score, post))
-
-        scored_posts.sort(reverse=True)
-        return [post for score, post in scored_posts]
-
-    def _calculate_score(self, post: Post, user_id: str) -> float:
-        # Time decay (newer = higher score)
-        age_hours = (time.time() - post.timestamp) / 3600
-        time_score = 1 / (1 + age_hours)
-
-        # Engagement signals
-        engagement_score = (
-            post.likes * 1.0 +
-            post.comments * 2.0 +
-            post.shares * 3.0
-        ) / 1000
-
-        # Affinity with author
-        affinity = self._get_affinity(user_id, post.author)
-
-        # Content type boost
-        content_boost = 1.2 if post.has_media else 1.0
-
-        return (
-            time_score * 0.3 +
-            engagement_score * 0.3 +
-            affinity * 0.3 +
-            content_boost * 0.1
-        )
-```
+Posts are sorted by score descending.
 
 ### Model Comparison
 
@@ -2904,222 +1855,48 @@ class FeedRanker:
 
 ### High-Level Architecture
 
-```
-┌──────────────┐
-│    Client    │
-│ (Debounced)  │
-└──────┬───────┘
-       │
-┌──────▼───────┐
-│     CDN      │
-│ (Edge Cache) │
-└──────┬───────┘
-       │
-┌──────▼───────┐
-│ Autocomplete │
-│   Service    │
-└──────┬───────┘
-       │
-┌──────▼───────┐     ┌──────────────┐
-│  Trie Store  │────▶│  Analytics   │
-│   (Redis)    │     │   Pipeline   │
-└──────────────┘     └──────────────┘
-```
+**Architecture Flow:**
+1. Client sends debounced keystrokes
+2. CDN (Edge Cache) serves cached popular prefixes
+3. Autocomplete Service handles cache misses
+4. Trie Store (Redis) provides prefix lookups
+5. Analytics Pipeline tracks searches for trending and weight updates
 
 ### Trie Data Structure
 
-```python
-class TrieNode:
-    def __init__(self):
-        self.children = {}
-        self.is_end = False
-        self.suggestions = []  # Top suggestions at this prefix
-
-class AutocompleteTrie:
-    def __init__(self, max_suggestions: int = 10):
-        self.root = TrieNode()
-        self.max_suggestions = max_suggestions
-
-    def insert(self, word: str, weight: int):
-        node = self.root
-        for char in word.lower():
-            if char not in node.children:
-                node.children[char] = TrieNode()
-            node = node.children[char]
-
-            # Update suggestions at each prefix
-            self._update_suggestions(node, word, weight)
-
-        node.is_end = True
-
-    def _update_suggestions(self, node: TrieNode, word: str, weight: int):
-        # Keep top N suggestions sorted by weight
-        existing = [s for s in node.suggestions if s[1] != word]
-        existing.append((weight, word))
-        existing.sort(reverse=True)
-        node.suggestions = existing[:self.max_suggestions]
-
-    def search(self, prefix: str) -> list:
-        node = self.root
-        for char in prefix.lower():
-            if char not in node.children:
-                return []
-            node = node.children[char]
-
-        return [word for weight, word in node.suggestions]
-```
+**Autocomplete Trie:**
+Each node in the trie stores children (character → node mapping), an end-of-word flag, and pre-computed top suggestions for that prefix. On insert, traverse/create path for each character, updating top suggestions at each prefix node. On search, traverse the prefix path and return pre-computed suggestions. This provides O(prefix_length) lookup time.
 
 ### Redis Implementation
 
-```python
-class RedisAutocomplete:
-    def __init__(self, redis_client):
-        self.redis = redis_client
+**Redis Autocomplete with Sorted Sets:**
+For indexing: For each prefix of a term (length 1 to full), add the term to a sorted set keyed by that prefix with the term's weight as score. Trim each set to keep only top N suggestions.
 
-    def index(self, term: str, weight: int):
-        """Index a term with all its prefixes"""
-        term_lower = term.lower()
+For search: Query the sorted set for the prefix, get top N by score descending.
 
-        for i in range(1, len(term_lower) + 1):
-            prefix = term_lower[:i]
-            # Use sorted set for weighted suggestions
-            self.redis.zadd(
-                f"autocomplete:{prefix}",
-                {term: weight}
-            )
-            # Keep only top N
-            self.redis.zremrangebyrank(
-                f"autocomplete:{prefix}",
-                0, -11  # Keep top 10
-            )
-
-    def search(self, prefix: str, limit: int = 10) -> list:
-        """Get suggestions for prefix"""
-        key = f"autocomplete:{prefix.lower()}"
-        # Get top N by score (weight)
-        results = self.redis.zrevrange(key, 0, limit - 1)
-        return results
-
-    def increment_weight(self, term: str, delta: int = 1):
-        """Increase weight when term is selected"""
-        term_lower = term.lower()
-        for i in range(1, len(term_lower) + 1):
-            prefix = term_lower[:i]
-            self.redis.zincrby(f"autocomplete:{prefix}", delta, term)
-```
+For weight updates: When a term is selected, increment its score across all prefix sorted sets.
 
 ### Handling Scale
 
-```python
-class ShardedAutocomplete:
-    def __init__(self, num_shards: int = 16):
-        self.shards = [Redis(f"shard-{i}") for i in range(num_shards)]
+**Sharded Autocomplete:**
+Shard by first character of prefix across multiple Redis instances. Route queries based on first character hash.
 
-    def _get_shard(self, prefix: str) -> Redis:
-        shard_id = hash(prefix[0]) % len(self.shards)
-        return self.shards[shard_id]
-
-    def search(self, prefix: str, limit: int = 10) -> list:
-        shard = self._get_shard(prefix)
-        return shard.zrevrange(f"autocomplete:{prefix}", 0, limit - 1)
-
-
-class TieredAutocomplete:
-    """Two-tier: Hot prefixes in memory, rest in Redis"""
-
-    def __init__(self):
-        self.hot_cache = LRUCache(maxsize=100000)  # In-memory
-        self.redis = Redis()
-
-    def search(self, prefix: str, limit: int = 10) -> list:
-        # Check hot cache first
-        if prefix in self.hot_cache:
-            return self.hot_cache[prefix]
-
-        # Fall back to Redis
-        results = self.redis.zrevrange(
-            f"autocomplete:{prefix}", 0, limit - 1
-        )
-
-        # Cache popular prefixes
-        if len(prefix) <= 3:  # Short prefixes are frequently queried
-            self.hot_cache[prefix] = results
-
-        return results
-```
+**Tiered Autocomplete:**
+Use in-memory LRU cache for hot prefixes (short prefixes like 1-3 characters are most frequent). Fall back to Redis for longer/less common prefixes. Cache short prefixes locally since they're queried frequently.
 
 ### Real-Time Trend Updates
 
-```python
-class TrendingAutocomplete:
-    def __init__(self):
-        self.redis = Redis()
-        self.time_window = 3600  # 1 hour
-
-    def record_search(self, term: str):
-        """Record search for trending calculation"""
-        timestamp = int(time.time())
-        bucket = timestamp // 60  # Per-minute buckets
-
-        # Increment in current time bucket
-        self.redis.zincrby(f"trending:{bucket}", 1, term)
-        self.redis.expire(f"trending:{bucket}", self.time_window)
-
-    def get_trending(self, limit: int = 10) -> list:
-        """Get currently trending searches"""
-        current_bucket = int(time.time()) // 60
-        buckets = [current_bucket - i for i in range(60)]  # Last hour
-
-        # Merge all buckets
-        self.redis.zunionstore(
-            "trending:merged",
-            [f"trending:{b}" for b in buckets]
-        )
-
-        return self.redis.zrevrange("trending:merged", 0, limit - 1)
-```
+**Trending Search Tracking:**
+Use time-bucketed sorted sets (per-minute buckets) to track search frequency. On each search, increment count in current bucket with TTL. For trending queries, union last N buckets (e.g., 60 minutes) with zunionstore. Return top K from merged results. Buckets naturally expire based on TTL.
 
 ### Fuzzy Matching
 
-```python
-class FuzzyAutocomplete:
-    def search(self, query: str, limit: int = 10) -> list:
-        # 1. Exact prefix match
-        exact = self.trie.search(query)
-
-        if len(exact) >= limit:
-            return exact[:limit]
-
-        # 2. Fuzzy match with edit distance
-        fuzzy = self._fuzzy_search(query, max_distance=1)
-
-        # 3. Phonetic matching (Soundex/Metaphone)
-        phonetic = self._phonetic_search(query)
-
-        # Combine and deduplicate
-        all_results = exact + fuzzy + phonetic
-        seen = set()
-        unique = []
-        for term in all_results:
-            if term not in seen:
-                seen.add(term)
-                unique.append(term)
-
-        return unique[:limit]
-
-    def _fuzzy_search(self, query: str, max_distance: int) -> list:
-        """Find terms within edit distance"""
-        results = []
-
-        # Generate possible corrections
-        candidates = self._generate_edits(query, max_distance)
-
-        for candidate in candidates:
-            matches = self.trie.search(candidate)
-            results.extend(matches)
-
-        return results
-```
+**Fuzzy Search Algorithm:**
+1. Try exact prefix match first
+2. If insufficient results, try fuzzy search with edit distance ≤ 1
+3. Add phonetic matching (Soundex/Metaphone) for name searches
+4. Combine, deduplicate, and return top results
+5. Generate edit candidates by insertions, deletions, replacements, transpositions
 
 ### Optimization Techniques
 
@@ -3280,249 +2057,63 @@ class FuzzyAutocomplete:
 
 ### High-Level Architecture
 
-```
-┌────────────────────────────────────────────────────────────────────┐
-│                         URL Frontier                                │
-│                    (Priority Queue + Politeness)                    │
-└────────────────────────────┬───────────────────────────────────────┘
-                             │
-        ┌────────────────────┼────────────────────┐
-        │                    │                    │
-┌───────▼───────┐   ┌────────▼────────┐   ┌───────▼───────┐
-│  Crawler 1    │   │   Crawler 2     │   │   Crawler 3   │
-│   Worker      │   │    Worker       │   │    Worker     │
-└───────┬───────┘   └────────┬────────┘   └───────┬───────┘
-        │                    │                    │
-        └────────────────────┼────────────────────┘
-                             │
-                    ┌────────▼────────┐
-                    │   DNS Resolver  │
-                    │    (Cached)     │
-                    └────────┬────────┘
-                             │
-                    ┌────────▼────────┐
-                    │  Content Store  │
-                    │   (Raw HTML)    │
-                    └────────┬────────┘
-                             │
-        ┌────────────────────┼────────────────────┐
-        │                    │                    │
-┌───────▼───────┐   ┌────────▼────────┐   ┌───────▼───────┐
-│  Link         │   │   Duplicate     │   │   Content     │
-│  Extractor    │   │   Detector      │   │   Parser      │
-└───────┬───────┘   └────────┬────────┘   └───────┬───────┘
-        │                    │                    │
-        ▼                    ▼                    ▼
-   URL Frontier         Discard            Search Index
-```
+**Architecture Flow:**
+1. URL Frontier (Priority Queue + Politeness) manages URLs to crawl
+2. Multiple Crawler Workers fetch pages in parallel
+3. DNS Resolver (Cached) reduces DNS lookup overhead
+4. Content Store saves raw HTML
+5. Processing pipeline:
+   - Link Extractor: Finds and queues new URLs
+   - Duplicate Detector: Filters seen content
+   - Content Parser: Extracts text for search index
 
 ### URL Frontier
 
-```python
-class URLFrontier:
-    def __init__(self, num_queues: int = 1000):
-        self.priority_queue = PriorityQueue()  # Global priority
-        self.host_queues = defaultdict(deque)   # Per-host queues
-        self.last_crawl = {}                    # Host -> timestamp
-        self.crawl_delay = 1.0                  # Seconds between requests
-
-    def add_url(self, url: str, priority: int):
-        parsed = urlparse(url)
-        host = parsed.netloc
-
-        # Add to host queue
-        self.host_queues[host].append((priority, url))
-
-        # Add host to priority queue if not already waiting
-        if host not in self.priority_queue:
-            next_crawl_time = self.last_crawl.get(host, 0) + self.crawl_delay
-            self.priority_queue.put((next_crawl_time, priority, host))
-
-    def get_next_url(self) -> str:
-        while True:
-            # Get next host to crawl
-            next_time, priority, host = self.priority_queue.get()
-
-            # Wait if necessary (politeness)
-            now = time.time()
-            if next_time > now:
-                time.sleep(next_time - now)
-
-            # Get URL from host queue
-            if self.host_queues[host]:
-                _, url = self.host_queues[host].popleft()
-                self.last_crawl[host] = time.time()
-
-                # Re-add host if more URLs
-                if self.host_queues[host]:
-                    next_crawl = time.time() + self.crawl_delay
-                    self.priority_queue.put((next_crawl, priority, host))
-
-                return url
-```
+**URL Frontier Design:**
+Maintains separate per-host queues to enforce politeness (delay between requests to same host). A global priority queue schedules which host to crawl next based on last crawl time. When getting next URL:
+1. Pop host with earliest eligible crawl time
+2. Wait if not yet eligible
+3. Get URL from that host's queue
+4. Update last crawl time, re-add host if more URLs
 
 ### Crawler Worker
 
-```python
-class CrawlerWorker:
-    def __init__(self):
-        self.frontier = URLFrontier()
-        self.dns_cache = DNSCache()
-        self.robots_cache = RobotsCache()
-        self.seen_urls = BloomFilter(capacity=10_000_000_000)
+**Crawler Worker Process:**
+1. Get next URL from frontier
+2. Check seen URLs (Bloom filter) - skip if duplicate
+3. Check robots.txt (cached per host) - skip if disallowed
+4. Fetch page content with timeout and proper User-Agent
+5. Store content for processing
+6. Extract links, calculate priority, add to frontier
+7. Handle errors appropriately (retry, skip, etc.)
 
-    async def crawl(self):
-        while True:
-            url = self.frontier.get_next_url()
-
-            # Check if already seen
-            if url in self.seen_urls:
-                continue
-            self.seen_urls.add(url)
-
-            # Check robots.txt
-            if not self._is_allowed(url):
-                continue
-
-            try:
-                # Fetch page
-                content = await self._fetch(url)
-
-                # Store content
-                await self._store(url, content)
-
-                # Extract and queue links
-                links = self._extract_links(url, content)
-                for link in links:
-                    self.frontier.add_url(link, self._calculate_priority(link))
-
-            except Exception as e:
-                self._handle_error(url, e)
-
-    async def _fetch(self, url: str) -> bytes:
-        parsed = urlparse(url)
-
-        # DNS resolution (cached)
-        ip = await self.dns_cache.resolve(parsed.netloc)
-
-        # HTTP request with timeout
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url,
-                timeout=aiohttp.ClientTimeout(total=30),
-                headers={"User-Agent": "MyBot/1.0"}
-            ) as response:
-                return await response.read()
-```
+**Fetch Process:**
+Use cached DNS resolution, send HTTP request with timeout (30s), identify crawler via User-Agent header.
 
 ### Duplicate Detection
 
-```python
-class DuplicateDetector:
-    def __init__(self):
-        self.url_seen = BloomFilter(capacity=10_000_000_000)
-        self.content_hashes = {}  # SimHash -> canonical URL
+**URL Duplicate Detection:**
+Normalize URLs (lowercase, remove fragments, sort parameters) and check against a Bloom filter (10B capacity). False positives OK (skip a few URLs), no false negatives.
 
-    def is_url_duplicate(self, url: str) -> bool:
-        normalized = self._normalize_url(url)
-        if normalized in self.url_seen:
-            return True
-        self.url_seen.add(normalized)
-        return False
+**Content Duplicate Detection:**
+Use SimHash (64-bit locality-sensitive hash) for near-duplicate detection. Compute SimHash of page content, compare with stored hashes. If Hamming distance < 3, pages are near-duplicates. Store canonical URL for each SimHash.
 
-    def is_content_duplicate(self, content: str) -> tuple:
-        # Compute SimHash for near-duplicate detection
-        simhash = self._compute_simhash(content)
-
-        # Check against existing hashes
-        for existing_hash, canonical_url in self.content_hashes.items():
-            if self._hamming_distance(simhash, existing_hash) < 3:
-                return True, canonical_url
-
-        self.content_hashes[simhash] = content
-        return False, None
-
-    def _compute_simhash(self, content: str) -> int:
-        """64-bit SimHash for near-duplicate detection"""
-        tokens = content.lower().split()
-        v = [0] * 64
-
-        for token in tokens:
-            token_hash = hash(token)
-            for i in range(64):
-                if token_hash & (1 << i):
-                    v[i] += 1
-                else:
-                    v[i] -= 1
-
-        simhash = 0
-        for i in range(64):
-            if v[i] > 0:
-                simhash |= (1 << i)
-
-        return simhash
-```
+**SimHash Algorithm:**
+For each token in content, compute hash. For each bit position, if bit is 1 add 1 to counter, else subtract 1. Final SimHash: bit is 1 if counter > 0. Similar documents have similar SimHashes.
 
 ### Robots.txt Parser
 
-```python
-class RobotsCache:
-    def __init__(self):
-        self.cache = TTLCache(maxsize=100000, ttl=86400)  # 24 hour cache
-
-    async def is_allowed(self, url: str, user_agent: str = "*") -> bool:
-        parsed = urlparse(url)
-        robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
-
-        # Fetch robots.txt if not cached
-        if robots_url not in self.cache:
-            try:
-                content = await self._fetch(robots_url)
-                rules = self._parse_robots(content)
-                self.cache[robots_url] = rules
-            except:
-                # If can't fetch, assume allowed
-                self.cache[robots_url] = RobotsRules(allow_all=True)
-
-        rules = self.cache[robots_url]
-        return rules.is_allowed(parsed.path, user_agent)
-
-    def get_crawl_delay(self, host: str) -> float:
-        robots_url = f"https://{host}/robots.txt"
-        if robots_url in self.cache:
-            return self.cache[robots_url].crawl_delay
-        return 1.0  # Default
-```
+**Robots.txt Handling:**
+Cache robots.txt per domain (24-hour TTL). Parse rules for User-Agent matching, check path against allow/disallow rules. If can't fetch robots.txt, assume allowed. Also extract Crawl-delay directive for politeness.
 
 ### Priority Calculation
 
-```python
-class PriorityCalculator:
-    def calculate(self, url: str, parent_url: str = None) -> int:
-        score = 0
-
-        parsed = urlparse(url)
-
-        # Domain authority (pre-computed)
-        score += self.domain_scores.get(parsed.netloc, 0) * 10
-
-        # URL depth (shorter = higher priority)
-        depth = len(parsed.path.split('/'))
-        score -= depth * 2
-
-        # Content type hints
-        if parsed.path.endswith(('.html', '.htm', '/')):
-            score += 5
-        elif parsed.path.endswith(('.pdf', '.doc')):
-            score += 2
-
-        # Freshness (if known)
-        if parent_url:
-            parent_freshness = self.freshness_scores.get(parent_url, 0)
-            score += parent_freshness
-
-        return max(0, score)
-```
+**URL Priority Score:**
+- Domain authority (pre-computed PageRank-like score) × 10
+- URL depth penalty (shorter paths higher priority)
+- Content type hints (+5 for HTML, +2 for PDF)
+- Freshness signals from parent page
+- Result: higher score = higher priority
 
 ### Key Design Decisions
 
@@ -3572,7 +2163,7 @@ class PriorityCalculator:
 | 10 | 15 | 0.1% | 19 GB |
 | 100 | 10 | 1% | 120 GB |
 
-**Formula:** m = -n * ln(p) / (ln(2))² where n=items, p=false positive rate
+**Formula:** m = -n × ln(p) / (ln(2))² where n=items, p=false positive rate
 
 ### Failure Scenarios & Mitigation
 | Failure Mode | Impact | Detection | Mitigation |
@@ -3686,202 +2277,60 @@ class PriorityCalculator:
 
 ### High-Level Architecture
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                          Upload Flow                              │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │
-┌──────────────┐    ┌────────▼────────┐    ┌──────────────┐
-│   Creator    │───▶│  Upload Service │───▶│  Object Store │
-└──────────────┘    └────────┬────────┘    │    (S3)       │
-                             │             └───────┬───────┘
-                    ┌────────▼────────┐            │
-                    │  Transcoding    │◀───────────┘
-                    │  Pipeline       │
-                    └────────┬────────┘
-                             │
-        ┌────────────────────┼────────────────────┐
-        │                    │                    │
-┌───────▼───────┐   ┌────────▼────────┐   ┌───────▼───────┐
-│  1080p/H.264  │   │   720p/H.264    │   │   480p/H.264  │
-└───────┬───────┘   └────────┬────────┘   └───────┬───────┘
-        │                    │                    │
-        └────────────────────┼────────────────────┘
-                             │
-                    ┌────────▼────────┐
-                    │      CDN        │
-                    │  (Edge Caches)  │
-                    └────────┬────────┘
-                             │
-┌──────────────────────────────────────────────────────────────────┐
-│                          Playback Flow                            │
-└──────────────────────────────────────────────────────────────────┘
-```
+**Upload Flow:**
+1. Creator uploads video to Upload Service
+2. Upload Service stores original in Object Store (S3)
+3. Transcoding Pipeline processes video into multiple resolutions
+4. Outputs stored for each quality level (1080p, 720p, 480p)
+5. Content distributed to CDN Edge Caches
+
+**Playback Flow:**
+1. Client requests video stream
+2. CDN serves content from nearest edge location
+3. Adaptive bitrate player selects quality based on bandwidth
 
 ### Video Processing Pipeline
 
-```python
-class VideoProcessor:
-    PROFILES = [
-        {"resolution": "1080p", "bitrate": 5000, "codec": "h264"},
-        {"resolution": "720p", "bitrate": 2500, "codec": "h264"},
-        {"resolution": "480p", "bitrate": 1000, "codec": "h264"},
-        {"resolution": "360p", "bitrate": 500, "codec": "h264"},
-    ]
+**Video Processing Steps:**
+1. **Validation:** Extract and validate video metadata
+2. **Transcoding:** Convert to multiple resolution/bitrate profiles in parallel
+   - 1080p at 5000 kbps (H.264)
+   - 720p at 2500 kbps (H.264)
+   - 480p at 1000 kbps (H.264)
+   - 360p at 500 kbps (H.264)
+3. **Segmentation:** Create HLS/DASH segments (6-second chunks)
+4. **Thumbnails:** Generate preview images at intervals
+5. **Update status:** Mark video as ready for playback
 
-    async def process(self, video_id: str, source_path: str):
-        # 1. Validate video
-        metadata = await self._extract_metadata(source_path)
-        if not self._is_valid(metadata):
-            raise InvalidVideoError()
-
-        # 2. Transcode to multiple resolutions
-        tasks = []
-        for profile in self.PROFILES:
-            task = self._transcode(video_id, source_path, profile)
-            tasks.append(task)
-
-        outputs = await asyncio.gather(*tasks)
-
-        # 3. Generate HLS/DASH segments
-        for output in outputs:
-            await self._segment(output)
-
-        # 4. Generate thumbnails
-        await self._generate_thumbnails(source_path, video_id)
-
-        # 5. Update database
-        await self._update_status(video_id, "ready")
-
-    async def _transcode(self, video_id: str, source: str, profile: dict):
-        output = f"{video_id}/{profile['resolution']}.mp4"
-
-        cmd = [
-            "ffmpeg", "-i", source,
-            "-c:v", profile["codec"],
-            "-b:v", f"{profile['bitrate']}k",
-            "-vf", f"scale=-2:{profile['resolution'][:-1]}",
-            "-c:a", "aac", "-b:a", "128k",
-            output
-        ]
-
-        await asyncio.create_subprocess_exec(*cmd)
-        return output
-
-    async def _segment(self, video_path: str):
-        """Create HLS segments for adaptive streaming"""
-        cmd = [
-            "ffmpeg", "-i", video_path,
-            "-hls_time", "6",
-            "-hls_list_size", "0",
-            "-hls_segment_filename", f"{video_path}_%03d.ts",
-            f"{video_path}.m3u8"
-        ]
-        await asyncio.create_subprocess_exec(*cmd)
-```
+**Transcoding:** Uses ffmpeg with resolution scaling, bitrate targeting, and AAC audio encoding.
 
 ### Adaptive Bitrate Streaming
 
-```python
-# HLS Master Playlist (m3u8)
-"""
-#EXTM3U
-#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080
-1080p/playlist.m3u8
-#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720
-720p/playlist.m3u8
-#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=854x480
-480p/playlist.m3u8
-#EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=640x360
-360p/playlist.m3u8
-"""
+**HLS Master Playlist Structure:**
+The master playlist (m3u8) lists available quality levels with their bandwidth and resolution. Each quality level has its own segment playlist. The player selects based on available bandwidth and can switch mid-stream.
 
-class AdaptivePlayer:
-    def __init__(self):
-        self.current_quality = "720p"
-        self.buffer_health = 10  # seconds
-
-    def select_quality(self, bandwidth: int) -> str:
-        """Select quality based on available bandwidth"""
-        if bandwidth > 6000:
-            return "1080p"
-        elif bandwidth > 3000:
-            return "720p"
-        elif bandwidth > 1500:
-            return "480p"
-        else:
-            return "360p"
-
-    def adjust_quality(self, measured_bandwidth: int, buffer_level: float):
-        """Adaptive bitrate selection"""
-        target = self.select_quality(measured_bandwidth)
-
-        # Be conservative when buffer is low
-        if buffer_level < 5:
-            target = self._lower_quality(target)
-
-        # Smooth transitions
-        if target != self.current_quality:
-            self.current_quality = target
-```
+**Adaptive Player Logic:**
+- Select quality based on measured bandwidth thresholds
+- Be conservative when buffer is low (prefer lower quality to avoid stalling)
+- Smooth transitions (don't switch too frequently)
+- Initial selection may start lower and ramp up
 
 ### CDN and Caching
 
-```python
-class CDNManager:
-    def __init__(self):
-        self.edge_locations = ["us-east", "us-west", "eu-west", "ap-east"]
-
-    def get_stream_url(self, video_id: str, user_location: str) -> str:
-        # Select nearest edge location
-        edge = self._nearest_edge(user_location)
-
-        # Return CDN URL with signed token
-        token = self._generate_token(video_id, expires=3600)
-        return f"https://{edge}.cdn.example.com/v/{video_id}/master.m3u8?token={token}"
-
-    def warm_cache(self, video_id: str, predicted_popularity: float):
-        """Pre-populate cache for expected popular videos"""
-        if predicted_popularity > 0.8:
-            # Push to all edge locations
-            for edge in self.edge_locations:
-                self._push_to_edge(edge, video_id)
-        elif predicted_popularity > 0.5:
-            # Push to high-traffic edges only
-            self._push_to_edge("us-east", video_id)
-            self._push_to_edge("eu-west", video_id)
-```
+**CDN Strategy:**
+- Select nearest edge location based on user geography
+- Generate signed URLs with expiration for security
+- Pre-warm cache for predicted popular content
+- High predicted popularity: push to all edges
+- Medium popularity: push to high-traffic edges only
 
 ### View Count System
 
-```python
-class ViewCounter:
-    def __init__(self):
-        self.redis = Redis()
-        self.batch_size = 1000
-
-    async def record_view(self, video_id: str, user_id: str):
-        # Deduplicate views (same user within window)
-        view_key = f"viewed:{video_id}:{user_id}"
-        if await self.redis.exists(view_key):
-            return
-
-        await self.redis.setex(view_key, 3600, "1")  # 1 hour window
-
-        # Increment counter in Redis
-        await self.redis.incr(f"views:{video_id}")
-
-        # Batch sync to database
-        count = await self.redis.get(f"views:{video_id}")
-        if int(count) % self.batch_size == 0:
-            await self._sync_to_db(video_id, count)
-
-    async def _sync_to_db(self, video_id: str, count: int):
-        await self.db.execute(
-            "UPDATE videos SET view_count = %s WHERE id = %s",
-            [count, video_id]
-        )
-```
+**View Counting Strategy:**
+1. Deduplicate views per user within time window (1 hour)
+2. Increment counter in Redis for real-time counts
+3. Batch sync to database periodically (every 1000 views)
+4. This balances real-time display with database efficiency
 
 ### Storage Strategy
 
@@ -4044,267 +2493,71 @@ class ViewCounter:
 
 ### High-Level Architecture
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                          Clients                                  │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │
-                    ┌────────▼────────┐
-                    │   Master Node   │
-                    │   (Metadata)    │
-                    │ ┌─────────────┐ │
-                    │ │  Namespace  │ │
-                    │ │   (Files)   │ │
-                    │ └─────────────┘ │
-                    │ ┌─────────────┐ │
-                    │ │   Chunk     │ │
-                    │ │   Mapping   │ │
-                    │ └─────────────┘ │
-                    └────────┬────────┘
-                             │
-        ┌────────────────────┼────────────────────┐
-        │                    │                    │
-┌───────▼───────┐   ┌────────▼────────┐   ┌───────▼───────┐
-│  Chunk Server │   │  Chunk Server   │   │  Chunk Server │
-│      1        │   │       2         │   │       3       │
-│ ┌───────────┐ │   │ ┌───────────┐   │   │ ┌───────────┐ │
-│ │  Chunk A  │ │   │ │  Chunk A  │   │   │ │  Chunk B  │ │
-│ │  Chunk C  │ │   │ │  Chunk B  │   │   │ │  Chunk A  │ │
-│ └───────────┘ │   │ └───────────┘   │   │ └───────────┘ │
-└───────────────┘   └─────────────────┘   └───────────────┘
-```
+**Architecture Flow:**
+1. Clients connect to Master Node for metadata operations
+2. Master Node maintains:
+   - Namespace (file paths → metadata)
+   - Chunk Mapping (chunk IDs → server locations)
+3. Data operations go directly to Chunk Servers
+4. Each Chunk Server stores multiple chunks
+5. Chunks are replicated across servers for fault tolerance
+6. Example: Chunk A exists on Servers 1, 2, 3 for replication
 
 ### Chunk Management
 
-```python
-class MasterNode:
-    def __init__(self):
-        self.namespace = {}  # file_path -> FileMetadata
-        self.chunk_locations = {}  # chunk_id -> [chunk_servers]
-        self.chunk_servers = {}  # server_id -> ChunkServerInfo
-
-    def create_file(self, path: str) -> FileHandle:
-        if path in self.namespace:
-            raise FileExistsError()
-
-        file_meta = FileMetadata(
-            path=path,
-            chunks=[],
-            size=0,
-            created_at=time.time()
-        )
-        self.namespace[path] = file_meta
-        return FileHandle(path, file_meta)
-
-    def allocate_chunk(self, file_path: str) -> ChunkAllocation:
-        # Generate unique chunk ID
-        chunk_id = self._generate_chunk_id()
-
-        # Select chunk servers (considering load, rack diversity)
-        servers = self._select_chunk_servers(count=3)
-
-        # Record allocation
-        self.chunk_locations[chunk_id] = servers
-
-        # Add to file's chunk list
-        self.namespace[file_path].chunks.append(chunk_id)
-
-        return ChunkAllocation(
-            chunk_id=chunk_id,
-            primary=servers[0],
-            secondaries=servers[1:]
-        )
-
-    def _select_chunk_servers(self, count: int) -> list:
-        """Select servers with rack awareness"""
-        available = list(self.chunk_servers.values())
-
-        # Sort by available space
-        available.sort(key=lambda s: s.available_space, reverse=True)
-
-        selected = []
-        racks_used = set()
-
-        for server in available:
-            if len(selected) >= count:
-                break
-            # Prefer different racks for fault tolerance
-            if server.rack not in racks_used or len(selected) < count:
-                selected.append(server)
-                racks_used.add(server.rack)
-
-        return selected
-```
+**Master Node Operations:**
+- Create file: Add to namespace, return file handle
+- Allocate chunk: Generate unique chunk ID, select servers (considering load and rack diversity), record allocation
+- Server selection: Prefer servers with available space, ensure rack diversity for fault tolerance
 
 ### Write Path
 
-```python
-class ChunkClient:
-    def __init__(self, master: MasterNode):
-        self.master = master
-        self.chunk_size = 64 * 1024 * 1024  # 64 MB
+**Write Process:**
+1. Create file on master (get file handle)
+2. Split data into chunks (64 MB each)
+3. For each chunk:
+   - Get chunk allocation from master (primary + secondaries)
+   - Pipeline data to all replicas
+   - Commit on primary (coordinates with secondaries)
 
-    async def write_file(self, path: str, data: bytes):
-        # 1. Create file on master
-        handle = self.master.create_file(path)
-
-        # 2. Split into chunks
-        chunks = self._split_into_chunks(data)
-
-        for chunk_data in chunks:
-            # 3. Get chunk allocation from master
-            allocation = self.master.allocate_chunk(path)
-
-            # 4. Write to primary, which replicates to secondaries
-            await self._write_chunk(allocation, chunk_data)
-
-    async def _write_chunk(self, allocation: ChunkAllocation, data: bytes):
-        # Push data to all replicas first (pipeline)
-        for server in [allocation.primary] + allocation.secondaries:
-            await server.receive_data(allocation.chunk_id, data)
-
-        # Commit on primary (which coordinates with secondaries)
-        await allocation.primary.commit(allocation.chunk_id)
-
-
-class ChunkServer:
-    def __init__(self):
-        self.chunks = {}  # chunk_id -> ChunkData
-        self.pending = {}  # chunk_id -> received data
-
-    async def receive_data(self, chunk_id: str, data: bytes):
-        """Receive data (not yet committed)"""
-        self.pending[chunk_id] = data
-
-    async def commit(self, chunk_id: str):
-        """Commit chunk to stable storage"""
-        if chunk_id not in self.pending:
-            raise ChunkNotFoundError()
-
-        data = self.pending.pop(chunk_id)
-
-        # Write to disk
-        chunk = ChunkData(
-            id=chunk_id,
-            data=data,
-            checksum=self._compute_checksum(data)
-        )
-        await self._write_to_disk(chunk)
-        self.chunks[chunk_id] = chunk
-```
+**Chunk Server Write:**
+1. Receive data into pending buffer
+2. On commit: write to stable storage with checksum
+3. Acknowledge to primary/client
 
 ### Read Path
 
-```python
-class ChunkClient:
-    async def read_file(self, path: str) -> bytes:
-        # 1. Get file metadata from master
-        file_meta = self.master.get_file(path)
-
-        # 2. Read each chunk
-        data_parts = []
-        for chunk_id in file_meta.chunks:
-            chunk_data = await self._read_chunk(chunk_id)
-            data_parts.append(chunk_data)
-
-        return b''.join(data_parts)
-
-    async def _read_chunk(self, chunk_id: str) -> bytes:
-        # Get chunk locations from master
-        locations = self.master.get_chunk_locations(chunk_id)
-
-        # Try each replica until success
-        for server in locations:
-            try:
-                data = await server.read_chunk(chunk_id)
-                if self._verify_checksum(data):
-                    return data.content
-            except (ChunkCorruptError, ServerUnavailableError):
-                continue
-
-        raise ChunkUnavailableError(chunk_id)
-```
+**Read Process:**
+1. Get file metadata (chunk list) from master
+2. For each chunk:
+   - Get chunk locations from master
+   - Try each replica until successful read with valid checksum
+3. Concatenate chunks to return file content
 
 ### Heartbeat and Lease
 
-```python
-class ChunkServer:
-    async def heartbeat_loop(self):
-        while True:
-            # Report status to master
-            status = ChunkServerStatus(
-                server_id=self.id,
-                chunks=list(self.chunks.keys()),
-                available_space=self._get_available_space(),
-                load=self._get_load()
-            )
-            await self.master.heartbeat(status)
-            await asyncio.sleep(10)  # Every 10 seconds
+**Chunk Server Heartbeat:**
+Every 10 seconds, report to master:
+- Server ID and available space
+- List of chunks stored
+- Current load metrics
 
-
-class MasterNode:
-    def __init__(self):
-        self.server_last_seen = {}
-        self.lease_duration = 60  # seconds
-
-    async def heartbeat(self, status: ChunkServerStatus):
-        self.server_last_seen[status.server_id] = time.time()
-        self._update_chunk_locations(status)
-
-    async def monitor_loop(self):
-        while True:
-            now = time.time()
-            for server_id, last_seen in list(self.server_last_seen.items()):
-                if now - last_seen > self.lease_duration:
-                    await self._handle_server_failure(server_id)
-            await asyncio.sleep(10)
-
-    async def _handle_server_failure(self, server_id: str):
-        # Re-replicate chunks from failed server
-        affected_chunks = self._get_chunks_on_server(server_id)
-        for chunk_id in affected_chunks:
-            await self._re_replicate(chunk_id)
-```
+**Master Monitoring:**
+- Track last heartbeat time per server
+- If no heartbeat for lease duration (60s), handle server failure
+- Re-replicate affected chunks to maintain replication factor
 
 ### Replication and Recovery
 
-```python
-class ReplicationManager:
-    def __init__(self, replication_factor: int = 3):
-        self.rf = replication_factor
+**Re-replication Process:**
+When a chunk becomes under-replicated:
+1. Identify chunks on failed server
+2. For each chunk, select new server (prefer different rack)
+3. Copy data from existing replica to new server
+4. Update master's chunk location map
 
-    async def re_replicate(self, chunk_id: str):
-        """Re-replicate under-replicated chunks"""
-        current_replicas = self.master.chunk_locations[chunk_id]
-
-        if len(current_replicas) >= self.rf:
-            return  # Sufficient replicas
-
-        # Select new server
-        existing_racks = {s.rack for s in current_replicas}
-        new_server = self._select_new_server(exclude_racks=existing_racks)
-
-        # Copy from existing replica
-        source = current_replicas[0]
-        await self._copy_chunk(chunk_id, source, new_server)
-
-        # Update metadata
-        self.master.chunk_locations[chunk_id].append(new_server)
-
-    async def balance_chunks(self):
-        """Background job to balance chunk distribution"""
-        server_loads = self._calculate_server_loads()
-        avg_load = sum(server_loads.values()) / len(server_loads)
-
-        overloaded = [s for s, l in server_loads.items() if l > avg_load * 1.2]
-        underloaded = [s for s, l in server_loads.items() if l < avg_load * 0.8]
-
-        for source in overloaded:
-            if not underloaded:
-                break
-            target = underloaded.pop()
-            await self._migrate_chunk(source, target)
-```
+**Background Balancing:**
+Periodically redistribute chunks from overloaded servers to underloaded ones, targeting balanced disk utilization across cluster.
 
 ### Key Design Decisions
 
