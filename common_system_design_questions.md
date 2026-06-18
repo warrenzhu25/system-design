@@ -209,6 +209,118 @@ def create_short_url(long_url: str, max_retries: int = 3) -> str:
    - Availability check before creation
    - Premium feature with reservations
 
+### Extended Tradeoffs
+
+#### ID Generation: Base62 vs Base64 vs UUID vs Snowflake
+| Aspect | Base62 | Base64 | UUID | Snowflake |
+|--------|--------|--------|------|-----------|
+| URL Length | 7 chars (3.5T) | 6 chars (68B) | 22 chars | 11 chars |
+| URL Safety | Yes (alphanumeric) | No (+, /, =) | Yes | Yes |
+| Predictability | Sequential = predictable | Hash = unpredictable | Random | Time-ordered |
+| Collision Risk | None (counter) | Hash truncation | Negligible | None |
+| Coordination | Requires counter sync | Stateless | Stateless | Clock + machine ID |
+| When to use | Single DC, simple | Avoid for URLs | Distributed, no order needed | Distributed, time-sorted |
+
+#### Database: SQL vs NoSQL vs NewSQL
+| Aspect | PostgreSQL | Cassandra | CockroachDB | DynamoDB |
+|--------|------------|-----------|-------------|----------|
+| Consistency | Strong | Eventual/Tunable | Strong | Eventual/Strong |
+| Write Throughput | 10K-50K/s | 100K+/s | 20K-50K/s | Unlimited (auto-scale) |
+| Read Latency | 1-5ms | 1-5ms | 5-15ms | 1-10ms |
+| Scaling | Vertical + read replicas | Linear horizontal | Horizontal | Auto |
+| Operational Cost | Medium | High | Medium | Low (managed) |
+| When to use | <100M URLs, need ACID | Massive scale, write-heavy | Global, strong consistency | AWS-native, managed |
+
+### Failure Scenarios & Mitigation
+| Failure Mode | Impact | Detection | Mitigation |
+|--------------|--------|-----------|------------|
+| Database down | No new URLs, no redirects | Health checks, connection timeouts | Multi-region replicas, failover |
+| Cache miss storm | DB overload on cache expiry | Spike in DB queries | Staggered TTLs, probabilistic refresh |
+| Hot key (viral URL) | Single cache node overload | Key access metrics | Local caching, key replication |
+| Key collision | Write failures | Collision counter metrics | Retry with salt, longer codes |
+| DNS failure | Service unreachable | External monitoring | Multiple DNS providers, low TTL |
+| Malicious URLs | Phishing, malware distribution | User reports, scanning | URL validation, blacklist, preview pages |
+
+### Monitoring & Observability
+**Key Metrics:**
+- **Redirects per second**: Overall throughput and load
+- **P99 redirect latency**: User experience (target <50ms)
+- **Cache hit ratio**: Efficiency (target >95%)
+- **URL creation rate**: Growth and capacity planning
+- **Error rate by type**: 404s, 500s, rate limit hits
+- **Short code length distribution**: Capacity utilization
+
+**Alerting:**
+- Cache hit ratio drops below 90%
+- P99 latency exceeds 100ms
+- Error rate exceeds 0.1%
+- Database replication lag exceeds 1s
+- Disk usage exceeds 80%
+
+**Dashboards:**
+- Real-time traffic map (geographic distribution)
+- Top URLs by click count (detect viral content)
+- URL creation funnel (success rate, error breakdown)
+
+### Security Considerations
+**Malicious URL Detection:**
+- Integration with Google Safe Browsing API
+- Real-time URL scanning before redirect
+- User reporting mechanism with review queue
+- Pattern detection for phishing domains
+
+**Rate Limiting & Abuse Prevention:**
+- Per-IP creation limits (10/min anonymous, 100/min authenticated)
+- CAPTCHA for anonymous users after threshold
+- Account suspension for repeated violations
+- Honeypot URLs to detect automated abuse
+
+**Analytics Privacy:**
+- Hash or truncate IP addresses after geolocation
+- Configurable analytics opt-out per URL
+- Data retention policies (delete after 90 days)
+- GDPR-compliant data export/deletion
+
+**Infrastructure Security:**
+- HTTPS-only redirects
+- Signed URLs for private content
+- API key rotation and scoping
+- Audit logging for all administrative actions
+
+### Interview Deep-Dive Questions
+
+4. **How to migrate short codes when changing encoding scheme?**
+   - Maintain dual-read: check old format, then new format
+   - Background migration job with progress tracking
+   - Use redirect chains temporarily (old → new → destination)
+   - Version prefix in URLs (e.g., `v2/abc123`)
+
+5. **How to handle 10x traffic growth overnight (viral event)?**
+   - Auto-scaling groups for API servers
+   - Cache warming for predicted viral URLs
+   - CDN edge caching for redirect responses
+   - Circuit breakers to protect database
+   - Graceful degradation: serve cached data, queue writes
+
+6. **How to handle link rot (destination URL becomes invalid)?**
+   - Periodic health checks on popular URLs
+   - Store multiple snapshots via Wayback Machine integration
+   - Notify URL creators of broken links
+   - Option to redirect to archived version
+
+7. **How to implement geographic-specific redirects?**
+   - Store geo-rules in URL metadata: `{US: url1, EU: url2, default: url3}`
+   - GeoIP lookup at redirect time
+   - CDN-level geo-routing for edge performance
+   - Allow creators to configure per URL
+
+8. **How would you optimize cost for billions of URLs?**
+   - Tiered storage: hot (SSD) for recent, warm (HDD) for older
+   - Compress long URLs in storage
+   - Archive rarely-accessed URLs to cold storage
+   - Delete expired URLs in background jobs
+   - Use spot instances for analytics processing
+
 ---
 
 ## 2. Rate Limiter
@@ -426,6 +538,110 @@ Retry-After: 60
    - Config service with pub/sub notifications
    - Gradual rollout to avoid thundering herd
    - Grace period for limit decreases
+
+### Extended Tradeoffs
+
+#### Algorithm Deep Dive: Token Bucket vs Leaky Bucket vs Sliding Window
+| Aspect | Token Bucket | Leaky Bucket | Sliding Window Log | Sliding Window Counter |
+|--------|--------------|--------------|--------------------|-----------------------|
+| Burst Handling | Allows bursts up to bucket size | Smooths all traffic | No bursts | Limited bursts |
+| Memory | O(1) | O(1) | O(n) per user | O(1) |
+| Precision | Approximate | Approximate | Exact | ~99% accurate |
+| Implementation | Simple | Simple | Complex | Medium |
+| Use Case | APIs with occasional spikes | Steady rate needed | Audit logging | General purpose |
+| Boundary Issues | None | None | None | Minor at window edges |
+
+#### Storage: Redis vs Memcached vs In-Memory
+| Aspect | Redis Cluster | Memcached | In-Memory (Local) |
+|--------|--------------|-----------|-------------------|
+| Latency | 0.5-2ms | 0.5-1ms | <0.1ms |
+| Consistency | Strong per key | Eventual | None (per-node) |
+| Persistence | Optional | No | No |
+| Data Structures | Rich (sorted sets, hashes) | Key-value only | Custom |
+| Scaling | Sharding built-in | Client sharding | N/A |
+| Failure Impact | Partial outage | Partial outage | Inconsistent limits |
+| When to use | Distributed, precise | Distributed, simple | Single node, ultra-fast |
+
+### Failure Scenarios & Mitigation
+| Failure Mode | Impact | Detection | Mitigation |
+|--------------|--------|-----------|------------|
+| Redis cluster down | Rate limiting disabled | Connection failures, health checks | Fail open/closed policy, local fallback |
+| Network partition | Split-brain limiting | Cross-DC health checks | Accept temporary inaccuracy, reconcile |
+| Clock skew | Incorrect window calculations | NTP monitoring | Use Redis server time, not client |
+| Hot key (single user) | Redis node hotspot | Key distribution metrics | Shard by user ID, local caching |
+| Memory exhaustion | Redis OOM | Memory alerts | TTL on all keys, eviction policy |
+| Config service down | Can't update limits | Config service health | Cache config locally, use stale |
+
+### Monitoring & Observability
+**Key Metrics:**
+- **Requests allowed/denied per second**: Rate limiting effectiveness
+- **Limit utilization by tier**: How close users are to limits
+- **Redis operation latency**: Overhead introduced
+- **False positive rate**: Legitimate requests blocked
+- **Burst detection**: Identify attack patterns
+
+**Alerting:**
+- Denial rate exceeds 10% globally (possible attack or misconfiguration)
+- Redis latency exceeds 5ms P99
+- Any rate limit rule blocking >50% of requests for a user
+- Config sync failures exceed 1 minute
+
+**Dashboards:**
+- Real-time rate limit status by endpoint
+- Top users by request volume
+- Geographic distribution of blocked requests
+- Rate limit configuration history
+
+### Security Considerations
+**IP Spoofing Prevention:**
+- Use X-Forwarded-For with trusted proxy list only
+- Client certificate authentication for API keys
+- Rate limit by multiple dimensions (IP + API key + user)
+
+**Distributed Attack Protection:**
+- Global rate limits across all endpoints
+- Adaptive limits based on traffic patterns
+- Integration with WAF for L7 filtering
+- Automatic blocklisting of repeated offenders
+
+**API Key Security:**
+- Hash API keys in storage
+- Separate rate limits per key scope
+- Key rotation without downtime
+- Audit logging of key usage
+
+### Interview Deep-Dive Questions
+
+4. **How to rate limit by multiple keys simultaneously (IP + user + endpoint)?**
+   - Check all limits in parallel: `MULTI/EXEC` in Redis
+   - Use composite keys: `{ip}:{user}:{endpoint}`
+   - Hierarchical limits: global → tenant → user → endpoint
+   - Return most restrictive limit in response headers
+
+5. **How to handle graceful degradation when Redis is unavailable?**
+   - Fail open with monitoring: allow requests, alert ops
+   - Local in-memory rate limiting as fallback (per-node limits)
+   - Circuit breaker pattern: after N failures, stop checking
+   - Async write-behind: queue rate limit checks, process later
+
+6. **How to implement adaptive rate limiting?**
+   - Monitor backend latency and error rates
+   - Dynamically reduce limits when backend stressed
+   - Use control theory (PID controllers) for smooth adjustments
+   - Per-endpoint limits based on resource cost
+
+7. **How to avoid rate limiting legitimate traffic during load spikes?**
+   - Token bucket allows controlled bursts
+   - Implement "credit" system for good actors
+   - Dynamic limits based on time of day
+   - Whitelist known good clients
+
+8. **How would you implement rate limiting for a real-time bidding system (10ms budget)?**
+   - In-memory rate limiting only (no network calls)
+   - Pre-compute and cache user limits locally
+   - Async sync to central store
+   - Accept slight over-limit during sync gaps
+   - Sample-based limiting for extreme throughput
 
 ---
 
@@ -680,6 +896,112 @@ class HotKeyHandler:
    - Consistent hashing minimizes redistribution
    - Replicas take over reads
    - Graceful degradation to database
+
+### Extended Tradeoffs
+
+#### Cache Technologies: Redis vs Memcached vs Hazelcast vs Local Cache
+| Aspect | Redis | Memcached | Hazelcast | Local (Caffeine) |
+|--------|-------|-----------|-----------|------------------|
+| Latency | 0.5-2ms | 0.3-1ms | 1-5ms | <0.1ms |
+| Data Structures | Rich (lists, sets, sorted sets) | Key-value only | Rich + compute | Custom |
+| Persistence | Optional RDB/AOF | No | Yes | No |
+| Clustering | Built-in | Client-side | Built-in + auto-discovery | N/A |
+| Memory Efficiency | Moderate | High | Moderate | High |
+| Max Item Size | 512MB | 1MB default | Configurable | Unlimited |
+| Use Case | Feature-rich caching | Simple, ultra-fast | Distributed compute | Single-node, ultra-fast |
+
+#### Caching Strategies Deep Dive
+| Strategy | Consistency | Write Perf | Read Perf | Complexity | Best For |
+|----------|-------------|------------|-----------|------------|----------|
+| Cache-aside | Eventual | Fast | Cache miss = slow | Low | Read-heavy, tolerant |
+| Write-through | Strong | Slow (sync) | Fast | Medium | Consistency critical |
+| Write-behind | Eventual | Fast (async) | Fast | High | Write-heavy, batch |
+| Read-through | Eventual | N/A | Fast | Medium | Simplified client |
+| Refresh-ahead | Eventual | N/A | Always fast | High | Predictable access |
+
+### Failure Scenarios & Mitigation
+| Failure Mode | Impact | Detection | Mitigation |
+|--------------|--------|-----------|------------|
+| Cache stampede | DB overload when cache expires | Spike in DB queries | Locking, probabilistic refresh, staggered TTL |
+| Thundering herd | Mass cache invalidation | Mass cache misses | Batch invalidation, jitter on expiry |
+| Split brain | Inconsistent data across regions | Cross-region health checks | Single source of truth, conflict resolution |
+| Hot key | Single node overload | Key access metrics | Key replication, local caching, sharding |
+| Cold start | High latency on new deploy | Cache hit ratio drop | Cache warming, gradual traffic shift |
+| Memory pressure | Eviction of needed data | Memory utilization alerts | Right-size cache, LRU tuning |
+
+### Monitoring & Observability
+**Key Metrics:**
+- **Hit ratio**: Overall cache effectiveness (target >90%)
+- **Miss latency**: Time to populate cache (DB query time)
+- **Eviction rate**: Memory pressure indicator
+- **Memory utilization**: Capacity planning
+- **Hot key detection**: Keys with >1% of total traffic
+- **TTL distribution**: Expiration clustering risk
+
+**Alerting:**
+- Hit ratio drops below 80%
+- Eviction rate exceeds 1000/second
+- Memory utilization exceeds 85%
+- Single key exceeds 10% of traffic
+- Cross-region replication lag exceeds 100ms
+
+**Debugging Tools:**
+- Key access frequency histograms
+- Slow query log for cache misses
+- Memory fragmentation analysis
+- Cluster slot distribution
+
+### Security Considerations
+**Cache Poisoning Prevention:**
+- Validate data before caching
+- Signed cache entries for sensitive data
+- Input sanitization for cache keys
+- TTL limits to bound poison impact
+
+**Data Leakage Protection:**
+- Encrypt sensitive data in cache
+- Per-tenant cache isolation (key prefixes)
+- Audit logging for sensitive key access
+- Automatic PII redaction in logs
+
+**Access Control:**
+- Authentication (Redis AUTH, TLS)
+- Network segmentation (VPC, security groups)
+- Role-based access to admin commands
+- Disable dangerous commands (KEYS, FLUSHALL)
+
+### Interview Deep-Dive Questions
+
+4. **How to handle cache warming on new deployments?**
+   - Pre-populate from DB during deploy (offline warming)
+   - Shadow traffic to new nodes before cutover
+   - Gradual traffic shift with increasing cache population
+   - Predictive warming based on access patterns
+
+5. **How to implement multi-region caching?**
+   - Regional caches with cross-region async replication
+   - Write to local region, replicate to others
+   - Conflict resolution: last-write-wins or vector clocks
+   - Read from local, fallback to remote on miss
+
+6. **How to handle cache versioning for schema changes?**
+   - Include version in cache key: `user:v2:{id}`
+   - Dual-read during migration (v1, then v2)
+   - Background migration job for popular keys
+   - TTL-based natural expiration of old versions
+
+7. **How to implement distributed locking with cache?**
+   - Redis SETNX with expiration for simple locks
+   - Redlock algorithm for distributed consensus
+   - Fencing tokens to prevent stale lock holders
+   - Consider alternatives: ZooKeeper, etcd for critical paths
+
+8. **How would you design a cache for a social network's user timeline?**
+   - Cache recent N posts per user (list structure)
+   - Write-through on new post creation
+   - Fan-out updates to follower caches (async)
+   - Separate hot/cold tiers: recent in memory, older on SSD
+   - Personalization layer on top of cached base timeline
 
 ---
 
@@ -958,6 +1280,121 @@ class ConflictResolver:
    - LSM: Better write throughput, space amplification
    - B-Tree: Better read performance, in-place updates
 
+### Extended Tradeoffs
+
+#### KV Store Technologies: DynamoDB vs Cassandra vs Redis vs etcd
+| Aspect | DynamoDB | Cassandra | Redis | etcd |
+|--------|----------|-----------|-------|------|
+| Consistency | Eventual/Strong | Tunable | Strong (single) | Strong (Raft) |
+| Latency | 1-10ms | 1-5ms | <1ms | 1-10ms |
+| Throughput | Unlimited (auto) | 100K+/s per node | 100K+/s | 10K+/s |
+| Max Value Size | 400KB | 2GB (not recommended) | 512MB | 1.5MB |
+| Transactions | Yes (limited) | Lightweight | Yes (Lua/MULTI) | Yes (STM) |
+| Secondary Indexes | GSI (eventual) | Yes (local/global) | No | No |
+| Operations | Managed | Self-managed | Managed/Self | Self-managed |
+| Cost | Pay-per-request | Infrastructure | Infrastructure | Infrastructure |
+| Use Case | Serverless, AWS | Massive write scale | Caching, real-time | Config, coordination |
+
+#### LSM-Tree vs B-Tree Deep Dive
+| Aspect | LSM-Tree | B-Tree |
+|--------|----------|--------|
+| Write Pattern | Append-only, sequential | Random I/O |
+| Write Throughput | High (batch writes) | Medium |
+| Read Latency | Higher (multiple levels) | Lower (single tree) |
+| Space Amplification | Higher (multiple copies) | Lower |
+| Write Amplification | Higher (compaction) | Lower |
+| Range Queries | Efficient after compaction | Very efficient |
+| Best For | Write-heavy, time-series | Read-heavy, OLTP |
+| Examples | Cassandra, RocksDB, LevelDB | MySQL InnoDB, PostgreSQL |
+
+### Failure Scenarios & Mitigation
+| Failure Mode | Impact | Detection | Mitigation |
+|--------------|--------|-----------|------------|
+| Node failure | Reduced capacity, rebalancing | Heartbeat timeout | Hinted handoff, re-replication |
+| Network partition | Split-brain, inconsistency | Cross-DC pings | Quorum requirements, partition tolerance |
+| Data corruption | Silent data loss | Checksums, Merkle trees | Repair from replicas, anti-entropy |
+| Hot partition | Single node overload | Partition metrics | Key design, scatter-gather pattern |
+| Compaction lag | Read amplification | Compaction metrics | Tuning, separate compaction resources |
+| Tombstone buildup | Query slowdown | Tombstone metrics | TTL, regular cleanup, DELETE patterns |
+
+### Monitoring & Observability
+**Key Metrics:**
+- **Read/Write latency P50, P99, P999**: Performance SLOs
+- **Throughput**: Requests per second by operation type
+- **Replication lag**: Consistency risk indicator
+- **Compaction pending**: LSM-tree health
+- **Disk utilization**: Capacity planning
+- **Partition distribution**: Load balance health
+
+**Alerting:**
+- P99 latency exceeds 100ms
+- Replication lag exceeds 10 seconds
+- Disk utilization exceeds 80%
+- Node heartbeat missing for 30 seconds
+- Write failures exceed 0.1%
+
+**Operational Tools:**
+- Nodetool (Cassandra) for cluster operations
+- Consistent hashing visualization
+- Hot partition detection
+- Tombstone analysis
+
+### Security Considerations
+**Encryption:**
+- Encryption at rest (disk-level or application-level)
+- TLS for data in transit
+- Key management integration (KMS, Vault)
+- Field-level encryption for sensitive data
+
+**Access Control:**
+- Role-based access control (RBAC)
+- Row-level security where supported
+- API key scoping per keyspace/table
+- Audit logging for all operations
+
+**Data Protection:**
+- Backup and point-in-time recovery
+- Cross-region replication for disaster recovery
+- Data retention policies
+- Secure deletion (crypto-shredding)
+
+### Interview Deep-Dive Questions
+
+4. **How to handle schema evolution in a schemaless KV store?**
+   - Version field in value: `{version: 2, data: {...}}`
+   - Migration on read (lazy): transform old to new format
+   - Background migration for frequently accessed keys
+   - Dual-write during transition period
+   - Avoid breaking changes: additive only
+
+5. **How to implement cross-region replication with conflict resolution?**
+   - Async replication to minimize latency impact
+   - Vector clocks to detect concurrent writes
+   - Conflict resolution strategies: last-write-wins, merge, custom
+   - Conflict-free replicated data types (CRDTs) for specific use cases
+   - Tombstones with grace periods for deletes
+
+6. **How to design a KV store for time-series data?**
+   - Partition by time bucket + entity ID
+   - Optimize for append-only writes
+   - TTL for automatic data expiration
+   - Downsampling for historical data
+   - Separate hot (recent) and cold (historical) tiers
+
+7. **What backup strategies work for a petabyte-scale KV store?**
+   - Incremental snapshots using LSM-tree properties
+   - Cross-region replication as live backup
+   - Point-in-time recovery using write-ahead logs
+   - Backup to object storage (S3, GCS)
+   - Validate backups with periodic restore tests
+
+8. **How to implement transactions across multiple keys?**
+   - Two-phase commit for distributed transactions
+   - Paxos/Raft for consensus across partitions
+   - Optimistic concurrency control with version checks
+   - Saga pattern for eventual consistency
+   - Keep transactions within single partition when possible
+
 ---
 
 ## 5. Message Queue
@@ -1220,6 +1657,120 @@ class ReplicationManager:
 3. **Kafka vs RabbitMQ tradeoffs?**
    - Kafka: Higher throughput, log retention, replay
    - RabbitMQ: Lower latency, flexible routing, message acknowledgment
+
+### Extended Tradeoffs
+
+#### Message Queue Technologies: Kafka vs RabbitMQ vs SQS vs Pulsar
+| Aspect | Kafka | RabbitMQ | SQS | Pulsar |
+|--------|-------|----------|-----|--------|
+| Throughput | 1M+ msg/s | 50K msg/s | Auto-scale | 1M+ msg/s |
+| Latency | 5-10ms | 1-5ms | 20-100ms | 5-10ms |
+| Ordering | Per-partition | Per-queue | FIFO queues only | Per-partition |
+| Retention | Log-based (days/weeks) | Until consumed | 14 days max | Tiered (infinite) |
+| Replay | Yes | No (without plugins) | No | Yes |
+| Exactly-Once | Yes (with transactions) | No | FIFO only | Yes |
+| Protocol | Custom binary | AMQP, STOMP, MQTT | HTTP | Custom binary |
+| Operations | Complex | Medium | Managed | Complex |
+| Use Case | Event streaming, logs | Task queues, RPC | Simple queues, serverless | Unified messaging |
+
+#### Delivery Semantics Deep Dive
+| Guarantee | Implementation | Performance | Complexity | Use Case |
+|-----------|---------------|-------------|------------|----------|
+| At-most-once | Fire and forget, no acks | Fastest | Low | Metrics, logs (loss OK) |
+| At-least-once | Ack after process, retry on failure | Fast | Medium | Most applications |
+| Exactly-once | Idempotent producer + transactions | Slowest | High | Financial, inventory |
+
+**Exactly-Once Components:**
+- **Producer idempotency**: Sequence numbers per producer session
+- **Transactions**: Atomic writes across partitions
+- **Consumer idempotency**: Dedupe using message IDs
+- **Outbox pattern**: DB + queue in single transaction
+
+### Failure Scenarios & Mitigation
+| Failure Mode | Impact | Detection | Mitigation |
+|--------------|--------|-----------|------------|
+| Broker failure | Partition unavailable | Leader election, health checks | Replication, automatic failover |
+| Consumer lag | Processing delays | Lag metrics | Auto-scaling consumers, alerts |
+| Message loss | Data loss on crash | Gap detection | Replication factor ≥3, sync replication |
+| Poison message | Consumer stuck | Same message redelivered | Dead letter queue, max retries |
+| Producer backpressure | Publish failures | Publish latency spike | Batching, async sends, circuit breaker |
+| Disk full | Broker crash | Disk utilization monitoring | Retention policies, alerts |
+
+### Monitoring & Observability
+**Key Metrics:**
+- **Consumer lag**: Messages behind real-time (critical for latency)
+- **Throughput**: Messages per second (produce/consume)
+- **Broker disk utilization**: Capacity planning
+- **Under-replicated partitions**: Durability risk
+- **Consumer group health**: Active members, rebalances
+- **Message age**: Time since produce (staleness)
+
+**Alerting:**
+- Consumer lag exceeds 10,000 messages
+- Under-replicated partitions > 0
+- Producer error rate exceeds 0.1%
+- Consumer rebalance frequency exceeds 1/hour
+- Disk utilization exceeds 80%
+
+**Debugging Tools:**
+- Consumer offset tracking
+- Message tracing (correlation IDs)
+- Partition distribution visualization
+- Consumer group state inspection
+
+### Security Considerations
+**Message Encryption:**
+- TLS for data in transit (required)
+- Application-level encryption for sensitive payloads
+- Key rotation without downtime
+- Envelope encryption for audit trail
+
+**Access Control:**
+- Topic-level ACLs (produce, consume, admin)
+- Consumer group authorization
+- Service-to-service authentication (mTLS, OAuth)
+- Audit logging for all operations
+
+**Compliance:**
+- Message retention policies for data residency
+- PII handling: encryption or exclusion
+- Audit trail for all message operations
+- GDPR: right to deletion considerations
+
+### Interview Deep-Dive Questions
+
+4. **How to handle poison messages (messages that always fail)?**
+   - Configure max retry attempts per message
+   - Move to dead letter queue (DLQ) after max retries
+   - Alert on DLQ depth, manual intervention
+   - Root cause analysis: schema issues, missing dependencies
+   - Replay from DLQ after fix
+
+5. **How to implement message ordering across partitions?**
+   - Single partition for strict ordering (limits throughput)
+   - Sequence numbers in message, reassemble at consumer
+   - Causal ordering using vector clocks
+   - Accept partial ordering per entity (partition by entity ID)
+
+6. **How to scale consumers without losing messages?**
+   - Consumer groups with partition assignment
+   - Rebalance protocol for member changes
+   - Commit offsets before rebalance completes
+   - Cooperative rebalancing to minimize disruption
+   - Pre-scale before expected load spikes
+
+7. **How to implement request-reply pattern over async queue?**
+   - Correlation ID in request and response
+   - Reply-to queue per request or per client
+   - Timeout handling for missing responses
+   - Consider RPC frameworks (gRPC) for synchronous needs
+
+8. **How would you migrate from RabbitMQ to Kafka?**
+   - Dual-write: produce to both systems
+   - Shadow consumer: consume from both, compare
+   - Gradual traffic shift with feature flags
+   - Schema compatibility between systems
+   - Rollback plan with bidirectional sync
 
 ---
 
@@ -1508,6 +2059,120 @@ class DeliveryTracker:
    - Schedule based on local time
    - Respect quiet hours
 
+### Extended Tradeoffs
+
+#### Push Providers: APNs vs FCM vs Web Push
+| Aspect | APNs (Apple) | FCM (Google) | Web Push |
+|--------|--------------|--------------|----------|
+| Platform | iOS, macOS | Android, iOS, Web | Browsers |
+| Payload Size | 4KB | 4KB | 4KB |
+| Reliability | High | High | Medium (browser dependent) |
+| Latency | <1s | <1s | 1-10s |
+| Token Management | Complex (refresh needed) | Simpler | Subscription-based |
+| Delivery Receipt | Yes | Yes | No |
+| Silent Push | Yes | Yes | Limited |
+| Priority Levels | High/Normal | High/Normal | Urgent/Normal |
+
+#### Email Providers: SendGrid vs SES vs Mailgun
+| Aspect | SendGrid | Amazon SES | Mailgun |
+|--------|----------|------------|---------|
+| Deliverability | High | High | High |
+| Price (per 10K) | $0.25+ | $0.10 | $0.80 |
+| Templates | Yes | Yes | Yes |
+| Analytics | Detailed | Basic | Detailed |
+| Dedicated IPs | Yes | Yes | Yes |
+| API Quality | Excellent | Good | Excellent |
+| Webhook Support | Full | Limited | Full |
+| Best For | General purpose | AWS ecosystem, cost | Transactional focus |
+
+### Failure Scenarios & Mitigation
+| Failure Mode | Impact | Detection | Mitigation |
+|--------------|--------|-----------|------------|
+| Provider outage (APNs/FCM) | Push delivery stops | Provider health endpoints | Multi-provider fallback, retry queue |
+| Token expiration | Delivery failures | Invalid token responses | Regular token refresh, cleanup job |
+| Rate limiting (provider) | Throttled delivery | 429 responses | Batching, backoff, multiple credentials |
+| Email bounce | Failed delivery, reputation damage | Bounce webhooks | List hygiene, bounce handling |
+| Spam filtering | User never sees notification | Engagement metrics | Domain reputation, content quality |
+| Template error | Malformed notifications | Pre-send validation | Template testing, staging environment |
+
+### Monitoring & Observability
+**Key Metrics:**
+- **Delivery rate by channel**: Success percentage (target >98%)
+- **Delivery latency by priority**: Time to deliver
+- **Open/Click rates**: Engagement effectiveness
+- **Bounce/Complaint rates**: Reputation health
+- **Provider API latency**: Integration health
+- **Queue depth by priority**: Processing capacity
+
+**Alerting:**
+- Delivery rate drops below 95%
+- Bounce rate exceeds 2%
+- Complaint rate exceeds 0.1%
+- Provider API errors exceed 1%
+- Queue depth exceeds 100K for >5 minutes
+
+**Dashboards:**
+- Real-time delivery funnel (sent → delivered → opened → clicked)
+- Channel breakdown by notification type
+- Provider health comparison
+- User preference distribution
+
+### Security Considerations
+**Notification Spoofing Prevention:**
+- Signed messages from trusted senders
+- Rate limiting per sender service
+- Content validation (no external links in sensitive flows)
+- Audit trail of all notifications
+
+**PII Handling:**
+- Minimize PII in notification content
+- Encrypt sensitive data in payload
+- Short-lived URLs for personalized content
+- Log redaction for notification content
+
+**User Privacy:**
+- Granular opt-in/opt-out controls
+- Clear unsubscribe mechanisms
+- Preference sync across devices
+- Data retention limits on notification history
+
+### Interview Deep-Dive Questions
+
+4. **How to handle notification aggregation (100 likes → "100 people liked your post")?**
+   - Buffer notifications in short window (30s-5min)
+   - Aggregate by type and target object
+   - Summary notification with breakdown on expand
+   - User-configurable aggregation thresholds
+   - Real-time count updates for active users
+
+5. **How to implement A/B testing for notifications?**
+   - Hash user ID for consistent bucketing
+   - Test: subject lines, timing, channels
+   - Measure: open rate, conversion, unsubscribe
+   - Statistical significance calculator
+   - Automatic winner selection after confidence threshold
+
+6. **How to scale to billions of notifications (New Year's midnight)?**
+   - Pre-compute and queue notifications hours ahead
+   - Time-zone aware scheduling
+   - Staggered delivery windows (±30 min)
+   - Dedicated capacity for peak events
+   - Circuit breakers to protect downstream systems
+
+7. **How to prevent notification fatigue?**
+   - ML-based send time optimization
+   - Frequency caps per user per channel
+   - Importance scoring to filter low-value notifications
+   - Digest mode for non-urgent notifications
+   - User engagement signals to adjust frequency
+
+8. **How would you design cross-platform notification sync?**
+   - Central notification inbox service
+   - Real-time sync via WebSocket for active devices
+   - Read/dismiss status propagation across devices
+   - Last-N notifications cached per device
+   - Push notification as wake-up for inbox sync
+
 ---
 
 ## 7. Real-Time Chat
@@ -1790,6 +2455,120 @@ class PresenceService:
    - Key exchange on device, server never sees plaintext
    - Store encrypted messages only
 
+### Extended Tradeoffs
+
+#### Real-Time Protocols: WebSocket vs SSE vs Long Polling vs gRPC Streaming
+| Aspect | WebSocket | SSE (Server-Sent Events) | Long Polling | gRPC Streaming |
+|--------|-----------|-------------------------|--------------|----------------|
+| Bidirectional | Yes | No (server→client only) | No (request-response) | Yes |
+| Latency | <50ms | <100ms | 100-500ms | <50ms |
+| Connection Overhead | Low (persistent) | Low (persistent) | High (reconnect) | Low (HTTP/2) |
+| Browser Support | All modern | All modern | All | Limited (needs proxy) |
+| Scalability | 100K+ per server | 100K+ per server | 10K per server | 100K+ per server |
+| Load Balancer | L4 or L7 (sticky) | L7 | L7 | L7 (HTTP/2) |
+| Firewall Friendly | Some issues | HTTP-based | HTTP-based | HTTP/2 based |
+| Use Case | Full-duplex chat | Live feeds, notifications | Legacy support | Internal services |
+
+#### Message Routing: Redis Pub/Sub vs Kafka vs Custom
+| Aspect | Redis Pub/Sub | Kafka | Custom (Consistent Hashing) |
+|--------|---------------|-------|---------------------------|
+| Latency | <1ms | 5-10ms | <1ms |
+| Durability | No (fire-and-forget) | Yes (persisted) | Depends on impl |
+| Message History | No | Yes | Custom |
+| Scalability | Moderate | High | High |
+| Ordering | Per-channel | Per-partition | Custom |
+| Operations | Simple | Complex | Custom |
+| Use Case | Real-time, no history | Event sourcing, replay | Full control needed |
+
+### Failure Scenarios & Mitigation
+| Failure Mode | Impact | Detection | Mitigation |
+|--------------|--------|-----------|------------|
+| WebSocket disconnect | User appears offline, message delays | Heartbeat timeout | Auto-reconnect, exponential backoff |
+| Chat server crash | Connected users lose connection | Health checks | Sticky session migration, connection redistribution |
+| Message ordering issues | Confusing conversation flow | Out-of-order detection | Lamport timestamps, client-side sorting |
+| Redis Pub/Sub overload | Message delays or loss | Pub/Sub metrics | Shard by chat ID, use Kafka for scale |
+| Database write failures | Messages not persisted | Write error rate | Retry queue, write-ahead log, user notification |
+| Media upload failure | Broken attachments | Upload tracking | Resumable uploads, CDN fallback |
+
+### Monitoring & Observability
+**Key Metrics:**
+- **Connected users**: WebSocket connection count
+- **Message delivery latency**: Time from send to receive
+- **Presence update latency**: Online status propagation time
+- **Messages per second**: Throughput
+- **Reconnection rate**: Connection stability
+- **Undelivered message rate**: Reliability
+
+**Alerting:**
+- Message delivery latency P99 exceeds 500ms
+- Connection drop rate exceeds 1%
+- Undelivered messages exceed 0.1%
+- Chat server memory exceeds 80%
+- Database replication lag exceeds 1s
+
+**Debugging Tools:**
+- Message tracing (correlation IDs)
+- Connection state inspection
+- Chat room activity heatmaps
+- User session timeline
+
+### Security Considerations
+**End-to-End Encryption (E2EE):**
+- Signal Protocol (Double Ratchet) for key management
+- Pre-keys for offline message encryption
+- Identity key verification (safety numbers)
+- Server never sees plaintext content
+- Group encryption with sender keys
+
+**Message Tampering Prevention:**
+- Digital signatures on messages
+- Hash chain for conversation integrity
+- Tamper-evident logging
+- Client-side verification
+
+**Access Control:**
+- Authentication for WebSocket connections
+- Authorization per chat room
+- Admin controls for group management
+- Rate limiting per user
+
+### Interview Deep-Dive Questions
+
+4. **How to implement typing indicators efficiently?**
+   - Throttle typing events (send every 2-3s while typing)
+   - Short TTL (3s) - auto-clear if no update
+   - Broadcast only to active participants in view
+   - Don't persist typing state
+   - Debounce on client side
+
+5. **How to scale group chats with thousands of members?**
+   - Fan-out on read for very large groups
+   - Tiered architecture: active participants vs lurkers
+   - Pagination for member list
+   - Selective presence updates (nearby members only)
+   - Message sampling for activity indicators
+
+6. **How to implement message search across chat history?**
+   - Elasticsearch index for message content
+   - Index on write (async for non-blocking)
+   - Per-user access control in search
+   - E2EE consideration: client-side search or keyword encryption
+   - Recent messages in hot storage, older in cold
+
+7. **How to handle message edits and deletes?**
+   - Version history for edits (store diffs)
+   - Soft delete with tombstone
+   - Propagate edit/delete to all recipients
+   - Time limit for editing (e.g., 15 minutes)
+   - "Edited" indicator in UI
+
+8. **How would you implement read receipts at scale?**
+   - Batch read updates (aggregate per chat room)
+   - Store per-user read pointer, not per-message
+   - Propagate read status asynchronously
+   - Limit history for read receipt display
+   - Opt-out option for privacy
+
 ---
 
 ## 8. News Feed / Timeline
@@ -1990,6 +2769,118 @@ class FeedRanker:
    - Multi-factor scoring (time, engagement, affinity)
    - A/B testing different algorithms
    - User feedback loop for personalization
+
+### Extended Tradeoffs
+
+#### Fan-Out Models with Numerical Analysis
+| Aspect | Fan-Out on Write | Fan-Out on Read | Hybrid |
+|--------|------------------|-----------------|--------|
+| Write Cost | O(followers) | O(1) | O(non-celebrity followers) |
+| Read Cost | O(1) | O(following) | O(celebrity following) |
+| Storage | O(users × avg posts) | O(posts) | O(users × avg non-celeb posts) |
+| Write Latency | High for celebrities | Low | Medium |
+| Read Latency | Low | High for heavy users | Low-Medium |
+| Example Numbers | 10M followers = 10M writes | 1K following = 1K reads | Celebrity threshold: 10K |
+| Consistency | Eventually consistent | Always fresh | Hybrid consistency |
+| Best For | Majority of users | Very few followers | Production systems |
+
+#### Ranking Algorithm Components
+| Signal | Weight | Description | Update Frequency |
+|--------|--------|-------------|------------------|
+| Recency | 30% | Time decay function | Real-time |
+| Engagement | 25% | Likes, comments, shares | Near real-time |
+| Affinity | 20% | Relationship strength with author | Daily batch |
+| Content Type | 10% | Photo, video, text | Static per post |
+| Author Quality | 10% | Past engagement, credibility | Daily batch |
+| Diversity | 5% | Avoid same author clustering | Real-time |
+
+### Failure Scenarios & Mitigation
+| Failure Mode | Impact | Detection | Mitigation |
+|--------------|--------|-----------|------------|
+| Celebrity posting (fan-out storm) | Queue backup, delays | Queue depth spike | Async fan-out, priority queues, hybrid model |
+| Viral content | Cache stampede, DB overload | Traffic spike on content ID | Cache replication, rate limiting reads |
+| Feed inconsistency | Missing or duplicate posts | User reports, consistency checks | Idempotent writes, deduplication |
+| Ranking service down | No personalization | Health checks | Fallback to chronological feed |
+| Graph service slow | Slow following list lookup | Latency metrics | Cache follower lists aggressively |
+| Storage corruption | Lost feed data | Checksum failures | Rebuild from posts + graph |
+
+### Monitoring & Observability
+**Key Metrics:**
+- **Feed generation latency**: P50, P99 (target <200ms)
+- **Fan-out lag**: Time from post to all feeds updated
+- **Engagement rate**: Clicks, likes, time spent per feed load
+- **Scroll depth**: How far users scroll (feed quality indicator)
+- **Cache hit ratio**: Feed cache effectiveness
+- **Diversity score**: Content variety in feeds
+
+**Alerting:**
+- Feed latency P99 exceeds 500ms
+- Fan-out queue depth exceeds 10M
+- Engagement rate drops 10% from baseline
+- Cache hit ratio drops below 80%
+- Feed generation errors exceed 0.1%
+
+**A/B Testing:**
+- Ranking algorithm variants
+- Feed refresh behavior
+- Content type weighting
+- Personalization intensity
+
+### Security Considerations
+**Content Moderation:**
+- Pre-publish content scanning (text, images)
+- User reporting mechanism with priority queue
+- ML-based spam and abuse detection
+- Account reputation scoring
+- Appeals process for false positives
+
+**Spam Detection:**
+- Velocity checks (posts per hour)
+- Duplicate content detection
+- Bot behavior patterns (engagement timing)
+- Network analysis (coordinated behavior)
+- Progressive enforcement (warning → throttle → ban)
+
+**Privacy:**
+- Private account handling in fan-out
+- Block/mute respect in feed generation
+- Content visibility rules per relationship
+- Data retention for feed history
+
+### Interview Deep-Dive Questions
+
+4. **How to handle unfollows efficiently?**
+   - Lazy removal: filter during read, not immediate cleanup
+   - Background job to clean up feed caches
+   - For hybrid model: just stop future fan-out
+   - Consider: keep posts from before unfollow?
+
+5. **How to implement infinite scroll with consistent experience?**
+   - Cursor-based pagination (not offset)
+   - Snapshot feed state at session start
+   - Handle new posts: "N new posts" banner
+   - Deduplicate across page loads
+   - Cache multiple pages ahead
+
+6. **How to debug why a specific post isn't appearing in a feed?**
+   - Tracing: follow post through fan-out pipeline
+   - Check: user relationship (following, blocked?)
+   - Check: post visibility (deleted, private?)
+   - Check: ranking (scored too low?)
+   - Check: pagination (past cursor?)
+
+7. **How to handle time-travel debugging ("what did feed look like yesterday")?**
+   - Event sourcing: log all feed changes
+   - Point-in-time snapshots (hourly/daily)
+   - Reconstruction from posts + graph history
+   - Replay ranking with historical signals
+
+8. **How would you implement "Close Friends" or audience selection?**
+   - Separate fan-out path for restricted content
+   - Filter at read time based on audience list
+   - Cache per audience segment
+   - Combine with regular feed at read time
+   - Privacy: hide audience selection from viewers
 
 ---
 
@@ -2255,6 +3146,115 @@ class FuzzyAutocomplete:
    - Rate limiting on indexing
    - Profanity filters
    - Human review for trending
+
+### Extended Tradeoffs
+
+#### Data Structures: Trie vs Ternary Search Tree vs Elasticsearch
+| Aspect | Trie | Ternary Search Tree | Elasticsearch |
+|--------|------|---------------------|---------------|
+| Memory | High (many pointers) | Medium | Low (inverted index) |
+| Prefix Lookup | O(k) k=prefix length | O(k + log n) | O(log n) |
+| Fuzzy Matching | Complex to add | Complex to add | Built-in |
+| Updates | Moderate | Moderate | Fast (append-only) |
+| Scaling | In-memory, single node | In-memory, single node | Distributed |
+| Operations | Simple | Simple | Complex |
+| Use Case | Small-medium, fast | Medium, memory-constrained | Large scale, fuzzy |
+
+#### Fuzzy Matching Algorithms
+| Algorithm | Accuracy | Speed | Handles | Use Case |
+|-----------|----------|-------|---------|----------|
+| Levenshtein (Edit Distance) | High | Slow | Typos | Spell correction |
+| Soundex | Medium | Fast | Phonetic | Name search |
+| Metaphone | Higher | Fast | Phonetic | Better phonetic |
+| N-grams | High | Medium | Partial matches | Substring search |
+| BK-Tree | High | Medium | Edit distance | Dictionary lookup |
+
+### Failure Scenarios & Mitigation
+| Failure Mode | Impact | Detection | Mitigation |
+|--------------|--------|-----------|------------|
+| Index corruption | Wrong/missing suggestions | Index validation | Rebuild from source, checksums |
+| Stale suggestions | Outdated trending | Freshness checks | Real-time index updates, TTL |
+| Cold cache | High latency | Cache miss rate spike | Cache warming, predictive loading |
+| Hot prefix ("the") | Single shard overload | Prefix query distribution | Prefix sharding, in-memory hot cache |
+| Suggestion bombing | Spam in suggestions | Anomaly detection | Rate limiting, human review queue |
+| Personalization service down | No personalization | Health checks | Fallback to global suggestions |
+
+### Monitoring & Observability
+**Key Metrics:**
+- **P99 latency**: Target <50ms including network
+- **Suggestion click-through rate (CTR)**: Quality indicator
+- **Query abandonment rate**: User giving up on search
+- **Index freshness**: Age of newest suggestions
+- **Cache hit ratio**: Efficiency
+- **Prefix coverage**: % of queries with suggestions
+
+**Alerting:**
+- P99 latency exceeds 100ms
+- CTR drops 10% from baseline
+- Index update lag exceeds 1 hour
+- Cache hit ratio drops below 90%
+- Suggestion coverage drops below 95%
+
+**Quality Metrics:**
+- Mean Reciprocal Rank (MRR): Position of clicked suggestion
+- Suggestion diversity score
+- Offensive content detection rate
+
+### Security Considerations
+**Profanity and Content Filtering:**
+- Blocklist for offensive terms
+- ML-based toxicity detection
+- Real-time filtering in suggestion pipeline
+- Admin tools for manual review and blocking
+
+**Suggestion Bombing Prevention:**
+- Rate limiting on suggestion indexing
+- Anomaly detection for sudden popularity
+- Human review for trending suggestions
+- Source verification (organic vs manipulated)
+
+**Privacy:**
+- Don't expose other users' searches in suggestions
+- Anonymize before aggregating
+- User opt-out for search history personalization
+- Data retention limits on search logs
+
+### Interview Deep-Dive Questions
+
+4. **How to handle multiple languages and scripts?**
+   - Language detection on query
+   - Per-language index shards
+   - Unicode normalization (NFC/NFKC)
+   - Language-specific tokenization (CJK, Arabic)
+   - Cross-language suggestions for common terms
+
+5. **How to implement personalization while respecting privacy?**
+   - On-device processing for sensitive history
+   - Server-side: hash user ID, don't log queries
+   - Blend personal + global (e.g., 30% personal weight)
+   - Easy opt-out mechanism
+   - Differential privacy for aggregate analytics
+
+6. **How to handle real-time trending suggestions?**
+   - Sliding window aggregation (last 15 min, 1 hour)
+   - Exponential decay weighting
+   - Burst detection for viral queries
+   - Geographic segmentation for local trends
+   - Cooldown for yesterday's trends
+
+7. **How would you implement query understanding (beyond prefix)?**
+   - Intent classification (navigational, informational)
+   - Entity recognition in queries
+   - Query expansion (synonyms, related terms)
+   - Session context (previous queries)
+   - User profile context
+
+8. **How to optimize for mobile autocomplete?**
+   - Client-side prefix caching (common prefixes)
+   - Adaptive result count (fewer on small screens)
+   - Touch-friendly tap targets
+   - Predictive pre-fetching based on typing patterns
+   - Bandwidth-aware response compression
 
 ---
 
@@ -2551,6 +3551,117 @@ class PriorityCalculator:
    - Depth limits per domain
    - Pattern detection for generated URLs
 
+### Extended Tradeoffs
+
+#### Crawling Strategies: BFS vs DFS vs Priority-Based
+| Aspect | BFS (Breadth-First) | DFS (Depth-First) | Priority-Based |
+|--------|---------------------|-------------------|----------------|
+| Coverage | Broad, shallow | Deep, narrow | Important pages first |
+| Discovery | Fast for popular | Good for complete sites | Best balance |
+| Memory | High (large frontier) | Low (stack-based) | Medium |
+| Freshness | Good for homepages | Poor for popular | Best |
+| Use Case | General crawling | Site-specific | Production crawlers |
+| Politeness | Easier to manage | Per-site polite | Complex but optimal |
+
+#### Bloom Filter Sizing Analysis
+| URLs (billions) | Bits per URL | False Positive Rate | Memory |
+|-----------------|--------------|---------------------|--------|
+| 1 | 10 | 1% | 1.2 GB |
+| 1 | 15 | 0.1% | 1.9 GB |
+| 10 | 10 | 1% | 12 GB |
+| 10 | 15 | 0.1% | 19 GB |
+| 100 | 10 | 1% | 120 GB |
+
+**Formula:** m = -n * ln(p) / (ln(2))² where n=items, p=false positive rate
+
+### Failure Scenarios & Mitigation
+| Failure Mode | Impact | Detection | Mitigation |
+|--------------|--------|-----------|------------|
+| Crawler traps | Infinite crawling | URL pattern detection | Depth limits, pattern blocklist |
+| DNS failures | Can't resolve hosts | DNS query failures | DNS caching, multiple resolvers |
+| Rate limiting (by site) | Blocked IP, 429s | Response code monitoring | Respect robots.txt, exponential backoff |
+| Spider trap detection | Soft blocking | Unusual link patterns | CAPTCHA detection, JS analysis |
+| Content explosion | Disk full | Disk utilization alerts | Content size limits, deduplication |
+| Frontier corruption | Lost URLs | Checkpoint validation | Regular checkpoints, idempotent replay |
+
+### Monitoring & Observability
+**Key Metrics:**
+- **Pages per second**: Crawl throughput
+- **Unique domains discovered**: Coverage breadth
+- **DNS cache hit ratio**: Efficiency
+- **Error rate by type**: 4xx, 5xx, timeout breakdown
+- **Content type distribution**: HTML vs JS vs other
+- **Duplicate detection rate**: Bloom filter effectiveness
+
+**Alerting:**
+- Crawl rate drops 50% from baseline
+- Error rate exceeds 10%
+- Disk utilization exceeds 80%
+- DNS failure rate exceeds 5%
+- Single domain exceeds 10% of frontier
+
+**Operational Tools:**
+- Frontier visualization by domain
+- Crawl delay heatmap
+- Content type and size distributions
+- robots.txt compliance reports
+
+### Security Considerations
+**Robots.txt Compliance:**
+- Always fetch and respect robots.txt
+- Cache robots.txt per domain (24-hour TTL)
+- Respect Crawl-delay directive
+- Honor noindex meta tags
+
+**Crawl Ethics:**
+- Identify crawler in User-Agent
+- Provide contact information
+- Respect rate limits gracefully
+- Don't crawl password-protected content
+
+**Infrastructure Security:**
+- Sandbox untrusted content execution
+- Prevent SSRF via URL validation
+- Content scanning for malware
+- Isolated network for fetchers
+
+### Interview Deep-Dive Questions
+
+4. **How to handle JavaScript-rendered content?**
+   - Headless browser (Puppeteer, Playwright) for JS rendering
+   - Separate queue for JS-heavy sites (more resources)
+   - Smart rendering: detect if JS needed per page
+   - Pre-rendering services for common frameworks
+   - Accept that some content won't be indexed
+
+5. **How to implement incremental crawling (only fetch changed pages)?**
+   - Store Last-Modified and ETag headers
+   - Conditional requests (If-Modified-Since)
+   - Content hashing to detect changes
+   - Change frequency estimation per URL
+   - Adaptive recrawl intervals based on change rate
+
+6. **How to optimize crawl budget for a large site?**
+   - Prioritize by PageRank or site structure
+   - Focus on recently updated sections
+   - Sample deep pages, crawl important ones
+   - Use sitemaps for guided discovery
+   - A/B test crawl strategies
+
+7. **How to detect and handle soft 404s?**
+   - Content similarity to known 404 pages
+   - "Page not found" text detection
+   - HTTP 200 with empty content
+   - Unusual response time patterns
+   - Hash-based duplicate detection
+
+8. **How would you design a recrawl scheduler?**
+   - Track content change frequency per URL
+   - Exponential backoff for stable pages
+   - Immediate recrawl for known-fresh (RSS, sitemaps)
+   - Time-decay priority scoring
+   - Separate queues by priority tier
+
 ---
 
 ## 11. Video Streaming Platform
@@ -2798,6 +3909,118 @@ class ViewCounter:
    - Content ID fingerprinting
    - Hash-based duplicate detection
    - DMCA takedown workflow
+
+### Extended Tradeoffs
+
+#### Streaming Protocols: HLS vs DASH vs CMAF
+| Aspect | HLS | DASH | CMAF |
+|--------|-----|------|------|
+| Developer | Apple | MPEG | Apple + Microsoft |
+| Segment Format | .ts (MPEG-TS) | .m4s (fMP4) | fMP4 |
+| Manifest | .m3u8 | .mpd (XML) | Both supported |
+| DRM Support | FairPlay | Widevine, PlayReady | All |
+| Latency | 15-30s | 10-20s | 2-5s (LL-HLS/DASH) |
+| Browser Support | Safari native, others via JS | All via JS | All via JS |
+| Device Support | iOS, Apple TV native | Android, Smart TVs | Universal |
+| Use Case | Apple ecosystem | Cross-platform | Unified delivery |
+
+#### Encoding Profiles (Bitrate Ladder)
+| Resolution | Bitrate (H.264) | Bitrate (H.265) | Target Device |
+|------------|-----------------|-----------------|---------------|
+| 2160p (4K) | 15-20 Mbps | 8-12 Mbps | Smart TV, High-end |
+| 1080p | 4-6 Mbps | 2-4 Mbps | Desktop, Tablet |
+| 720p | 2-3 Mbps | 1-2 Mbps | Mobile WiFi |
+| 480p | 1-1.5 Mbps | 0.5-1 Mbps | Mobile data |
+| 360p | 0.5-0.7 Mbps | 0.3-0.5 Mbps | Poor connection |
+| 240p | 0.3 Mbps | 0.15 Mbps | Extreme conditions |
+
+### Failure Scenarios & Mitigation
+| Failure Mode | Impact | Detection | Mitigation |
+|--------------|--------|-----------|------------|
+| Transcoding failure | Video not available | Job failure alerts | Retry queue, manual intervention |
+| CDN outage | Buffering, playback failure | Edge health checks | Multi-CDN with failover |
+| Origin overload | CDN cache misses slow | Origin latency spike | Origin shielding, cache warming |
+| DRM license server down | Premium content blocked | License fetch failures | License caching, graceful degradation |
+| Segment corruption | Playback artifacts | Checksum validation | Regenerate segment, CDN purge |
+| Popular video spike | CDN capacity exceeded | Bandwidth alerts | Pre-warming, traffic shaping |
+
+### Monitoring & Observability
+**Key Metrics:**
+- **Video Start Time (VST)**: Time to first frame (target <2s)
+- **Rebuffering ratio**: % of playback time buffering (target <0.5%)
+- **Bitrate switches**: Quality stability indicator
+- **CDN hit ratio**: Efficiency (target >95%)
+- **Encoding queue depth**: Processing capacity
+- **Error rate by type**: Playback, license, network
+
+**Alerting:**
+- VST P95 exceeds 4 seconds
+- Rebuffering ratio exceeds 1%
+- CDN hit ratio drops below 90%
+- Transcoding queue exceeds 1 hour
+- License fetch failures exceed 1%
+
+**Quality of Experience (QoE):**
+- VMAF/PSNR scores for quality assessment
+- Playback completion rate
+- User engagement (watch time, drop-off points)
+- Device/browser breakdown
+
+### Security Considerations
+**DRM Implementation:**
+- Multi-DRM: Widevine (Chrome, Android), FairPlay (Safari, iOS), PlayReady (Edge)
+- Hardware-backed key storage where available
+- License server rate limiting and validation
+- Token-based license requests
+
+**Content Protection:**
+- Signed URLs with expiration
+- Geographic restrictions enforcement
+- Device limits per account
+- Screen recording detection
+
+**Piracy Prevention:**
+- Forensic watermarking in video stream
+- Content ID fingerprinting on upload
+- Takedown automation via APIs
+- Quality degradation for suspicious accounts
+
+### Interview Deep-Dive Questions
+
+4. **How to handle live streaming vs VOD differently?**
+   - **Live**: Edge transcoding, low-latency protocols (LL-HLS), 2s segments
+   - **VOD**: Pre-encoded, 6s segments, full ABR ladder
+   - **Live DVR**: Sliding window of past N minutes
+   - **Live-to-VOD**: Archive and re-encode after broadcast
+   - Different CDN caching strategies (no-cache vs aggressive)
+
+5. **How to implement offline download support?**
+   - License with offline capability (DRM expiry extension)
+   - Download encrypted segments to device
+   - Secure local storage with key management
+   - Periodic license renewal on reconnect
+   - Quality selection for storage constraints
+
+6. **How to design a multi-CDN strategy?**
+   - Real-time performance monitoring per CDN
+   - Traffic steering at DNS or application layer
+   - Automatic failover on CDN health issues
+   - Cost optimization (mix of CDN tiers)
+   - Geographic affinity with performance override
+
+7. **How to optimize for first frame time?**
+   - Pre-fetch first segment on hover/tap
+   - Start at lower quality, ramp up
+   - Optimize manifest/license server latency
+   - Use HTTP/2 or HTTP/3 for multiplexing
+   - Progressive segment loading
+
+8. **How would you handle a live event with 10M concurrent viewers?**
+   - Pre-warm CDN edges with promotional content
+   - Regional ingest with edge transcoding
+   - Staggered start (countdown buffer)
+   - Auto-scaling for origin and encoding
+   - Graceful degradation plan (lower max quality)
 
 ---
 
@@ -3117,6 +4340,117 @@ class ReplicationManager:
    - Increase replication for hot chunks
    - Client-side caching
    - Load-based replica selection
+
+### Extended Tradeoffs
+
+#### File Systems: HDFS vs GFS vs Ceph vs MinIO
+| Aspect | HDFS | GFS (Google) | Ceph | MinIO |
+|--------|------|--------------|------|-------|
+| Architecture | Single NameNode | Single Master | Distributed (no SPOF) | Distributed |
+| Chunk Size | 128 MB | 64 MB | 4 MB | Variable |
+| Consistency | Strong (metadata) | Strong (metadata) | Strong (RADOS) | Strong |
+| Append Support | Yes | Optimized | Yes | No (object) |
+| Small Files | Poor | Poor | Better | Good |
+| POSIX Compatible | No (HDFS API) | No | Yes (CephFS) | S3 API |
+| Ecosystem | Hadoop, Spark | Google internal | OpenStack, K8s | K8s, S3 apps |
+| Use Case | Big data analytics | Large-scale batch | General purpose | S3-compatible |
+
+#### Consistency Models Analysis
+| Model | Definition | Latency | Use Case |
+|-------|------------|---------|----------|
+| Strong | Read sees latest write | Highest | Financial, metadata |
+| Linearizable | Strong + real-time ordering | Highest | Coordination |
+| Sequential | All see same order | High | Append logs |
+| Causal | Preserves cause-effect | Medium | Collaboration |
+| Eventual | Eventually consistent | Lowest | Replicated data |
+
+### Failure Scenarios & Mitigation
+| Failure Mode | Impact | Detection | Mitigation |
+|--------------|--------|-----------|------------|
+| Master failure | No metadata operations | Heartbeat timeout | Hot standby, Paxos/Raft election |
+| Chunk server failure | Reduced redundancy | Heartbeat timeout | Re-replication to healthy nodes |
+| Data corruption | Silent data loss | Checksum verification | Background scrubbing, repair from replica |
+| Network partition | Split-brain potential | Cross-rack health | Quorum requirements, fencing |
+| Rack failure | Multiple chunk losses | Power monitoring | Rack-aware placement, ≥3 replicas |
+| Disk failure | Chunk data loss | SMART monitoring | RAID, proactive replacement |
+
+### Monitoring & Observability
+**Key Metrics:**
+- **Under-replicated chunks**: Durability risk indicator
+- **Read/Write throughput**: Performance
+- **Master operation latency**: Metadata health
+- **Disk utilization distribution**: Balance
+- **Chunk server health**: Availability
+- **Replication queue depth**: Recovery progress
+
+**Alerting:**
+- Under-replicated chunks > 0 for > 30 minutes
+- Master failover occurred
+- Disk utilization exceeds 85% on any node
+- Chunk server heartbeat missing > 60 seconds
+- Replication throughput drops 50%
+
+**Operational Tools:**
+- Cluster topology visualization
+- Rebalancing progress tracking
+- Hot chunk identification
+- Capacity planning projections
+
+### Security Considerations
+**Encryption:**
+- Encryption at rest (disk-level or per-chunk)
+- Encryption in transit (TLS between all components)
+- Key management integration (KMS, Vault)
+- Per-tenant encryption keys
+
+**Access Control:**
+- Path-based ACLs (read, write, execute)
+- User/group permissions (POSIX-style)
+- Service account authentication
+- Audit logging for all operations
+
+**Data Protection:**
+- Backup to separate storage system
+- Point-in-time snapshots
+- Cross-datacenter replication
+- Compliance: data retention, deletion policies
+
+### Interview Deep-Dive Questions
+
+4. **How to handle small files efficiently (small file problem)?**
+   - HAR (Hadoop Archive): combine into large files
+   - Federation: multiple namespaces
+   - Memory-only metadata for small files
+   - Separate small file store (object storage)
+   - Merge on write, split on read
+
+5. **How to implement cross-datacenter replication?**
+   - Async replication to minimize latency impact
+   - WAL shipping for metadata
+   - Chunk-level replication for data
+   - Conflict resolution policy (timestamp-based)
+   - RPO/RTO tradeoffs
+
+6. **How to handle quota management at scale?**
+   - Per-directory quota tracking
+   - Soft and hard limits
+   - Background enforcement (not real-time)
+   - Aggregation hierarchy caching
+   - Graceful enforcement with user notification
+
+7. **How to optimize for append-heavy workloads (e.g., logs)?**
+   - Last chunk kept open for appends
+   - Lease management for concurrent appends
+   - Record append (atomic append operation)
+   - Separate hot and cold data placement
+   - Compaction for old log files
+
+8. **How would you design file search/indexing on distributed storage?**
+   - Metadata indexing in separate database
+   - Full-text search with Elasticsearch
+   - Incremental indexing on file changes
+   - Distributed crawling with coordinator
+   - Content-based vs metadata-only search
 
 ---
 
