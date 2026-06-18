@@ -26,6 +26,9 @@ A comprehensive guide to frequently asked system design questions with detailed 
 11. [Video Streaming Platform](#11-video-streaming-platform)
 12. [Distributed File Storage](#12-distributed-file-storage)
 
+### Workflow & Orchestration
+13. [Task Scheduler](#13-task-scheduler)
+
 ---
 
 ## 1. URL Shortener
@@ -2707,6 +2710,334 @@ Periodically redistribute chunks from overloaded servers to underloaded ones, ta
 
 ---
 
+## 13. Task Scheduler
+
+**Problem:** Design a distributed task scheduling system like Apache Airflow, Temporal, or Dagster.
+
+### Requirements
+
+**Functional:**
+- Define workflows as directed acyclic graphs (DAGs) of tasks
+- Schedule workflows based on time (cron) or events
+- Execute tasks with dependency resolution
+- Support retries, timeouts, and failure handling
+- Provide visibility into workflow execution status
+- Support parameterized workflow runs
+
+**Non-Functional:**
+- Handle 100K+ task executions per day
+- Low scheduling latency (< 1s from trigger to execution start)
+- High availability (99.9%)
+- Exactly-once task execution semantics
+- Horizontal scalability for workers
+- Support long-running tasks (hours to days)
+
+### Core Concepts
+
+**DAG (Directed Acyclic Graph):** A workflow definition where nodes are tasks and edges are dependencies. Tasks execute only when all upstream dependencies complete successfully.
+
+**Task:** A single unit of work (e.g., run a script, call an API, execute a query). Each task has inputs, outputs, retry policy, and timeout configuration.
+
+**DAG Run:** A single execution instance of a DAG with specific parameters and execution timestamp.
+
+**Task Instance:** A single execution of a task within a DAG run, tracking state (pending, running, success, failed, skipped).
+
+### High-Level Architecture
+
+**Architecture Flow:**
+1. Users define DAGs via UI, API, or code (Python DSL)
+2. DAG Parser validates and stores DAG definitions in Metadata DB
+3. Scheduler scans for DAGs ready to run (time-based or event-triggered)
+4. Scheduler creates DAG Runs and Task Instances in Metadata DB
+5. Scheduler enqueues ready tasks (no pending dependencies) to Task Queue
+6. Worker Pool consumes tasks from queue and executes them
+7. Workers report status back to Metadata DB
+8. Scheduler monitors task completion and enqueues newly ready downstream tasks
+9. Web UI provides visibility into runs, logs, and metrics
+
+### Scheduler Design
+
+**Scheduler Responsibilities:**
+1. **DAG Parsing:** Periodically scan DAG repository, parse definitions, detect changes
+2. **Run Creation:** At scheduled time, create new DAG Run with initial task instances
+3. **Dependency Resolution:** Identify tasks with all dependencies satisfied
+4. **Task Queuing:** Push ready tasks to distributed queue with priority
+5. **State Management:** Update task states, handle retries, timeouts
+6. **Deadlock Detection:** Identify circular dependencies or stuck workflows
+
+**Scheduler Loop:**
+1. Check for DAGs due to run (cron evaluation)
+2. Create DAG Runs for triggered DAGs
+3. For each active DAG Run, find tasks where all upstreams succeeded
+4. Enqueue ready tasks with execution context
+5. Check for timed-out tasks, mark failed, trigger retries if configured
+6. Clean up completed DAG Runs (archive or delete)
+
+### Worker Design
+
+**Worker Responsibilities:**
+1. Poll task queue for available work
+2. Deserialize task definition and parameters
+3. Execute task in isolated environment
+4. Stream logs to centralized log storage
+5. Report heartbeats during execution
+6. Report final status (success/failure) with outputs
+
+**Task Execution Model:**
+- **Process-based:** Each task runs in separate process (isolation, resource limits)
+- **Container-based:** Each task runs in Docker/K8s pod (stronger isolation, reproducibility)
+- **Serverless:** Tasks execute as Lambda/Cloud Functions (auto-scaling, pay-per-use)
+
+### Task State Machine
+
+**Task Instance States:**
+- **none:** Task instance not yet created
+- **scheduled:** Task is scheduled, waiting for dependencies
+- **queued:** Dependencies met, waiting for worker
+- **running:** Worker is executing the task
+- **success:** Task completed successfully
+- **failed:** Task failed after all retries exhausted
+- **up_for_retry:** Task failed, retry scheduled
+- **skipped:** Task skipped due to branching logic
+- **upstream_failed:** Upstream dependency failed
+
+**State Transitions:**
+- scheduled → queued (when all upstream tasks succeed)
+- queued → running (when worker picks up task)
+- running → success | failed | up_for_retry
+- up_for_retry → queued (after retry delay)
+- failed → downstream tasks marked upstream_failed
+
+### Distributed Locking and Leader Election
+
+**Why Needed:**
+- Only one scheduler should create DAG Runs for a given schedule
+- Prevent duplicate task execution
+- Coordinate failover when scheduler dies
+
+**Implementation Options:**
+- Database-based locks with expiration (simple, but DB becomes bottleneck)
+- ZooKeeper/etcd for distributed coordination (reliable, additional infrastructure)
+- Redis with Redlock algorithm (fast, good for most cases)
+
+**Scheduler HA Pattern:**
+Multiple scheduler instances run simultaneously. Only the leader creates DAG Runs. Followers wait in standby. On leader failure, new leader is elected via distributed lock.
+
+### Dependency Resolution Strategies
+
+**Static Dependencies:** Defined at DAG parse time, fixed task graph.
+
+**Dynamic Dependencies:** Tasks can spawn subtasks at runtime (e.g., process each partition).
+
+**Cross-DAG Dependencies:** Task in DAG A depends on task in DAG B (sensor pattern).
+
+**Dependency Operators:**
+- **all_success:** Run only if all upstreams succeeded (default)
+- **all_failed:** Run only if all upstreams failed (error handling)
+- **one_success:** Run if any upstream succeeded
+- **none_failed:** Run if no upstream failed (includes skipped)
+
+### Retry and Failure Handling
+
+**Retry Configuration:**
+- Max retry attempts (e.g., 3)
+- Retry delay (fixed, exponential backoff)
+- Retry exceptions (retry only on specific errors)
+
+**Failure Handling Strategies:**
+- **Stop DAG:** Fail entire DAG Run on first task failure
+- **Continue:** Mark downstream as upstream_failed, continue parallel branches
+- **Callback:** Execute failure callback for alerting
+
+**Timeout Handling:**
+- Task-level timeout: Kill task if exceeds duration
+- DAG-level timeout: Fail entire DAG if total duration exceeded
+- Sensor timeout: Stop waiting for external condition
+
+### Task Queue Design
+
+**Queue Requirements:**
+- Distributed across workers
+- Priority support (urgent tasks first)
+- At-least-once delivery with visibility timeout
+- Dead letter queue for poison tasks
+
+**Queue Options:**
+| Option | Pros | Cons |
+|--------|------|------|
+| Redis + Celery | Simple, fast, widely used | No persistence by default |
+| RabbitMQ | Reliable, feature-rich | Complex operations |
+| Amazon SQS | Managed, scalable | Higher latency |
+| Kafka | High throughput, replay | Overkill for task queues |
+
+### Metadata Storage
+
+**Core Tables:**
+- **dag:** DAG definitions (dag_id, schedule, default_args, is_paused)
+- **dag_run:** DAG executions (run_id, dag_id, execution_date, state, start_date, end_date)
+- **task_instance:** Task executions (task_id, dag_id, run_id, state, try_number, start_date, duration)
+- **task_log:** Execution logs (task_instance_id, log_content, timestamp)
+- **variable:** Key-value configuration store
+- **connection:** External system credentials
+
+**Database Choice:**
+- PostgreSQL: Reliable, ACID, good for most deployments
+- MySQL: Alternative, slightly less feature-rich
+- Avoid NoSQL: Need transactions for state consistency
+
+### Key Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Scheduling | Pull-based (workers pull) | Simpler, natural load balancing |
+| Execution | Container per task | Isolation, reproducibility |
+| State Store | PostgreSQL | ACID transactions for consistency |
+| Queue | Redis + Celery | Simple, proven, fast |
+| HA | Active-passive scheduler | Avoid duplicate scheduling |
+
+### Interview Discussion Points
+
+1. **How to handle exactly-once execution?**
+   - Distributed lock per task instance
+   - Idempotent task design (preferred)
+   - Two-phase commit for critical tasks
+
+2. **How to scale workers?**
+   - Horizontal scaling based on queue depth
+   - Worker pools per task type (CPU vs memory intensive)
+   - Kubernetes autoscaling
+
+3. **How to handle long-running tasks?**
+   - Heartbeat mechanism for liveness
+   - Checkpointing for resumability
+   - Separate timeout from worker health
+
+### Extended Tradeoffs
+
+#### Scheduler Architectures: Centralized vs Distributed
+| Aspect | Centralized (Airflow) | Distributed (Temporal) |
+|--------|----------------------|------------------------|
+| Consistency | Easier (single scheduler) | Requires consensus |
+| Scalability | Limited by single scheduler | Horizontally scalable |
+| Failure Handling | Failover to standby | Automatic partition healing |
+| Complexity | Simpler | More complex |
+| Latency | Higher (single bottleneck) | Lower (parallel scheduling) |
+| Use Case | Medium scale (100K tasks/day) | Large scale (10M+ tasks/day) |
+
+#### Execution Models: Process vs Container vs Serverless
+| Aspect | Process | Container (K8s) | Serverless (Lambda) |
+|--------|---------|-----------------|---------------------|
+| Isolation | Process-level | Container-level | Function-level |
+| Startup Time | Fast (<100ms) | Medium (1-10s) | Variable (cold start) |
+| Resource Control | Limited | Full (CPU, memory, GPU) | Limited |
+| Cost | Fixed (VMs) | Flexible | Pay-per-execution |
+| Max Duration | Unlimited | Unlimited | Limited (15min Lambda) |
+| Reproducibility | Low | High | Medium |
+| Best For | Simple scripts | Complex pipelines | Event-driven, sporadic |
+
+#### DAG Definition: Code vs Config vs UI
+| Aspect | Code (Python DSL) | Config (YAML/JSON) | UI (Drag-and-Drop) |
+|--------|-------------------|--------------------|--------------------|
+| Flexibility | High (full language) | Medium | Low |
+| Version Control | Easy (git) | Easy | Difficult |
+| Learning Curve | Requires coding | Simpler | Easiest |
+| Dynamic DAGs | Yes | Limited | No |
+| Testing | Unit testable | Schema validation | Manual |
+| Best For | Engineers | DevOps, data teams | Business users |
+
+### Failure Scenarios & Mitigation
+| Failure Mode | Impact | Detection | Mitigation |
+|--------------|--------|-----------|------------|
+| Scheduler crash | No new tasks scheduled | Health check, leader election | HA with standby, auto-failover |
+| Worker crash | Running tasks lost | Heartbeat timeout | Task retry, state recovery |
+| Queue unavailable | Tasks can't be dispatched | Queue health checks | Queue replication, fallback |
+| Database failure | State lost, no coordination | Connection errors | DB replication, backups |
+| Task stuck (no heartbeat) | Resources blocked | Heartbeat timeout | Kill task, retry or fail |
+| Infinite retry loop | Resource exhaustion | Retry count monitoring | Max retries, dead letter queue |
+
+### Monitoring & Observability
+
+**Key Metrics:**
+- **Task queue depth:** Backlog indicator
+- **Task latency (queue to start):** Scheduling efficiency
+- **Task duration by type:** Performance baseline
+- **Success/failure rate:** Reliability
+- **Scheduler lag:** Time between scheduled and actual start
+- **Worker utilization:** Capacity planning
+
+**Alerting:**
+- Task queue depth exceeds threshold for >5 minutes
+- Task failure rate exceeds 5%
+- DAG Run duration exceeds 2× historical average
+- Scheduler heartbeat missing
+- No workers available for >1 minute
+
+**Dashboards:**
+- DAG Run history with status timeline
+- Task instance Gantt chart (execution visualization)
+- Worker pool status and utilization
+- SLA tracking (on-time completion rate)
+
+### Security Considerations
+
+**Authentication & Authorization:**
+- Role-based access control (view, trigger, edit DAGs)
+- Per-DAG permissions for multi-tenant deployments
+- API authentication (JWT, OAuth)
+- Audit logging for all actions
+
+**Secrets Management:**
+- Encrypted connection credentials
+- Integration with Vault, AWS Secrets Manager
+- Secrets injection at runtime (not stored in DAG code)
+- Credential rotation without DAG changes
+
+**Execution Security:**
+- Sandboxed task execution (containers)
+- Network policies for task isolation
+- Resource quotas per user/team
+- Code scanning for DAG definitions
+
+### Interview Deep-Dive Questions
+
+4. **How to implement task prioritization across DAGs?**
+   - Priority queues with multiple levels (critical, high, normal, low)
+   - Weighted fair scheduling across teams/projects
+   - Preemption for critical tasks (kill lower priority)
+   - SLA-based priority boost as deadline approaches
+   - Resource pools with guaranteed capacity per priority
+
+5. **How to handle backfills (re-running historical dates)?**
+   - Backfill creates DAG Runs for past execution dates
+   - Limit concurrent backfill runs to avoid overload
+   - Respect dependencies (backfill in chronological order)
+   - Mark as backfill vs scheduled run for analytics
+   - Consider: clear downstream before backfill?
+
+6. **How to implement cross-DAG dependencies?**
+   - Sensor tasks that poll for upstream completion
+   - Event-driven triggers (upstream emits event)
+   - External database for cross-DAG state
+   - Dataset/data-aware scheduling (Airflow 2.4+)
+   - Tradeoff: coupling vs flexibility
+
+7. **How to support dynamic task generation at runtime?**
+   - Task groups with variable membership
+   - Mapped tasks (foreach over collection)
+   - Subdag/taskflow for complex patterns
+   - Challenge: dependency tracking for dynamic tasks
+   - State management for partial completion
+
+8. **How would you design a multi-tenant task scheduler?**
+   - Namespace isolation (DAGs, connections, variables)
+   - Resource quotas per tenant (max concurrent tasks)
+   - Dedicated worker pools per tenant
+   - Noisy neighbor prevention (fair scheduling)
+   - Cost attribution and chargeback
+   - Shared vs dedicated infrastructure tradeoffs
+
+---
+
 ## Summary: Key Tradeoffs
 
 | System | Key Tradeoff |
@@ -2721,6 +3052,9 @@ Periodically redistribute chunks from overloaded servers to underloaded ones, ta
 | News Feed | Push vs pull model |
 | Search Autocomplete | Latency vs freshness |
 | Web Crawler | Throughput vs politeness |
+| Video Streaming | Quality vs bandwidth |
+| Distributed File Storage | Consistency vs throughput |
+| Task Scheduler | Exactly-once execution vs latency |
 
 ---
 
