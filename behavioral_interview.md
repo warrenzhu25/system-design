@@ -11,7 +11,7 @@ Redesigned sync-to-async downscaling with intelligent node selection, reducing s
 
 | Problem | What I Did | Impact |
 |---------|------------|--------|
-| Sync downscaling = 10-15 min delays (waited for shuffle migration) | Async downscaling: decouple scaling decision from data migration, remove nodes only when truly idle | [X%] faster scaling, seconds instead of minutes |
+| Sync downscaling blocked ALL future scaling + waited for ALL nodes to finish migration before removing ANY | Async downscaling: decouple scaling decision from data migration, remove nodes only when truly idle | [X%] faster scaling, seconds instead of minutes |
 | Nodes with shuffle data stayed active too long = high cost | Intelligent node selection: prioritize nodes by (low shuffle size + high idle time) | [Y%] customer cost savings |
 | One-size-fits-all didn't serve diverse needs | Performance/Cost profiles: customer chooses trade-off via `spark.dataproc.scaling.version=2` | [Z%] adoption across serverless customers |
 
@@ -20,7 +20,7 @@ Redesigned sync-to-async downscaling with intelligent node selection, reducing s
 ### Situations (Detailed Context)
 
 #### S1: Performance Gap in V1 Downscaling
-> "Our V1 autoscaling system had a fundamental limitation: downscaling was synchronous, meaning we waited for shuffle data migration before removing nodes. This caused significant delays during scale-down, sometimes taking 10-15 minutes when customers expected seconds. Customers were frustrated because they could see idle executors but couldn't free them quickly."
+> "Our V1 autoscaling system had a fundamental limitation: downscaling was synchronous. This meant two things: first, it blocked ALL future scaling decisions while in progress—no scale-up or scale-down could happen until the current operation completed. Second, the system waited for ALL nodes to finish shuffle data migration before removing ANY of them. Even if 9 out of 10 nodes were ready, we waited for that last one. This caused significant delays during scale-down, sometimes taking 10-15 minutes when customers expected seconds. Customers were frustrated because they could see idle executors but couldn't free them quickly."
 
 #### S2: Cost Inefficiency from Shuffle Data Retention
 > "Nodes holding shuffle data stayed active far longer than necessary, even when they had no running tasks. The system treated all nodes equally regardless of how much shuffle data they held. Customers were paying for idle compute just because the system couldn't intelligently choose which nodes to remove first."
@@ -78,6 +78,7 @@ Redesigned sync-to-async downscaling with intelligent node selection, reducing s
 ---
 
 ### Technical Deep Dive (for follow-ups)
+- **Sync vs Async**: Sync blocked ALL future scaling decisions during downscale + waited for ALL nodes to finish migration before removing ANY. Async handles each node independently and doesn't block scaling decisions.
 - **Async architecture**: Remove nodes when both conditions met: no shuffle blocks + no active executors
 - **Node scoring formula**: Score = f(shuffle_data_size, idle_time) — lower data + higher idle = higher removal priority
 - **Spark integration**: Graceful decommissioning via `spark.dataproc.scaling.version=2`
@@ -102,7 +103,7 @@ Redesigned sync-to-async downscaling with intelligent node selection, reducing s
 
 ### "Tell me about a technical challenge"
 
-**Setup (30 sec)**: "At [Company], our V1 autoscaling waited synchronously for shuffle data migration before removing nodes. This caused 10-15 minute delays when customers expected seconds."
+**Setup (30 sec)**: "At [Company], our V1 autoscaling was synchronous: it blocked all future scaling decisions while in progress and waited for ALL nodes to finish shuffle migration before removing ANY. This caused 10-15 minute delays when customers expected seconds."
 
 **Actions (90 sec)**: "I proposed async downscaling: instead of blocking on migration, we proactively migrate data in background and remove nodes only when truly idle. I designed a node selection algorithm weighing shuffle data size and idle time to minimize disruption. We integrated with Spark's graceful decommissioning. I also introduced Performance vs Cost profiles so customers could choose their trade-off."
 
