@@ -247,7 +247,7 @@ Created goal abstraction (Performance/Cost/Balanced) over 15+ configs, giving cu
 |---------|------------|--------|
 | 15+ configs too complex for non-experts | Goal abstraction: Performance / Cost / Balanced → each maps to fine-tuned config bundle | 15 configs → 1 choice |
 | Support repeated same explanations per customer | Out-of-box presets: no expertise required, production-ready defaults | [X%] fewer config-related tickets |
-| Customers couldn't optimize for their priority | Perf: avoid migration (I/O contention), shuffle-aware scheduling; Cost: bin-pack + low timeout + shuffle size tracking | Perf: [X%] faster jobs; Cost: [Y%] savings |
+| Customers couldn't optimize for their priority | Perf: avoid migration (I/O contention), shuffle-aware scheduling (filter top K shuffle executors to prevent scale-up bottleneck); Cost: bin-pack + low timeout + shuffle size tracking | Perf: [X%] faster jobs; Cost: [Y%] savings |
 
 ---
 
@@ -287,6 +287,7 @@ Created goal abstraction (Performance/Cost/Balanced) over 15+ configs, giving cu
 
 **Technical detail**:
 - Performance: avoid shuffle migration (competes with fetch I/O), shuffle-aware scheduling, larger initial executors
+- Shuffle-aware scheduling: filter out executors with top K most shuffle data from task assignment, preventing shuffle fetch bottlenecks during scale-up (initial 2 executors would otherwise become hotspots when cluster grows)
 - Cost: bin-pack tasks to free executors, lower shuffle timeout to 1-2 min, track shuffle sizes for intelligent decommissioning
 - Migration balancing: distribute migrated blocks evenly to prevent executor hotspots
 
@@ -313,6 +314,7 @@ Created goal abstraction (Performance/Cost/Balanced) over 15+ configs, giving cu
 
 ### Technical Deep Dive (for follow-ups)
 - **Performance mode**: Avoid shuffle migration (competes with fetch I/O), shuffle-aware scheduling, larger initial executors
+- **Shuffle-aware scheduling**: Filter out top K executors by shuffle data size from task assignment; solves scale-up bottleneck where initial 2 executors hold most shuffle data and become fetch hotspots when cluster grows
 - **Cost mode**: Bin-pack tasks → free executors → decommission; lower shuffle timeout to 1-2 min; track shuffle sizes
 - **Migration balancing**: Distribute migrated blocks evenly to prevent executor hotspots
 - **Backward compatible**: Balanced = existing default behavior
@@ -337,7 +339,7 @@ Created goal abstraction (Performance/Cost/Balanced) over 15+ configs, giving cu
 
 **Setup (30 sec)**: "Our autoscaling had 15+ config parameters. When customers had suboptimal scaling, we'd recommend specific configs, but this required explaining Spark internals they didn't understand. Support spent hours per customer on the same explanations."
 
-**Actions (90 sec)**: "I designed goal-based abstraction. Customers choose one goal: Performance, Cost, or Balanced. Each maps to a tuned config bundle. For Performance, we avoid shuffle migration that competes with fetch I/O, use shuffle-aware scheduling. For Cost, we bin-pack tasks, lower shuffle timeouts to 1-2 minutes, track shuffle sizes for intelligent decommissioning."
+**Actions (90 sec)**: "I designed goal-based abstraction. Customers choose one goal: Performance, Cost, or Balanced. Each maps to a tuned config bundle. For Performance, we avoid shuffle migration that competes with fetch I/O, and use shuffle-aware scheduling that filters out top K executors with most shuffle data—this prevents bottlenecks during scale-up where initial executors become hotspots. For Cost, we bin-pack tasks, lower shuffle timeouts to 1-2 minutes, track shuffle sizes for intelligent decommissioning."
 
 **Results (30 sec)**: "Reduced [X settings] to one dropdown. Config-related tickets dropped [X%]. Performance mode improved jobs by [X%], Cost mode saved [Y%]."
 
