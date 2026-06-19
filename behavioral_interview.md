@@ -248,7 +248,7 @@ Created goal abstraction (Performance/Cost/Balanced) over 15+ configs, giving cu
 |---------|------------|--------|
 | 15+ configs too complex for non-experts | Goal abstraction: Performance / Cost / Balanced → each maps to fine-tuned config bundle | 15 configs → 1 choice |
 | Support repeated same explanations per customer | Out-of-box presets: no expertise required, production-ready defaults | [X%] fewer config-related tickets |
-| Customers couldn't optimize for their priority | Perf: avoid migration (I/O contention), shuffle-aware scheduling (filter top K shuffle executors to prevent scale-up bottleneck); Cost: bin-pack + low timeout + shuffle size tracking | Perf: [X%] faster jobs; Cost: [Y%] savings |
+| Customers couldn't optimize for their priority | Perf: avoid migration (I/O contention), shuffle-aware scheduling; Cost: bin-pack + low timeout + shuffle size tracking | Perf: [X%] faster jobs; Cost: [Y%] savings |
 
 ---
 
@@ -287,8 +287,7 @@ Created goal abstraction (Performance/Cost/Balanced) over 15+ configs, giving cu
 > "I implemented fundamentally different strategies for each goal. Performance mode prioritizes speed over cost; Cost mode prioritizes savings over speed. The strategies are internally consistent and mutually exclusive."
 
 **Technical detail**:
-- Performance: avoid shuffle migration (competes with fetch I/O), shuffle-aware scheduling, larger initial executors
-- Shuffle-aware scheduling: filter out executors with top K most shuffle data from task assignment, preventing shuffle fetch bottlenecks during scale-up (initial 2 executors would otherwise become hotspots when cluster grows)
+- Performance: avoid shuffle migration (competes with fetch I/O), shuffle-aware scheduling (see Project 8), larger initial executors
 - Cost: bin-pack tasks to free executors, lower shuffle timeout to 1-2 min, track shuffle sizes for intelligent decommissioning
 - Migration balancing: distribute migrated blocks evenly to prevent executor hotspots
 
@@ -314,8 +313,7 @@ Created goal abstraction (Performance/Cost/Balanced) over 15+ configs, giving cu
 ---
 
 ### Technical Deep Dive (for follow-ups)
-- **Performance mode**: Avoid shuffle migration (competes with fetch I/O), shuffle-aware scheduling, larger initial executors
-- **Shuffle-aware scheduling**: Filter out top K executors by shuffle data size from task assignment; solves scale-up bottleneck where initial 2 executors hold most shuffle data and become fetch hotspots when cluster grows
+- **Performance mode**: Avoid shuffle migration (competes with fetch I/O), shuffle-aware scheduling (see Project 8), larger initial executors
 - **Cost mode**: Bin-pack tasks → free executors → decommission; lower shuffle timeout to 1-2 min; track shuffle sizes
 - **Migration balancing**: Distribute migrated blocks evenly to prevent executor hotspots
 - **Backward compatible**: Balanced = existing default behavior
@@ -340,7 +338,7 @@ Created goal abstraction (Performance/Cost/Balanced) over 15+ configs, giving cu
 
 **Setup (30 sec)**: "Our autoscaling had 15+ config parameters. When customers had suboptimal scaling, we'd recommend specific configs, but this required explaining Spark internals they didn't understand. Support spent hours per customer on the same explanations."
 
-**Actions (90 sec)**: "I designed goal-based abstraction. Customers choose one goal: Performance, Cost, or Balanced. Each maps to a tuned config bundle. For Performance, we avoid shuffle migration that competes with fetch I/O, and use shuffle-aware scheduling that filters out top K executors with most shuffle data—this prevents bottlenecks during scale-up where initial executors become hotspots. For Cost, we bin-pack tasks, lower shuffle timeouts to 1-2 minutes, track shuffle sizes for intelligent decommissioning."
+**Actions (90 sec)**: "I designed goal-based abstraction. Customers choose one goal: Performance, Cost, or Balanced. Each maps to a tuned config bundle. For Performance, we avoid shuffle migration that competes with fetch I/O, and use shuffle-aware scheduling to prevent executor hotspots. For Cost, we bin-pack tasks, lower shuffle timeouts to 1-2 minutes, track shuffle sizes for intelligent decommissioning."
 
 **Results (30 sec)**: "Reduced [X settings] to one dropdown. Config-related tickets dropped [X%]. Performance mode improved jobs by [X%], Cost mode saved [Y%]."
 
@@ -818,6 +816,123 @@ Built serverless Remote Shuffle Service (RSS) on Apache Celeborn, decoupling shu
 **Actions**: "I analyzed each systematically. Dataproc cluster was easiest but scaling down was blocked by co-located services. GKE had native autoscaling via HPA, but shuffle load crashes could cascade. Standalone serverless had highest upfront effort but cleanest separation of concerns. I chose serverless: decoupled shuffle from compute, used Celeborn's standalone mode, integrated with our existing autoscaling infrastructure."
 
 **Results**: "The extra upfront work paid off. Independent scaling, no cascade failures, and we could reuse proven serverless patterns. [X%] cost savings from right-sized shuffle clusters."
+
+---
+---
+
+# Project 8: Shuffle-Aware Scheduling
+
+### One-Liner
+Designed task scheduling that filters out executors holding heavy shuffle data, preventing fetch bottlenecks during scale-up when initial executors become hotspots.
+
+### Quick Summary (3×3 Table)
+
+| Problem | What I Did | Impact |
+|---------|------------|--------|
+| Scale-up caused shuffle fetch bottlenecks (initial 2 executors held most data) | Filter top K executors by shuffle size from task assignment | Eliminated scale-up hotspots |
+| New executors all fetched from same few sources = I/O contention | Spread fetch load by avoiding task placement on data-heavy executors | [X%] faster shuffle fetch |
+| Autoscaling benefits negated by bottleneck at original executors | Shuffle-aware scheduling integrated with Performance mode | Full scale-up benefits realized |
+
+---
+
+### Situations (Detailed Context)
+
+#### S1: Scale-Up Shuffle Bottleneck
+> "When a Spark job scaled up from 2 to 20 executors, performance didn't improve as expected. The problem: the initial 2 executors held all the shuffle data from early stages. When 18 new executors started running reduce tasks, they all tried to fetch shuffle data from the same 2 sources. Those 2 executors became completely saturated with fetch requests, creating a bottleneck that negated the benefits of scaling up."
+
+#### S2: I/O Contention at Data-Heavy Executors
+> "Executors holding shuffle data had to serve fetch requests AND run their own tasks. The fetch I/O competed with task execution. Heavy shuffle fetch requests would slow down tasks running on those executors, which in turn delayed the overall job. The more we scaled up, the worse the contention became on the original executors."
+
+#### S3: Autoscaling Benefits Not Realized
+> "Customers enabled autoscaling expecting faster jobs, but shuffle-heavy stages showed minimal improvement. They'd scale from 2 to 20 executors and see only 20% speedup instead of the expected 5-10x. The bottleneck at original executors capped the parallelism benefits. Customers questioned whether autoscaling was worth the cost."
+
+---
+
+### Actions (What I Did)
+
+#### A1: Identify Shuffle Data Distribution
+> "I instrumented the scheduler to track shuffle data size per executor. This gave us visibility into which executors held how much shuffle data, enabling informed scheduling decisions."
+
+**Technical detail**:
+- Track shuffle block sizes per executor via BlockManager
+- Aggregate shuffle data volume at scheduling decision time
+- Rank executors by shuffle data size
+
+#### A2: Filter Heavy Executors from Task Assignment
+> "I modified the task scheduler to exclude executors with top K shuffle data from task assignment during shuffle-heavy stages. These executors focus on serving fetch requests instead of running tasks."
+
+**Technical detail**:
+- Filter out top K executors by shuffle data size from task offers
+- K is configurable (default: executors holding >X% of total shuffle data)
+- Only applies during active shuffle fetch phases
+
+#### A3: Integrate with Performance Mode
+> "I integrated shuffle-aware scheduling as part of the Performance mode profile. Customers who choose Performance automatically get this optimization without needing to understand the underlying mechanics."
+
+**Technical detail**:
+- Enabled automatically in Performance mode
+- Can be explicitly enabled/disabled via config
+- No overhead when shuffle data is evenly distributed
+
+---
+
+### Results (Quantifiable Impact)
+
+#### R1: Shuffle Fetch Performance
+- Shuffle fetch throughput: improved by [X%] during scale-up
+- Fetch wait time: reduced by [Y%]
+- Executor I/O contention: eliminated for data-heavy executors
+
+#### R2: Scale-Up Effectiveness
+- Scale-up speedup realized: [X%] of theoretical (vs [Y%] before)
+- Time to process shuffle-heavy stages: reduced by [X%]
+- Customer-perceived autoscaling value: significantly improved
+
+#### R3: Resource Utilization
+- Data-heavy executor CPU for fetch serving: increased to [X%]
+- New executor task throughput: improved by [Y%]
+- Overall cluster efficiency: improved by [Z%]
+
+---
+
+### Technical Deep Dive (for follow-ups)
+- **Root cause**: Initial executors hold all early-stage shuffle data; scale-up causes all new executors to fetch from same sources
+- **Solution**: Filter top K executors by shuffle size from task assignment; they serve fetches instead of running tasks
+- **K selection**: Executors holding >X% of total shuffle data, or top N by absolute size
+- **Integration**: Part of Performance mode in goal-based autoscaling (Project 3)
+- **No overhead**: Only activates when shuffle data is skewed; even distribution = no filtering
+
+---
+
+### Apply to Questions
+
+| Question Type | Angle to Emphasize |
+|---------------|-------------------|
+| Technical challenge | Root cause analysis—tracing scale-up bottleneck to shuffle data distribution |
+| Debugging complex systems | Identifying non-obvious bottleneck (scale-up making things worse) |
+| Innovation | Counter-intuitive solution—don't use all executors for tasks |
+| Trade-off / prioritization | Sacrifice task parallelism on few executors to improve overall throughput |
+| Customer focus | S3: Customers not seeing autoscaling benefits—fixing their disappointment |
+
+---
+
+## Sample Answers (30-90-30 format)
+
+### "Tell me about a time you debugged a non-obvious performance issue"
+
+**Setup (30 sec)**: "Customers complained that scaling from 2 to 20 executors gave only 20% speedup instead of expected 5-10x. Autoscaling seemed broken, but the executors were healthy and running tasks."
+
+**Actions (90 sec)**: "I traced the bottleneck to shuffle data distribution. The initial 2 executors held all shuffle data from early stages. When we scaled up, 18 new executors all tried to fetch from those same 2 sources, saturating their I/O. My counter-intuitive solution: don't assign tasks to data-heavy executors during shuffle fetch. Let them focus on serving fetch requests. I modified the scheduler to filter out top K executors by shuffle data size from task offers. These executors serve fetches at full bandwidth while new executors run tasks with data fetched in parallel."
+
+**Results (30 sec)**: "Scale-up speedup improved from [X%] to [Y%] of theoretical. Shuffle fetch wait time dropped [Z%]. Integrated as part of Performance mode so customers get it automatically."
+
+### "Describe a counter-intuitive technical decision"
+
+**Setup**: "During scale-up, we had executors sitting with minimal task assignment. The intuitive fix was to assign them more tasks."
+
+**Actions**: "Investigation showed these executors held most shuffle data. Assigning tasks created I/O contention between task execution and serving fetch requests. The counter-intuitive solution was to assign them FEWER tasks—let them focus on serving fetches. I filtered data-heavy executors from task assignment during shuffle-heavy stages."
+
+**Results**: "Overall job completion improved [X%] by intentionally under-utilizing a few executors. Sometimes doing less on specific nodes improves the whole system."
 
 ---
 
