@@ -472,15 +472,15 @@ Fixed race condition where reduce tasks held stale shuffle locations after execu
 # Project 5: Spark Insight MCP
 
 ### One-Liner
-Built an MCP server bridging AI agents with Spark History Server, enabling natural language performance analysis, automated job comparison, and AI-powered optimization recommendations.
+Built Spark Insight in 3 phases: **V1 CLI** for predefined analysis workflows → **V2 MCP server** exposing 50+ tools for AI-driven exploration → **V3 Claude Code skill** for natural language debugging in IDE. Key insight: CLI handles known patterns; MCP/Skill enables AI exploration of unknown issues.
 
 ### Quick Summary (3×3 Table)
 
 | Problem | What I Did | Impact |
 |---------|------------|--------|
-| Manual Spark perf analysis requires deep expertise + hours of work | Built MCP server with 50+ tools: query jobs, analyze stages, compare applications via natural language | Minutes instead of hours; no Spark expertise required |
-| Comparing job runs to detect regressions = tedious manual diff | 8 comparison tools: resources, executors, jobs, stages, timelines with intelligent filtering | Automated regression detection, actionable recommendations |
-| Troubleshooting failures requires navigating complex logs/metrics | SparkInsight intelligence: auto-scaling analysis, data skew detection, failure root cause, 16 structured prompts | Self-service debugging with AI-powered insights |
+| Common patterns need repeatable workflows | V1: CLI tool with predefined analysis commands (regression check, scaling analysis) | Consistent investigation for known patterns; scriptable, CI-friendly |
+| Unknown issues need AI exploration | V2: MCP server exposing 50+ tools to AI agents | AI-driven analysis for novel problems; no predefined workflow needed |
+| Integration into developer workflow | V3: Claude Code skill for seamless IDE integration | Natural language debugging in dev environment |
 
 ---
 
@@ -489,8 +489,8 @@ Built an MCP server bridging AI agents with Spark History Server, enabling natur
 #### S1: Expert Bottleneck in Performance Analysis
 > "Spark performance analysis is painful: engineers spend hours navigating History Server UI, correlating metrics across tabs, and requiring deep Spark knowledge to interpret results. Most teams had one or two Spark experts who became bottlenecks. When they were on vacation or busy, nobody could diagnose performance issues."
 
-#### S2: Manual Regression Detection
-> "When a job suddenly took twice as long, finding the root cause meant manually comparing two History Server sessions side by side. You'd flip between tabs, note down metrics, calculate differences, and try to spot what changed. A single comparison could take an hour, and you might miss subtle but important differences."
+#### S2: Two Types of Investigation Patterns
+> "I noticed two distinct patterns in how teams troubleshoot Spark issues. **Common patterns**: 80% of investigations follow the same checklist—check executor allocation, look for data skew, compare with previous runs. **Unknown patterns**: 20% are novel issues where you don't know what to look for—the job behaves strangely in ways you haven't seen before. These require exploratory analysis, not a predefined checklist."
 
 #### S3: Complex Troubleshooting Navigation
 > "Troubleshooting a failed or slow job required navigating through application → jobs → stages → tasks → executor logs. Each level had different metrics, different visualizations. Understanding data skew required correlating task durations with data sizes. Understanding executor failures required reading logs across multiple executors."
@@ -499,29 +499,32 @@ Built an MCP server bridging AI agents with Spark History Server, enabling natur
 
 ### Actions (What I Did)
 
-#### A1: MCP Server with Comprehensive Tooling
-> "I built an MCP (Model Context Protocol) server that bridges AI agents with Spark History Server. The key insight was that AI agents are excellent at synthesizing complex data if given the right tools to access it."
+#### A1: V1 - CLI Tool for Common Patterns
+> "First, I built a CLI tool with predefined commands for frequent investigations. The idea: if 80% of troubleshooting follows the same checklist, encode that checklist in reusable commands."
 
 **Technical detail**:
-- 50+ specialized tools organized by analysis pattern
-- Categories: application info, job/stage analysis, executor metrics, SQL query analysis, comparisons
-- Works with any MCP-compatible AI agent (Claude, LangGraph, Amazon Q)
+- Predefined workflows: `regression-check`, `scaling-analysis`, `skew-detection`
+- Scriptable for CI/CD integration (automated performance gates)
+- Repeatable: same command, same analysis, every time
+- Good for: "always check these 5 things before escalating"
 
-#### A2: Intelligent Comparison Suite
-> "I created 8 specialized comparison tools that automatically detect differences between job runs. Instead of manual side-by-side comparison, users ask 'compare yesterday's job with today's' and get a structured analysis of what changed."
-
-**Technical detail**:
-- Resource comparison, executor comparison, job/stage comparison, timeline analysis
-- Intelligent filtering: surfaces significant differences, hides noise
-- Actionable recommendations: not just 'X changed' but 'X changed, suggesting Y problem'
-
-#### A3: SparkInsight Intelligence Layer
-> "I added domain expertise through structured prompts and specialized analysis tools. These encode expert knowledge about common Spark issues: data skew, autoscaling inefficiency, shuffle problems, memory issues."
+#### A2: V2 - MCP Server for Unknown Patterns
+> "But CLI couldn't handle novel issues—the 20% where you don't know what to look for. I built an MCP server exposing 50+ tools to AI agents. Now the AI decides what to investigate based on symptoms, not a predefined checklist."
 
 **Technical detail**:
-- 16 structured prompts encoding domain expertise
-- Auto-scaling analysis, data skew detection, failure root cause analysis
-- Pattern recognition for common performance anti-patterns
+- 50+ tools organized by analysis pattern (apps, jobs, stages, executors, SQL, comparisons)
+- AI explores freely: fetches data, spots anomalies, correlates across dimensions
+- 16 structured prompts encoding domain expertise as starting points
+- Good for: "I don't know what's wrong—investigate this"
+
+#### A3: V3 - Claude Code Skill Integration
+> "Finally, I adapted the MCP server into a Claude Code skill. This brings Spark debugging into the developer's IDE with natural language queries during development."
+
+**Technical detail**:
+- Skill format for Claude Code integration
+- Works in developer's existing workflow (no context switching)
+- Natural language: "why is my job slow?" triggers systematic investigation
+- Good for: real-time debugging during development
 
 ---
 
@@ -545,10 +548,11 @@ Built an MCP server bridging AI agents with Spark History Server, enabling natur
 ---
 
 ### Technical Deep Dive (for follow-ups)
+- **CLI vs MCP/Skill distinction**: CLI encodes predefined workflows for known patterns (regression check, scaling analysis). MCP/Skill enables AI to explore freely for unknown issues—no predefined workflow, AI decides what to investigate.
 - **Architecture**: MCP protocol server → connects any AI agent (Claude, LangGraph, Amazon Q) to Spark History Server REST API
 - **Tool expansion**: 18 original tools → 50+ tools (3x growth), covering apps, jobs, stages, executors, SQL, comparisons
 - **Timeline analysis**: Executor allocation patterns with intelligent interval merging and noise reduction
-- **Dual-mode**: MCP server mode for AI agents + CLI mode for direct human usage
+- **Evolution path**: CLI (V1) → MCP Server (V2) → Claude Code Skill (V3)—each iteration expanded capability for different use cases
 
 ---
 
@@ -561,10 +565,20 @@ Built an MCP server bridging AI agents with Spark History Server, enabling natur
 | Technical challenge | 50+ tool design—organizing tools by analysis patterns |
 | Ambiguity | New problem space (AI tooling)—no existing playbook to follow |
 | Influence without authority | Convincing stakeholders of AI tooling value before it was mainstream |
+| Iteration/Evolution | 3-phase evolution: CLI → MCP → Skill—each solving different user needs |
+| Product thinking | Recognizing two user patterns (common vs unknown) and building for both |
 
 ---
 
 ## Sample Answers (30-90-30 format)
+
+### "Tell me about a time you iterated on a product"
+
+**Setup (30 sec)**: "Spark performance analysis was painful—engineers spent hours navigating History Server UI. I noticed two patterns: 80% of investigations follow the same checklist, but 20% are novel issues where you don't know what to look for."
+
+**Actions (90 sec)**: "I built Spark Insight in three phases. V1 was a CLI tool with predefined commands for common patterns—regression check, scaling analysis, skew detection. Scriptable, repeatable, good for CI gates. But CLI couldn't handle novel issues. V2 was an MCP server exposing 50+ tools to AI agents. Now the AI explores freely based on symptoms, not a predefined checklist. V3 adapted this into a Claude Code skill—bringing Spark debugging into the developer's IDE with natural language queries."
+
+**Results (30 sec)**: "The CLI handles 80% of routine checks automatically. The MCP/Skill handles the 20% of novel issues that previously required expert escalation. Together they reduced escalations by [X%] and analysis time from hours to minutes."
 
 ### "Tell me about a time you built something innovative"
 
