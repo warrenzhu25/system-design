@@ -252,6 +252,50 @@ Built automated migration tool with 4-phase process (classify → translate → 
 **Results**: "Eliminated hours of manual work per migration. Non-experts can now migrate jobs successfully. Autotuning suggestions in reports led to [X%] additional cost savings beyond migration."
 
 ---
+---
+
+# Project 7: Dataproc Serverless Remote Shuffle Service
+
+### One-Liner
+Built serverless Remote Shuffle Service (RSS) on Apache Celeborn, decoupling shuffle storage from compute to enable independent autoscaling and eliminate cascade failures.
+
+### Problem → Action → Result (3 paired rows)
+
+| Problem | What I Did | Impact |
+|---------|------------|--------|
+| Co-located shuffle = hard to scale (HDFS + YARN + RSS on same node) | Serverless RSS: standalone GCE deployment using Celeborn, decoupled from compute nodes | Independent scaling of shuffle service |
+| Fixed RSS capacity = over/under provisioned, wasted resources | Autoscaling based on shuffle size + write speed (metrics from autotuning) | Right-sized RSS cluster, [X%] cost savings |
+| Heavy shuffle fetch → takes down co-located YARN NodeManager → shuffle recomputation | Isolated shuffle workers with dedicated resources, no process co-location | No cascade failures, [X%] fewer recomputations |
+
+### Technical Deep Dive (for follow-ups)
+- **Why Celeborn**: Apache top-level project, flexible deployment (standalone/YARN/Flink/Spark), clean codebase
+- **Deployment**: Standalone GCE mode, reuses serverless infrastructure, resource manager API for autoscaling
+- **Phased rollout**: P0 (create RSS + run jobs + logs/metrics) → P1 (resize cluster) → P2 (autoscaling)
+- **Alternatives rejected**:
+  - Dataproc cluster RSS: hard to scale down with HDFS/YARN/RSS co-deployed
+  - GKE RSS: Kubernetes HPA available but shuffle load can crash co-located processes
+
+---
+
+## Sample Answers (30-90-30 format)
+
+### "Tell me about a technical architecture decision"
+
+**Setup (30 sec)**: "Spark shuffle data was stored on compute nodes alongside HDFS and YARN. This coupling made scaling painful: we couldn't remove a node without migrating shuffle data, and heavy shuffle fetch could crash the YARN NodeManager, causing cascade recomputation."
+
+**Actions (90 sec)**: "I evaluated three approaches. First, RSS as Dataproc optional component—easy to implement but scaling down was nearly impossible with HDFS, YARN, and RSS co-deployed. Second, RSS on GKE with Kubernetes HPA—good autoscaling but shuffle load could still crash co-located processes. I chose a third path: serverless RSS using Apache Celeborn in standalone GCE mode, completely decoupled from compute. We reused our serverless infrastructure for provisioning. Autoscaling uses shuffle metrics from autotuning—current shuffle size and write speed—to predict and provision capacity. Phased rollout: P0 for basic create/run/monitor, P1 for manual resize, P2 for full autoscaling."
+
+**Results (30 sec)**: "Shuffle storage now scales independently from compute. No more cascade failures from overloaded shuffle fetch. RSS autoscaling reduced over-provisioning by [X%]. Enabled more aggressive compute scaling since shuffle data is safe."
+
+### "Describe a time you chose between multiple solutions"
+
+**Setup**: "We needed remote shuffle service for serverless Spark, but had three deployment options: Dataproc cluster, GKE, or standalone serverless."
+
+**Actions**: "I analyzed each systematically. Dataproc cluster was easiest but scaling down was blocked by co-located services. GKE had native autoscaling via HPA, but shuffle load crashes could cascade. Standalone serverless had highest upfront effort but cleanest separation of concerns. I chose serverless: decoupled shuffle from compute, used Celeborn's standalone mode, integrated with our existing autoscaling infrastructure."
+
+**Results**: "The extra upfront work paid off. Independent scaling, no cascade failures, and we could reuse proven serverless patterns. [X%] cost savings from right-sized shuffle clusters."
+
+---
 
 ## Interview Prep Checklist
 
