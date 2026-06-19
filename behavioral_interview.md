@@ -168,6 +168,48 @@ Fixed race condition where reduce tasks held stale shuffle locations after execu
 **Results**: "Eliminated unnecessary retries with minimal code change. Zero overhead. Backward compatible."
 
 ---
+---
+
+# Project 5: Spark Insight MCP
+
+### One-Liner
+Built an MCP server bridging AI agents with Spark History Server, enabling natural language performance analysis, automated job comparison, and AI-powered optimization recommendations.
+
+### Problem → Action → Result (3 paired rows)
+
+| Problem | What I Did | Impact |
+|---------|------------|--------|
+| Manual Spark perf analysis requires deep expertise + hours of work | Built MCP server with 50+ tools: query jobs, analyze stages, compare applications via natural language | Minutes instead of hours; no Spark expertise required |
+| Comparing job runs to detect regressions = tedious manual diff | 8 comparison tools: resources, executors, jobs, stages, timelines with intelligent filtering | Automated regression detection, actionable recommendations |
+| Troubleshooting failures requires navigating complex logs/metrics | SparkInsight intelligence: auto-scaling analysis, data skew detection, failure root cause, 16 structured prompts | Self-service debugging with AI-powered insights |
+
+### Technical Deep Dive (for follow-ups)
+- **Architecture**: MCP protocol server → connects any AI agent (Claude, LangGraph, Amazon Q) to Spark History Server REST API
+- **Tool expansion**: 18 original tools → 50+ tools (3x growth), covering apps, jobs, stages, executors, SQL, comparisons
+- **Timeline analysis**: Executor allocation patterns with intelligent interval merging and noise reduction
+- **Dual-mode**: MCP server mode for AI agents + CLI mode for direct human usage
+
+---
+
+## Sample Answers (30-90-30 format)
+
+### "Tell me about a time you built something innovative"
+
+**Setup (30 sec)**: "Spark performance analysis is painful: engineers spend hours navigating History Server UI, comparing metrics manually, and requiring deep Spark knowledge to interpret results. Most teams had one or two experts who became bottlenecks."
+
+**Actions (90 sec)**: "I built an MCP server that bridges AI agents with Spark History Server. The key insight was that AI agents are excellent at synthesizing complex data if given the right tools. I created 50+ specialized tools organized by analysis pattern: application info, job/stage analysis, executor metrics, SQL query analysis, and comprehensive comparison suites. I added SparkInsight intelligence with auto-scaling recommendations, data skew detection, and failure analysis. I also created 16 structured prompts encoding domain expertise—so users can ask 'why is my job slow?' and get a systematic investigation."
+
+**Results (30 sec)**: "Analysis that took hours now takes minutes. Non-experts can debug Spark jobs using natural language. The comparison suite automatically detects regressions and provides actionable recommendations. Open-sourced with community adoption."
+
+### "Describe a time you simplified a complex domain"
+
+**Setup**: "Spark performance tuning requires understanding shuffle mechanics, executor allocation, stage dependencies, and dozens of metrics. Most engineers can't interpret this without significant training."
+
+**Actions**: "I abstracted the complexity into natural language queries. Instead of navigating UI and correlating metrics manually, users ask 'compare yesterday's job with today's' or 'why are my tasks failing?' The MCP tools handle the complexity: fetching right data, filtering noise, highlighting significant differences. I added intelligent prompts that encode expert analysis patterns."
+
+**Results**: "Democratized Spark expertise. Teams without dedicated Spark experts can now self-service debug. Reduced escalations to platform team by [X%]."
+
+---
 
 ## Interview Prep Checklist
 
