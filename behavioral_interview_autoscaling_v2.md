@@ -1,0 +1,200 @@
+# Behavioral Interview Templates - Consolidated
+
+---
+
+# Project 1: Serverless Autoscaling V2
+
+### One-Liner
+Redesigned sync-to-async downscaling with intelligent node selection, reducing scaling delays from minutes to seconds while saving customers [X%] on costs.
+
+### Problem → Action → Result (3 paired rows)
+
+| Problem | What I Did | Impact |
+|---------|------------|--------|
+| Sync downscaling = 10-15 min delays (waited for shuffle migration) | Async downscaling: decouple scaling decision from data migration, remove nodes only when truly idle | [X%] faster scaling, seconds instead of minutes |
+| Nodes with shuffle data stayed active too long = high cost | Intelligent node selection: prioritize nodes by (low shuffle size + high idle time) | [Y%] customer cost savings |
+| One-size-fits-all didn't serve diverse needs | Performance/Cost profiles: customer chooses trade-off via `spark.dataproc.scaling.version=2` | [Z%] adoption across serverless customers |
+
+### Technical Deep Dive (for follow-ups)
+- **Async architecture**: Remove nodes when both conditions met: no shuffle blocks + no active executors
+- **Node scoring formula**: Score = f(shuffle_data_size, idle_time) — lower data + higher idle = higher removal priority
+- **Spark integration**: Graceful decommissioning via `spark.dataproc.scaling.version=2`
+- **Cross-team**: Worked with Spark, Infrastructure, Product, and Support teams
+
+---
+
+## Sample Answers (30-90-30 format)
+
+### "Tell me about a technical challenge"
+
+**Setup (30 sec)**: "At [Company], our V1 autoscaling waited synchronously for shuffle data migration before removing nodes. This caused 10-15 minute delays when customers expected seconds."
+
+**Actions (90 sec)**: "I proposed async downscaling: instead of blocking on migration, we proactively migrate data in background and remove nodes only when truly idle. I designed a node selection algorithm weighing shuffle data size and idle time to minimize disruption. We integrated with Spark's graceful decommissioning. I also introduced Performance vs Cost profiles so customers could choose their trade-off."
+
+**Results (30 sec)**: "We reduced downscaling latency by [X%], saved customers [Y%] on costs, and achieved [Z%] adoption. Support escalations about scaling dropped by [W%]."
+
+### "Describe a time you influenced without authority"
+
+**Setup**: "The V2 project required deep integration with the Spark team's graceful decommissioning. I needed their cooperation but had no direct authority."
+
+**Actions**: "I started by understanding their priorities and finding mutual benefit. I presented data showing how integration would reduce customer-reported Spark failures. I offered to handle integration work ourselves, minimizing their effort."
+
+**Results**: "The Spark team prioritized the necessary APIs, and we shipped on schedule. This became a template for future cross-team collaborations."
+
+---
+---
+
+# Project 2: Spark Hang Auto Detection & Mitigation
+
+### One-Liner
+Built native hang detection (driver + executor) that auto-captures thread dumps on detection, eliminating third-party plugins and preventing runaway job costs.
+
+### Problem → Action → Result (3 paired rows)
+
+| Problem | What I Did | Impact |
+|---------|------------|--------|
+| Needed third-party plugin to get thread dumps | Native driver hang detection: 5-min idle context → auto thread dump → System.exit(0) | Zero config required, works out-of-box |
+| Hangs hard to reproduce = week-long debug cycles | Auto thread dump capture at detection time, print non-daemon thread stacks | Self-service debugging, MTTR: [X hours → Y min] |
+| Runaway jobs = huge costs (jobs ran for days) | Executor deadlock detection: compare task durations → probe slow executor → auto-retry | [$X/month] cost prevented |
+
+### Technical Deep Dive (for follow-ups)
+- **Driver detection**: Monitor SparkContext for idle (no running/pending jobs) for 5 min → capture all non-daemon thread stacks → exit
+- **Executor detection**: Compare task duration vs peers → driver sends deadlock probe to slow executor → kill + log + relaunch
+- **Default-on**: Pushed for default-on despite false positive concerns; tuned conservative thresholds
+- **False positive rate**: [<X%] with [Y%] successful deadlock detection
+
+---
+
+## Sample Answers (30-90-30 format)
+
+### "Tell me about a time you simplified a complex problem"
+
+**Setup (30 sec)**: "Customers debugging Spark hangs had to install third-party plugins, configure settings, reproduce the hang, and manually capture diagnostics. Most couldn't even start debugging, and hangs were nearly impossible to reproduce."
+
+**Actions (90 sec)**: "I designed native detection that works without configuration. For driver hangs, we monitor if SparkContext is idle for 5 minutes and auto-capture thread dumps before exiting. For executor hangs, we compare task durations and send deadlock probes to slow executors. The key decision was enabling this by default. Some worried about false positives, but I argued undetected hang costs far exceeded occasional false positives."
+
+**Results (30 sec)**: "Support tickets for hangs dropped [X%]. Customers get automatic root cause in logs. We've prevented [$X] in runaway compute costs."
+
+### "Tell me about a time you had to push back"
+
+**Setup**: "When designing hang detection, I proposed enabling it by default. Several engineers worried about false positives."
+
+**Actions**: "I gathered data on hang costs - support time, compute waste, debug cycles. I proposed conservative thresholds and monitoring plan. I ensured customers could disable if needed."
+
+**Results**: "The team agreed to ship default-on. False positive rate under [X%], caught [Y%] of real hangs automatically."
+
+---
+---
+
+# Project 3: Goal-Based Spark Autoscaling
+
+### One-Liner
+Created goal abstraction (Performance/Cost/Balanced) over 15+ configs, giving customers expert-level tuning with one dropdown choice.
+
+### Problem → Action → Result (3 paired rows)
+
+| Problem | What I Did | Impact |
+|---------|------------|--------|
+| 15+ configs too complex for non-experts | Goal abstraction: Performance / Cost / Balanced → each maps to fine-tuned config bundle | 15 configs → 1 choice |
+| Support repeated same explanations per customer | Out-of-box presets: no expertise required, production-ready defaults | [X%] fewer config-related tickets |
+| Customers couldn't optimize for their priority | Perf: avoid migration (I/O contention), shuffle-aware scheduling; Cost: bin-pack + low timeout + shuffle size tracking | Perf: [X%] faster jobs; Cost: [Y%] savings |
+
+### Technical Deep Dive (for follow-ups)
+- **Performance mode**: Avoid shuffle migration (competes with fetch I/O), shuffle-aware scheduling, larger initial executors
+- **Cost mode**: Bin-pack tasks → free executors → decommission; lower shuffle timeout to 1-2 min; track shuffle sizes
+- **Migration balancing**: Distribute migrated blocks evenly to prevent executor hotspots
+- **Backward compatible**: Balanced = existing default behavior
+
+---
+
+## Sample Answers (30-90-30 format)
+
+### "Tell me about a time you simplified something complex"
+
+**Setup (30 sec)**: "Our autoscaling had 15+ config parameters. When customers had suboptimal scaling, we'd recommend specific configs, but this required explaining Spark internals they didn't understand. Support spent hours per customer on the same explanations."
+
+**Actions (90 sec)**: "I designed goal-based abstraction. Customers choose one goal: Performance, Cost, or Balanced. Each maps to a tuned config bundle. For Performance, we avoid shuffle migration that competes with fetch I/O, use shuffle-aware scheduling. For Cost, we bin-pack tasks, lower shuffle timeouts to 1-2 minutes, track shuffle sizes for intelligent decommissioning."
+
+**Results (30 sec)**: "Reduced [X settings] to one dropdown. Config-related tickets dropped [X%]. Performance mode improved jobs by [X%], Cost mode saved [Y%]."
+
+### "Describe a trade-off you made"
+
+**Setup**: "In goal-based autoscaling, Performance and Cost modes were fundamentally different strategies."
+
+**Actions**: "Performance avoids shuffle migration because migration I/O competes with fetch, but executors can't be decommissioned. Cost aggressively decommissions, but may cause shuffle re-computation. I made trade-offs explicit in documentation."
+
+**Results**: "[X%] of customers actively use Performance or Cost modes, showing the trade-off resonated with real needs."
+
+---
+---
+
+# Project 4: Migrated Shuffle Refetch
+
+### One-Liner
+Fixed race condition where reduce tasks held stale shuffle locations after executor decommission, eliminating unnecessary stage retries with zero happy-path overhead.
+
+### Problem → Action → Result (3 paired rows)
+
+| Problem | What I Did | Impact |
+|---------|------------|--------|
+| Shuffle status fetched once at task start (race with decommission) | Decommission-aware exception handling: check if executor was decommissioned vs truly dead | Race condition identified and fixed |
+| Decom mid-task = ExecutorDeadException even though data migrated | Refetch shuffle status from MapOutputTracker on decom detection | Transparent retry from migrated location |
+| Unnecessary stage retry = 2-3x job time, cascading failures | Break cascade: handle first failure correctly → no retry → no additional decommissions | [X%] fewer retries, [Y%] cost saved |
+
+### Technical Deep Dive (for follow-ups)
+- **Root cause**: Reduce tasks fetch shuffle status once at start; decommission mid-task → stale location → ExecutorDeadException
+- **Solution**: On ExecutorDeadException, check decommission registry first; if decommissioned → refetch from MapOutputTracker → retry fetch from new location
+- **Zero overhead**: Extra checks only on failure path, happy path unchanged
+- **Cascade prevention**: No stage retry → no dynamic allocation churn → no additional decommissions
+
+---
+
+## Sample Answers (30-90-30 format)
+
+### "Tell me about a time you debugged a complex distributed system issue"
+
+**Setup (30 sec)**: "Jobs were taking 2-3x longer during autoscaling. Logs showed 'ExecutorDeadException' and stage retries, but we had shuffle migration enabled which should preserve data."
+
+**Actions (90 sec)**: "I traced the shuffle fetch lifecycle end-to-end. Reduce tasks fetch shuffle status only once at task start. If an executor decommissions mid-task and migrates data, the task still tries the original location. My solution distinguished between dead and decommissioned executors. On ExecutorDeadException, we check if decommissioned; if so, refetch from MapOutputTracker which now has migrated locations. Task continues without stage retry. This also broke cascading failures."
+
+**Results (30 sec)**: "Stage retries dropped [X%]. Job times improved [Y%]. Zero overhead on normal path."
+
+### "Describe an elegant solution to a complex problem"
+
+**Setup**: "Shuffle migration had a bug: even though we migrated data, jobs failed because reduce tasks held stale locations."
+
+**Actions**: "The insight was that MapOutputTracker already had correct data. The problem was throwing ExecutorDeadException before checking migration. My fix: one check—is executor decommissioned? If yes, refetch and retry. Three lines of logic."
+
+**Results**: "Eliminated unnecessary retries with minimal code change. Zero overhead. Backward compatible."
+
+---
+
+## Interview Prep Checklist
+
+**Before the interview:**
+- [ ] Fill in specific metrics ([X%], [$Y]) with your actual numbers
+- [ ] Practice 2-minute verbal walkthrough of each project
+- [ ] Review technical deep dive for follow-up questions
+- [ ] Prepare 2-3 question type variations per project
+
+**During the interview:**
+- [ ] Start with one-liner context (15-20 seconds)
+- [ ] Walk through one Problem → Action → Result row in detail
+- [ ] Use specific numbers where possible
+- [ ] Offer to dive deeper into technical details
+
+---
+
+## Adaptable Hooks by Company Type
+
+### For Cloud/Infrastructure Companies
+Emphasize: Scalability design, multi-tenant considerations, cost optimization at scale
+
+### For Customer-Focused Companies
+Emphasize: Customer pain points, Profile options, Adoption metrics, Support reduction
+
+### For Fast-Moving Startups
+Emphasize: Speed of execution, Iteration, Pragmatic trade-offs, Cross-functional work
+
+### For Large Enterprises
+Emphasize: Stakeholder alignment, Risk management, Gradual rollout, Backward compatibility
