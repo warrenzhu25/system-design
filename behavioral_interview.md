@@ -210,6 +210,48 @@ Built an MCP server bridging AI agents with Spark History Server, enabling natur
 **Results**: "Democratized Spark expertise. Teams without dedicated Spark experts can now self-service debug. Reduced escalations to platform team by [X%]."
 
 ---
+---
+
+# Project 6: Dataproc Serverless Easy Migration
+
+### One-Liner
+Built automated migration tool with 4-phase process (classify → translate → validate → tune), reducing Dataproc-to-Serverless migration from days of manual work to one command.
+
+### Problem → Action → Result (3 paired rows)
+
+| Problem | What I Did | Impact |
+|---------|------------|--------|
+| No migration guideline → users stuck, inconsistent results | 4-phase process: (1) classify job type (perf-critical/cost-critical/shuffle-heavy), (2) translate configs, (3) validate results, (4) enable autotuning | Clear migration path, predictable outcomes |
+| Manual migration = error-prone, hours per job | `--serverless` flag: auto job translation + `--migration-hint` for job type + `--dry-run` for preview | One command migration, minutes instead of hours |
+| Hard to evaluate success + manual ticket filing for failures | Migration report: job diff (duration, cost, shuffle metrics) + utilization analysis + one-click ticket with all details pre-filled | Easy validation, self-service troubleshooting |
+
+### Technical Deep Dive (for follow-ups)
+- **Job classification**: Performance-critical (strict SLO), Cost-critical (large cost, flexible duration), Shuffle-heavy (>100GB/min shuffle write)
+- **Translation rules**: Map cluster version → runtime version; remove incompatible configs (YARN, external shuffle); perf-critical keeps executor shape, cost-critical sets initial/max executors
+- **Validation metrics**: Duration, cost (total executor time), shuffle fetch wait time
+- **Autotuning**: Same Spark binary as Dataproc → major gains from agile scaling, not code changes
+
+---
+
+## Sample Answers (30-90-30 format)
+
+### "Tell me about a time you improved a process"
+
+**Setup (30 sec)**: "Migrating from Dataproc to Serverless was painful: no clear guidelines, manual config translation that took hours per job, hard to validate success, and when jobs failed users had to manually fill detailed tickets."
+
+**Actions (90 sec)**: "I designed a 4-phase migration process. Phase 1 classifies jobs: performance-critical with strict SLOs, cost-critical with large spend but flexible timing, or shuffle-heavy with high I/O. Phase 2 translates configs automatically: maps cluster versions, removes incompatible YARN configs, and sizes executors based on job type. Phase 3 validates by comparing duration, cost, and critical metrics like shuffle fetch wait. Phase 4 enables autotuning for scaling. I automated this with CLI flags: `--serverless` for auto-translation, `--migration-hint` for job type, `--dry-run` for preview. The migration report shows all diffs and pre-fills support tickets."
+
+**Results (30 sec)**: "Migration went from days of manual work to one command. Users can evaluate success immediately with the diff report. Support ticket volume dropped [X%] because issues are caught in validation phase."
+
+### "Describe a time you reduced manual toil"
+
+**Setup**: "Each Dataproc-to-Serverless migration required an engineer to manually translate configs, run jobs, compare metrics, and file tickets when things went wrong. It was error-prone and didn't scale."
+
+**Actions**: "I encoded expert knowledge into automation. Job classification determines translation rules. The `--serverless` flag handles all translation. Migration reports compare before/after automatically. One-click ticket filing includes all job details, utilization analysis, and suggested fixes."
+
+**Results**: "Eliminated hours of manual work per migration. Non-experts can now migrate jobs successfully. Autotuning suggestions in reports led to [X%] additional cost savings beyond migration."
+
+---
 
 ## Interview Prep Checklist
 
