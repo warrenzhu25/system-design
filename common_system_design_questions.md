@@ -29,6 +29,11 @@ A comprehensive guide to frequently asked system design questions with detailed 
 ### Workflow & Orchestration
 13. [Task Scheduler](#13-task-scheduler)
 
+### Specialized Systems
+14. [Proximity / Geo Service](#14-proximity--geo-service)
+15. [Payment System](#15-payment-system)
+16. [Leaderboard / Ranking](#16-leaderboard--ranking)
+
 ---
 
 ## 1. URL Shortener
@@ -1045,6 +1050,11 @@ Availability  Partition Tolerance
 
 **Design Choice:** AP with tunable consistency (like Cassandra/DynamoDB)
 
+> **Note:** The "CA" corner is theoretical. Any system that talks over a network
+> *will* experience partitions, so a real distributed store must choose between
+> C and A *during* a partition — CA effectively means a single node (where no
+> partition is possible). Practical distributed systems pick CP or AP.
+
 ### High-Level Architecture
 
 ```
@@ -1103,9 +1113,13 @@ class QuorumCoordinator:
         nodes = self.get_replica_nodes(key)
         responses = []
 
+        # NOTE: a logical clock (version vector / hybrid logical clock) is used
+        # here, not time.time(). Wall-clock last-write-wins silently drops writes
+        # under clock skew — see Conflict Resolution / VectorClock below.
+        version = self._next_version(key)
         for node in nodes:
             try:
-                response = node.write(key, value, version=time.time())
+                response = node.write(key, value, version=version)
                 responses.append(response)
             except NodeUnavailable:
                 continue
@@ -2636,8 +2650,8 @@ class PushFeedService:
             await self.feed_cache.ltrim(f"feed:{follower_id}", 0, 1000)
 
     def get_feed(self, user_id: str, limit: int = 20) -> list:
-        # Just read from pre-computed feed
-        post_ids = self.feed_cache.lrange(f"feed:{user_id}", 0, limit)
+        # Just read from pre-computed feed (Redis ranges are inclusive)
+        post_ids = self.feed_cache.lrange(f"feed:{user_id}", 0, limit - 1)
         return self.post_db.get_batch(post_ids)
 ```
 
@@ -2664,14 +2678,15 @@ class HybridFeedService:
             await self.celebrity_posts.insert(post)
 
     async def get_feed(self, user_id: str, limit: int = 20) -> list:
-        # Get pre-computed feed (from regular users)
-        feed_posts = await self.feed_cache.lrange(f"feed:{user_id}", 0, limit)
+        # Get pre-computed feed (the cache stores post IDs, not objects)
+        feed_post_ids = await self.feed_cache.lrange(f"feed:{user_id}", 0, limit - 1)
+        feed_posts = await self.post_db.get_batch(feed_post_ids)  # hydrate to Post objects
 
         # Get celebrity posts (pull on read)
         celebrities = await self.get_followed_celebrities(user_id)
         celebrity_posts = await self.get_recent_celebrity_posts(celebrities)
 
-        # Merge and sort
+        # Merge and sort (both sides are now Post objects with .timestamp)
         all_posts = feed_posts + celebrity_posts
         all_posts.sort(key=lambda p: p.timestamp, reverse=True)
         return all_posts[:limit]
@@ -3324,10 +3339,11 @@ class FuzzyAutocomplete:
 ```python
 class URLFrontier:
     def __init__(self, num_queues: int = 1000):
-        self.priority_queue = PriorityQueue()  # Global priority
-        self.host_queues = defaultdict(deque)   # Per-host queues
-        self.last_crawl = {}                    # Host -> timestamp
-        self.crawl_delay = 1.0                  # Seconds between requests
+        self.priority_queue = PriorityQueue()   # (next_crawl_time, priority, host)
+        self.host_queues = defaultdict(deque)    # Per-host queues
+        self.waiting_hosts = set()               # Hosts currently in priority_queue
+        self.last_crawl = {}                     # Host -> timestamp
+        self.crawl_delay = 1.0                   # Seconds between requests
 
     def add_url(self, url: str, priority: int):
         parsed = urlparse(url)
@@ -3336,15 +3352,18 @@ class URLFrontier:
         # Add to host queue
         self.host_queues[host].append((priority, url))
 
-        # Add host to priority queue if not already waiting
-        if host not in self.priority_queue:
+        # Add host to priority queue if not already waiting.
+        # (PriorityQueue has no membership test, so track hosts in a set.)
+        if host not in self.waiting_hosts:
             next_crawl_time = self.last_crawl.get(host, 0) + self.crawl_delay
             self.priority_queue.put((next_crawl_time, priority, host))
+            self.waiting_hosts.add(host)
 
     def get_next_url(self) -> str:
         while True:
             # Get next host to crawl
             next_time, priority, host = self.priority_queue.get()
+            self.waiting_hosts.discard(host)
 
             # Wait if necessary (politeness)
             now = time.time()
@@ -3360,6 +3379,7 @@ class URLFrontier:
                 if self.host_queues[host]:
                     next_crawl = time.time() + self.crawl_delay
                     self.priority_queue.put((next_crawl, priority, host))
+                    self.waiting_hosts.add(host)
 
                 return url
 ```
@@ -3378,8 +3398,8 @@ class CrawlerWorker:
         while True:
             url = self.frontier.get_next_url()
 
-            # Check if already seen
-            if url in self.seen_urls:
+            # Check if already seen (BloomFilter exposes might_contain, not `in`)
+            if self.seen_urls.might_contain(url):
                 continue
             self.seen_urls.add(url)
 
@@ -3451,7 +3471,10 @@ class DuplicateDetector:
         v = [0] * 64
 
         for token in tokens:
-            token_hash = hash(token)
+            # Use a stable hash. The builtin hash() is salted per process
+            # (PYTHONHASHSEED), so it would produce different fingerprints on
+            # each worker/restart and break cross-node duplicate detection.
+            token_hash = int.from_bytes(hashlib.md5(token.encode()).digest()[:8], "big")
             for i in range(64):
                 if token_hash & (1 << i):
                     v[i] += 1
@@ -3804,13 +3827,17 @@ class AdaptivePlayer:
         self.current_quality = "720p"
         self.buffer_health = 10  # seconds
 
-    def select_quality(self, bandwidth: int) -> str:
-        """Select quality based on available bandwidth"""
-        if bandwidth > 6000:
+    def select_quality(self, bandwidth_kbps: int) -> str:
+        """Select quality from available bandwidth (kbps).
+
+        Thresholds keep ~20% headroom above each profile's bitrate
+        (profiles: 1080p=5000, 720p=2500, 480p=1000, 360p=500 kbps).
+        """
+        if bandwidth_kbps > 6000:
             return "1080p"
-        elif bandwidth > 3000:
+        elif bandwidth_kbps > 3000:
             return "720p"
-        elif bandwidth > 1500:
+        elif bandwidth_kbps > 1500:
             return "480p"
         else:
             return "360p"
@@ -3864,25 +3891,29 @@ class ViewCounter:
         self.batch_size = 1000
 
     async def record_view(self, video_id: str, user_id: str):
-        # Deduplicate views (same user within window)
+        # Deduplicate views (same user within window). SET NX is atomic and
+        # returns False if the key already existed — no separate exists() race.
         view_key = f"viewed:{video_id}:{user_id}"
-        if await self.redis.exists(view_key):
+        if not await self.redis.set(view_key, "1", ex=3600, nx=True):
             return
 
-        await self.redis.setex(view_key, 3600, "1")  # 1 hour window
-
-        # Increment counter in Redis
+        # Total counter (source of truth for reads) + an unsynced delta counter
         await self.redis.incr(f"views:{video_id}")
+        pending = await self.redis.incr(f"views_pending:{video_id}")
 
-        # Batch sync to database
-        count = await self.redis.get(f"views:{video_id}")
-        if int(count) % self.batch_size == 0:
-            await self._sync_to_db(video_id, count)
+        # Flush when enough views accumulate. Atomically claim the delta with
+        # GETSET so concurrent callers can't skip or double-count a multiple
+        # (the old `count % batch_size == 0` check did both under concurrency).
+        if pending >= self.batch_size:
+            delta = int(await self.redis.getset(f"views_pending:{video_id}", 0))
+            if delta > 0:
+                await self._sync_to_db(video_id, delta)
 
-    async def _sync_to_db(self, video_id: str, count: int):
+    async def _sync_to_db(self, video_id: str, delta: int):
+        # Incremental update — avoids lost writes between flushes
         await self.db.execute(
-            "UPDATE videos SET view_count = %s WHERE id = %s",
-            [count, video_id]
+            "UPDATE videos SET view_count = view_count + %s WHERE id = %s",
+            [delta, video_id]
         )
 ```
 
@@ -4119,22 +4150,30 @@ class MasterNode:
         )
 
     def _select_chunk_servers(self, count: int) -> list:
-        """Select servers with rack awareness"""
+        """Select servers with rack awareness (spread replicas across racks)"""
         available = list(self.chunk_servers.values())
 
-        # Sort by available space
+        # Sort by available space (most free first)
         available.sort(key=lambda s: s.available_space, reverse=True)
 
         selected = []
         racks_used = set()
 
+        # Pass 1: at most one server per rack, for fault tolerance
         for server in available:
             if len(selected) >= count:
                 break
-            # Prefer different racks for fault tolerance
-            if server.rack not in racks_used or len(selected) < count:
+            if server.rack not in racks_used:
                 selected.append(server)
                 racks_used.add(server.rack)
+
+        # Pass 2: if there aren't `count` distinct racks, fill the rest
+        if len(selected) < count:
+            for server in available:
+                if len(selected) >= count:
+                    break
+                if server not in selected:
+                    selected.append(server)
 
         return selected
 ```
@@ -4166,8 +4205,11 @@ class ChunkClient:
         for server in [allocation.primary] + allocation.secondaries:
             await server.receive_data(allocation.chunk_id, data)
 
-        # Commit on primary (which coordinates with secondaries)
+        # Primary commits, then drives commit on every secondary. Otherwise the
+        # secondaries keep the data in `pending` forever and never persist it.
         await allocation.primary.commit(allocation.chunk_id)
+        for secondary in allocation.secondaries:
+            await secondary.commit(allocation.chunk_id)
 
 
 class ChunkServer:
@@ -4785,6 +4827,725 @@ Multiple scheduler instances run simultaneously. Only the leader creates DAG Run
 
 ---
 
+## 14. Proximity / Geo Service
+
+**Problem:** Design a service that finds nearby places or people (e.g., Yelp, Uber driver matching, "friends near me").
+
+### Requirements
+
+**Functional:**
+- Given a location (lat, lng) and radius, return nearby entities
+- Add/update/remove entities with their locations
+- Support frequently moving entities (drivers) and static ones (restaurants)
+- Rank results by distance (and optionally rating, ETA)
+
+**Non-Functional:**
+- Low latency search (< 100ms)
+- High read throughput (100K+ searches/second)
+- Support millions of entities, updated frequently
+- Eventually consistent location (a few seconds stale is acceptable)
+
+### Capacity Estimation
+
+```
+Entities: 100M places + 5M moving drivers
+Driver location updates: 5M × every 4s = ~1.25M updates/second
+Searches: 100K/second, each returns ~50 results
+
+Geospatial index memory (drivers):
+- 5M drivers × ~50 bytes (id + lat/lng + cell) = ~250 MB (fits in memory)
+```
+
+### Why Not Naive Lat/Lng Queries
+
+A `WHERE lat BETWEEN ? AND ? AND lng BETWEEN ? AND ?` query needs a composite or
+two single-column B-tree indexes. B-trees are 1-dimensional — they can range-scan
+*one* axis efficiently, then must filter the other in memory, so a dense city
+center scans millions of rows. Geospatial systems map 2D space onto a
+1-dimensional, locality-preserving key (geohash, S2, or a quadtree) so a single
+range/prefix scan returns a small candidate set.
+
+### Indexing Approaches
+
+#### 1. Geohash (prefix-based)
+
+```python
+import geohash  # python-geohash
+
+class GeohashIndex:
+    """Encode (lat, lng) into a base32 string; shared prefix => spatial proximity."""
+
+    def __init__(self, redis_client, precision: int = 6):
+        self.redis = redis_client
+        self.precision = precision  # 6 chars ≈ 1.2km x 0.6km cell
+
+    def add_entity(self, entity_id: str, lat: float, lng: float):
+        gh = geohash.encode(lat, lng, precision=self.precision)
+        # One Redis set per cell
+        self.redis.sadd(f"geo:{gh}", entity_id)
+        self.redis.set(f"loc:{entity_id}", f"{lat},{lng}")
+
+    def search(self, lat: float, lng: float, radius_m: float) -> list:
+        center = geohash.encode(lat, lng, precision=self.precision)
+        # Query the cell + its 8 neighbors (handles entities near a cell edge)
+        cells = [center] + geohash.neighbors(center)
+
+        candidates = set()
+        for cell in cells:
+            candidates |= self.redis.smembers(f"geo:{cell}")
+
+        # Precise distance filter + sort (cells are approximate)
+        results = []
+        for entity_id in candidates:
+            e_lat, e_lng = self._get_location(entity_id)
+            dist = haversine(lat, lng, e_lat, e_lng)
+            if dist <= radius_m:
+                results.append((dist, entity_id))
+
+        results.sort()
+        return [eid for _, eid in results]
+```
+
+**Precision tradeoff:** longer geohash = smaller cells = fewer candidates to filter,
+but more cells to query for a large radius. Pick precision from the typical search
+radius. For variable radius, query at the precision whose cell ≳ the radius.
+
+#### 2. Redis Native Geo (sorted set + geohash score)
+
+```python
+class RedisGeoIndex:
+    """Redis GEO* commands store a 52-bit geohash as the sorted-set score."""
+
+    def add_entity(self, key: str, entity_id: str, lat: float, lng: float):
+        self.redis.geoadd(key, (lng, lat, entity_id))  # note: lng, lat order
+
+    def search(self, key: str, lat: float, lng: float, radius_m: float) -> list:
+        # Returns members within radius, sorted by distance
+        return self.redis.geosearch(
+            key, longitude=lng, latitude=lat,
+            radius=radius_m, unit="m", sort="ASC", withdist=True,
+        )
+```
+
+#### 3. Quadtree (adaptive density)
+
+```python
+class QuadTreeNode:
+    """Recursively subdivides space; dense areas (cities) split deeper."""
+
+    def __init__(self, boundary: 'BBox', capacity: int = 100):
+        self.boundary = boundary
+        self.capacity = capacity
+        self.points = []
+        self.divided = False
+        self.children = []  # NW, NE, SW, SE
+
+    def insert(self, point) -> bool:
+        if not self.boundary.contains(point):
+            return False
+        if len(self.points) < self.capacity and not self.divided:
+            self.points.append(point)
+            return True
+        if not self.divided:
+            self._subdivide()
+        return any(child.insert(point) for child in self.children)
+
+    def query_range(self, region: 'BBox', found: list):
+        if not self.boundary.intersects(region):
+            return
+        for p in self.points:
+            if region.contains(p):
+                found.append(p)
+        if self.divided:
+            for child in self.children:
+                child.query_range(region, found)
+```
+
+### Index Comparison
+
+| Approach | Update Cost | Query Cost | Density Handling | Best For |
+|----------|-------------|------------|------------------|----------|
+| **Geohash** | O(1) (set add) | Query 9 cells + filter | Uniform cells (hot cells in cities) | Simple, sharded, distributed |
+| **Redis GEO** | O(log n) | O(n + log n) per radius | Uniform | Quick to ship, single cluster |
+| **Quadtree** | O(log n) | O(log n + results) | Adaptive (splits dense areas) | In-memory, skewed density |
+| **S2 / H3** | O(1) | Cell cover + filter | Hierarchical, uniform-ish | Google/Uber-scale, multi-resolution |
+
+### Handling Moving Entities (Drivers)
+
+```python
+class DriverLocationService:
+    """Drivers send frequent updates; only re-index when they change cell."""
+
+    def update_location(self, driver_id: str, lat: float, lng: float):
+        new_cell = geohash.encode(lat, lng, precision=6)
+        old_cell = self.redis.get(f"driver_cell:{driver_id}")
+
+        # Always refresh the precise location (cheap)
+        self.redis.set(f"loc:{driver_id}", f"{lat},{lng}", ex=30)
+
+        # Only touch the spatial index on cell change (avoids 1.25M set ops/s)
+        if new_cell != old_cell:
+            pipe = self.redis.pipeline()
+            if old_cell:
+                pipe.srem(f"geo:{old_cell}", driver_id)
+            pipe.sadd(f"geo:{new_cell}", driver_id)
+            pipe.set(f"driver_cell:{driver_id}", new_cell)
+            pipe.execute()
+```
+
+### Key Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Spatial index | Geohash cells in Redis | O(1) updates, easy to shard by cell |
+| Precision | 6 chars (~1km) | Matches typical "nearby" radius |
+| Edge handling | Query 8 neighbor cells | Entities near a boundary aren't missed |
+| Moving entities | Re-index only on cell change | Avoid write amplification |
+| Distance ranking | Haversine post-filter | Cells are approximate; refine precisely |
+
+### Interview Discussion Points
+
+1. **How to handle hot cells (dense city centers)?**
+   - Deeper precision (smaller cells) in dense regions, or a quadtree
+   - Shard a hot cell's set across nodes; scatter-gather on read
+   - Cap results per cell and paginate
+
+2. **How to compute ETA instead of straight-line distance?**
+   - Haversine for the candidate filter, road-network/routing service for ranking
+   - Cache ETAs for popular origin/destination cell pairs
+
+3. **Geohash vs S2 vs H3?**
+   - Geohash: simple, rectangular cells, prefix = proximity (but edge discontinuities)
+   - S2: spherical, hierarchical, better neighbor properties (Uber's older stack)
+   - H3: hexagonal, uniform neighbor distance (Uber's current choice)
+
+### Failure Scenarios & Mitigation
+
+| Failure Mode | Impact | Detection | Mitigation |
+|--------------|--------|-----------|------------|
+| Hot cell overload | Slow searches in a city | Per-cell QPS metrics | Sub-shard cell, cache, deeper precision |
+| Stale driver location | Match to a driver who moved | Update-age monitoring | TTL on location keys, freshness filter |
+| Index/precise-store drift | Wrong results | Periodic reconciliation | Single update path, idempotent re-index |
+| Boundary misses | Missing nearby results | Result-count anomalies | Always query neighbor cells |
+| Redis node loss | Region of map unavailable | Health checks | Replicas, consistent-hash by cell |
+
+### Monitoring & Observability
+
+**Key Metrics:**
+- **Search latency P50/P99**: target < 100ms
+- **Candidates scanned per query**: index efficiency / hot-cell detection
+- **Location update rate**: write load
+- **Re-index ratio**: % of updates that changed cell
+- **Empty-result rate**: coverage / precision tuning signal
+
+**Alerting:**
+- P99 search latency exceeds 200ms
+- Any cell exceeds 1% of total search traffic
+- Driver location staleness P99 exceeds 30s
+
+### Security Considerations
+
+- **Location privacy**: coarsen precision for "near me" social features; never expose exact coordinates of other users
+- **Rate limiting**: prevent scraping the entity database via dense radius sweeps
+- **Geofencing**: enforce server-side region restrictions (don't trust client coordinates)
+
+### Interview Deep-Dive Questions
+
+4. **How to support variable search radius efficiently?**
+   - Choose query precision so a cell ≳ requested radius
+   - Multi-resolution index (S2/H3 levels); pick the level per query
+   - Expand search rings outward until enough results, then stop
+
+5. **How to find the K nearest (not just within radius)?**
+   - Start with the center cell, expand to neighbor rings until ≥ K candidates
+   - Then precise-distance sort and take top-K
+   - Quadtree: best-first search with a priority queue on cell distance
+
+6. **How to scale writes for millions of moving entities?**
+   - Re-index only on cell change (shown above)
+   - Batch updates per node; absorb bursts in a queue
+   - Separate the high-write location store from the search index
+
+7. **How would you match riders to drivers (dispatch)?**
+   - Search nearby available drivers, rank by ETA not distance
+   - Lock a driver during offer (avoid double-dispatch), TTL the lock
+   - Expand radius if no acceptance; consider supply/demand pricing
+
+---
+
+## 15. Payment System
+
+**Problem:** Design a payment processing system that moves money reliably (e.g., Stripe, PayPal, a wallet service).
+
+### Requirements
+
+**Functional:**
+- Charge a customer (authorize + capture) via payment providers
+- Transfers / wallet balance debits and credits
+- Refunds (full and partial)
+- Idempotent request handling (no double charges)
+- Transaction history and reconciliation
+
+**Non-Functional:**
+- **Correctness above all** — never double-charge, never lose money
+- Strong consistency for balances (no overdraft from races)
+- High availability for reads; durable audit trail
+- Auditable and compliant (PCI-DSS), exactly-once effects
+
+### High-Level Architecture
+
+```
++----------+     +-------------------+     +------------------+
+|  Client  | --> |   Payment API     | --> |  Ledger Service  |
++----------+     | (Idempotency Key) |     | (Double-Entry DB)|
+                 +---------+---------+     +---------+--------+
+                           |                         |
+                 +---------v---------+     +---------v--------+
+                 | Idempotency Store |     |  Outbox Table    |
+                 |   (key -> result) |     | (events to emit) |
+                 +-------------------+     +---------+--------+
+                                                     |
+                                          +----------v----------+
+                                          |   Provider Worker   |
+                                          | (Stripe/bank rails) |
+                                          +----------+----------+
+                                                     |
+                                          +----------v----------+
+                                          |  Provider Webhooks  |
+                                          | (async settlement)  |
+                                          +---------------------+
+```
+
+### Idempotency (the core requirement)
+
+A network retry must never charge twice. The client sends a unique
+**idempotency key**; the server records the key with the first result and
+replays that result for any retry.
+
+```python
+class IdempotentPaymentHandler:
+    def charge(self, idempotency_key: str, request: ChargeRequest) -> ChargeResult:
+        # 1. Atomically claim the key (INSERT ... ON CONFLICT DO NOTHING)
+        claimed = self.db.insert_idempotency_key(
+            key=idempotency_key,
+            request_hash=hash_request(request),
+            status="in_progress",
+        )
+
+        if not claimed:
+            existing = self.db.get_idempotency_key(idempotency_key)
+
+            # Same key reused with a DIFFERENT body => client bug, reject
+            if existing.request_hash != hash_request(request):
+                raise IdempotencyConflict("key reused with different payload")
+
+            # Completed earlier => replay the stored result (no re-charge)
+            if existing.status == "completed":
+                return existing.result
+
+            # Still in flight => tell client to retry shortly
+            raise RequestInProgress(retry_after=2)
+
+        # 2. First time for this key: do the actual work exactly once
+        try:
+            result = self._execute_charge(request)
+            self.db.complete_idempotency_key(idempotency_key, result)
+            return result
+        except Exception:
+            # Leave key claimed so a retry doesn't double-charge; a reaper
+            # resolves stuck "in_progress" keys by querying the provider.
+            raise
+```
+
+### Double-Entry Ledger
+
+Money is never created or destroyed: every transaction is balanced debits and
+credits that sum to zero. Balances are *derived* from immutable ledger entries.
+
+```python
+class LedgerService:
+    def transfer(self, from_account: str, to_account: str, amount: int, txn_id: str):
+        """amount in minor units (cents). All-or-nothing in one DB transaction."""
+        with self.db.transaction(isolation="serializable"):
+            # Lock the debit account row; check funds inside the transaction
+            balance = self.db.select_for_update(from_account).balance
+            if balance < amount:
+                raise InsufficientFunds()
+
+            # Two entries that sum to zero — the invariant of double-entry
+            self.db.insert_ledger_entry(txn_id, from_account, -amount)
+            self.db.insert_ledger_entry(txn_id, to_account, +amount)
+
+            # Maintained balances (or derive on read via SUM of entries)
+            self.db.update_balance(from_account, balance - amount)
+            self.db.update_balance(to_account, "+", amount)
+        # Commit = money moved atomically. A crash before commit moves nothing.
+```
+
+```sql
+-- Immutable, append-only ledger (the source of truth)
+CREATE TABLE ledger_entries (
+    id            BIGSERIAL PRIMARY KEY,
+    transaction_id UUID NOT NULL,
+    account_id    UUID NOT NULL,
+    amount        BIGINT NOT NULL,          -- signed minor units; sum per txn = 0
+    currency      CHAR(3) NOT NULL,
+    created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX idx_ledger_account ON ledger_entries(account_id, created_at);
+CREATE INDEX idx_ledger_txn ON ledger_entries(transaction_id);
+
+-- Idempotency keys
+CREATE TABLE idempotency_keys (
+    key           VARCHAR(255) PRIMARY KEY,
+    request_hash  VARCHAR(64) NOT NULL,
+    status        VARCHAR(20) NOT NULL,     -- in_progress, completed
+    result        JSONB,
+    created_at    TIMESTAMPTZ DEFAULT NOW(),
+    expires_at    TIMESTAMPTZ
+);
+```
+
+### Transactional Outbox (reliable provider calls + events)
+
+Calling an external provider inside the DB transaction risks "DB committed but
+provider call lost" (or vice-versa). Write the intent to an **outbox** in the
+same transaction; a worker delivers it at-least-once afterward.
+
+```python
+class OutboxPaymentService:
+    def initiate_charge(self, txn_id: str, request: ChargeRequest):
+        with self.db.transaction():
+            self.db.insert_payment(txn_id, status="pending")
+            # Same transaction => atomic with the state change
+            self.db.insert_outbox(
+                event_type="charge.provider_call",
+                payload={"txn_id": txn_id, "amount": request.amount},
+            )
+        # After commit, a separate worker reads the outbox and calls the provider
+        # (with the txn_id as the provider's idempotency key, so retries are safe).
+```
+
+### Money Movement States
+
+```
+created -> authorized -> captured -> settled
+   |           |            |
+   |           +--> voided  +--> refunded (full/partial)
+   +--> failed
+```
+
+| State | Meaning | Money moved? |
+|-------|---------|--------------|
+| authorized | Funds held on customer's card | No (hold only) |
+| captured | Charge submitted for settlement | Pending |
+| settled | Funds received (provider webhook) | Yes |
+| refunded | Reversed to customer | Reversed |
+| voided | Authorization released before capture | No |
+
+### Key Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Dedup | Idempotency key + stored result | Network retries can't double-charge |
+| Money model | Double-entry ledger, append-only | Auditable, balances always reconcile |
+| Amounts | Integer minor units (cents) | Never use floats for money |
+| Provider calls | Transactional outbox | No lost/duplicated external effects |
+| Consistency | Serializable txn on balance | Prevent overdraft races |
+| Settlement | Async via provider webhooks | Rails are eventually consistent |
+
+### Interview Discussion Points
+
+1. **Why double-entry instead of a single balance column?**
+   - Every movement has a matching counter-entry → totals always reconcile
+   - Full audit trail; balance is reconstructable from history
+   - Detects bugs: any nonzero sum-per-transaction is corruption
+
+2. **How to guarantee exactly-once effects across a flaky network?**
+   - Idempotency keys on every mutating request (client-generated)
+   - Pass the same key downstream to the provider
+   - Outbox + at-least-once delivery + idempotent consumers = effectively once
+
+3. **CAP stance for payments?**
+   - Choose **CP** for balance mutations — refuse rather than risk a double-spend
+   - Availability via fast failover, not by relaxing consistency on money
+
+### Failure Scenarios & Mitigation
+
+| Failure Mode | Impact | Detection | Mitigation |
+|--------------|--------|-----------|------------|
+| Client retry after timeout | Risk of double charge | Duplicate idempotency key | Replay stored result, never re-execute |
+| Provider call lost after DB commit | Charge never submitted | Outbox row stuck pending | Outbox worker retries with txn_id key |
+| Provider success, our crash before record | Charged but no local record | Reconciliation mismatch | Reconcile against provider, idempotent record |
+| Concurrent debits | Overdraft / negative balance | Balance < 0 invariant check | SELECT FOR UPDATE / serializable txn |
+| Webhook never arrives | Stuck in "captured" | Settlement-age alert | Poll provider as fallback; daily reconciliation |
+| Partial refund races | Over-refund | Refunded > captured check | Cap refunds at captured amount in one txn |
+
+### Monitoring & Observability
+
+**Key Metrics:**
+- **Authorization success rate**: provider/issuer health
+- **Double-charge rate**: must be ~0 (idempotency effectiveness)
+- **Reconciliation mismatches**: ledger vs provider (must trend to 0)
+- **Settlement latency**: capture → settled
+- **Outbox lag**: undelivered provider calls
+- **Stuck in_progress keys**: reaper backlog
+
+**Alerting:**
+- Any unreconciled transaction older than 24h
+- Authorization success rate drops below baseline
+- Negative balance detected (sev-1)
+- Outbox depth grows unbounded
+
+### Security Considerations
+
+**PCI-DSS / Card Data:**
+- Never store raw PAN/CVV — tokenize via the provider (or a PCI vault)
+- Scope PCI to a minimal, isolated service; the rest handles tokens only
+- TLS everywhere; encrypt sensitive fields at rest (KMS)
+
+**Fraud & Abuse:**
+- Velocity checks (charges per card/user/IP per window)
+- 3-D Secure / step-up auth for risky transactions
+- Anomaly detection on amount, geography, device
+
+**Integrity:**
+- Append-only ledger (no UPDATE/DELETE on entries; corrections are new entries)
+- Immutable audit log of every state change with actor
+- Separation of duties / approvals for manual adjustments
+
+### Interview Deep-Dive Questions
+
+4. **How to handle multi-currency?**
+   - Store currency per entry; never mix currencies in one balance
+   - FX as an explicit conversion transaction (debit USD wallet, credit EUR wallet) with a recorded rate
+   - Round per ISO-4217 minor-unit rules; record rounding remainders
+
+5. **How to implement refunds correctly?**
+   - Refund references the original transaction; cap total refunds ≤ captured amount in a single serialized transaction
+   - Idempotency key per refund attempt
+   - Refund is a new balanced ledger transaction, not an edit of the original
+
+6. **How to reconcile with the provider/bank?**
+   - Daily settlement file ingest; match each line to a ledger transaction by reference
+   - Flag mismatches (missing, extra, amount diff) to a manual queue
+   - Auto-resolve known timing differences; alert on real discrepancies
+
+7. **How would you design a wallet with holds (e.g., ride-hailing pre-auth)?**
+   - Model a hold as a pending debit that reduces *available* balance but not *posted* balance
+   - Capture converts the hold to a posted entry; expiry releases it
+   - `available = posted − sum(active_holds)`, all checked in one transaction
+
+---
+
+## 16. Leaderboard / Ranking
+
+**Problem:** Design a real-time leaderboard (game scores, trending content, competition rankings) supporting tens of millions of players.
+
+### Requirements
+
+**Functional:**
+- Update a player's score
+- Get top-N players
+- Get a player's rank and surrounding players ("nearby" view)
+- Support multiple boards (global, per-region, time-windowed: daily/weekly)
+
+**Non-Functional:**
+- Low latency reads/writes (< 10ms)
+- Scale to 50M+ players, 100K+ score updates/second
+- Rankings update in near real-time
+- Time-windowed boards reset cleanly
+
+### Why Not `ORDER BY score`
+
+`SELECT ... ORDER BY score DESC LIMIT N` is fine for top-N, but **"what's player X's
+rank"** requires `COUNT(*) WHERE score > X` — an O(n) scan per query, on every
+read, for 50M rows. A structure with O(log n) rank queries (a skip list / sorted
+set) is needed.
+
+### Core: Redis Sorted Set
+
+A Redis sorted set (`ZSET`) is a skip list + hash map: O(log n) inserts, O(log n)
+rank lookups, O(log n + N) range scans — exactly the leaderboard operations.
+
+```python
+class Leaderboard:
+    def __init__(self, redis_client, board_key: str):
+        self.redis = redis_client
+        self.key = board_key  # e.g. "lb:global" or "lb:daily:2026-06-21"
+
+    def submit_score(self, player_id: str, score: float):
+        # Keep the player's BEST score (use ZADD GT for highest-wins boards)
+        self.redis.zadd(self.key, {player_id: score}, gt=True)
+
+    def top_n(self, n: int = 10) -> list:
+        # Highest scores first, with scores
+        return self.redis.zrevrange(self.key, 0, n - 1, withscores=True)
+
+    def get_rank(self, player_id: str) -> int:
+        # ZREVRANK is 0-based; +1 for human-readable rank
+        rank = self.redis.zrevrank(self.key, player_id)
+        return rank + 1 if rank is not None else None
+
+    def around_player(self, player_id: str, window: int = 5) -> list:
+        rank = self.redis.zrevrank(self.key, player_id)
+        if rank is None:
+            return []
+        start = max(0, rank - window)
+        return self.redis.zrevrange(self.key, start, rank + window, withscores=True)
+```
+
+### Time-Windowed Boards
+
+```python
+class TimeWindowedLeaderboard:
+    """Separate ZSET per window; key embeds the period."""
+
+    def _key(self, period: str) -> str:
+        if period == "daily":
+            return f"lb:daily:{date.today().isoformat()}"
+        if period == "weekly":
+            return f"lb:weekly:{date.today().isocalendar()[1]}"
+        return "lb:alltime"
+
+    def submit(self, player_id: str, score: float):
+        for period in ("daily", "weekly", "alltime"):
+            key = self._key(period)
+            self.redis.zadd(key, {player_id: score}, gt=True)
+            if period != "alltime":
+                # Auto-expire old windows so they reset and free memory
+                self.redis.expire(key, ttl_for(period))
+```
+
+### Scaling Beyond One Node
+
+A single ZSET of 50M entries (~a few GB) fits in memory, but write/read throughput
+and memory eventually force sharding. Exact global rank across shards is the hard
+part.
+
+```python
+class ShardedLeaderboard:
+    """Shard players across N ZSETs. Top-N = merge each shard's top-N.
+    Exact global rank requires summing per-shard counts above a score."""
+
+    def __init__(self, shards: list):
+        self.shards = shards  # list of Redis clients
+
+    def _shard(self, player_id: str):
+        return self.shards[hash(player_id) % len(self.shards)]
+
+    def submit(self, player_id: str, score: float):
+        self._shard(player_id).zadd("lb", {player_id: score}, gt=True)
+
+    def top_n(self, n: int = 10) -> list:
+        # Each shard's top-N is enough; merge and take overall top-N
+        merged = []
+        for shard in self.shards:
+            merged.extend(shard.zrevrange("lb", 0, n - 1, withscores=True))
+        merged.sort(key=lambda x: x[1], reverse=True)
+        return merged[:n]
+
+    def global_rank(self, player_id: str) -> int:
+        shard = self._shard(player_id)
+        score = shard.zscore("lb", player_id)
+        if score is None:
+            return None
+        # Count players strictly above this score on every shard
+        higher = sum(s.zcount("lb", f"({score}", "+inf") for s in self.shards)
+        return higher + 1
+```
+
+### Approximate Rank at Extreme Scale
+
+For hundreds of millions of players, exact rank for everyone is wasteful — most
+users only care about top-N and "roughly where am I." Use **score-bucket
+histograms**: maintain a count of players per score range; a player's approximate
+rank is the sum of counts in higher buckets (O(buckets), not O(n)).
+
+| Method | Rank Accuracy | Read Cost | Memory | Best For |
+|--------|---------------|-----------|--------|----------|
+| Single ZSET | Exact | O(log n) | O(n) | ≤ tens of millions |
+| Sharded ZSET | Exact (scatter-gather) | O(shards · log n) | O(n) | High throughput |
+| Bucket histogram | Approximate | O(buckets) | O(buckets) | Hundreds of millions |
+
+### Key Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Data structure | Redis sorted set (skip list) | O(log n) rank + range queries |
+| Score policy | Keep best (ZADD GT) | Idempotent re-submits, no regressions |
+| Time windows | One ZSET per period + TTL | Clean resets, bounded memory |
+| Durability | Periodic snapshot to DB | ZSET is the hot path; DB is source of truth |
+| Tie-breaking | Encode timestamp into score | Stable order for equal scores |
+
+### Interview Discussion Points
+
+1. **How to break ties deterministically?**
+   - Composite score: `score * 1e7 + (MAX_TS - submit_ts)` so earlier submitters rank higher at equal score
+   - Keep the integer within float53 precision limits
+
+2. **How to handle a player whose score should only increase?**
+   - `ZADD GT` updates only if the new score is greater — naturally idempotent under retries
+
+3. **Single ZSET vs sharded?**
+   - Single: exact ranks, simplest, fine to tens of millions
+   - Sharded: needed for throughput; top-N is easy, global rank needs scatter-gather
+
+### Failure Scenarios & Mitigation
+
+| Failure Mode | Impact | Detection | Mitigation |
+|--------------|--------|-----------|------------|
+| Redis node loss | Board unavailable / stale | Health checks | Replicas + AOF, rebuild from DB snapshot |
+| Lost score update | Wrong ranking | Update vs DB drift | Persist updates to DB; replay on rebuild |
+| Hot board (viral event) | Single-key bottleneck | Per-key QPS | Read replicas, cache top-N, shard |
+| Window rollover gap | Brief empty board | Rollover monitoring | Pre-create next window key before reset |
+| Clock skew (windows) | Update lands in wrong window | NTP monitoring | Use server time for window keys |
+
+### Monitoring & Observability
+
+**Key Metrics:**
+- **Update / read latency P99**: target < 10ms
+- **Score updates per second**: write load
+- **Top-N cache hit ratio**: read efficiency
+- **ZSET cardinality & memory**: capacity planning
+- **DB snapshot lag**: durability risk
+
+**Alerting:**
+- P99 latency exceeds 50ms
+- Redis memory exceeds 80%
+- Snapshot age exceeds the agreed RPO
+
+### Security Considerations
+
+- **Score validation**: never trust client-submitted scores; validate server-side against game state (anti-cheat)
+- **Rate limiting**: cap submissions per player to stop score-stuffing
+- **Audit**: log score changes for dispute/cheat investigation
+- **Privacy**: allow opting out of public boards; expose rank without leaking PII
+
+### Interview Deep-Dive Questions
+
+4. **How to show a player their rank among 100M without scanning?**
+   - Bucket histogram for approximate rank (sum higher buckets)
+   - Exact rank only for the top tier where it matters
+   - Cache the player's rank with a short TTL
+
+5. **How to implement "friends leaderboard"?**
+   - Pull the friend list, `ZSCORE` each friend (O(F) lookups), sort client-side
+   - Or maintain a small per-user ZSET of friends' scores, updated on change
+   - For large friend graphs, cache the computed friends board
+
+6. **How to handle seasonal resets while preserving history?**
+   - New ZSET key per season; archive the final standings to cold storage on close
+   - All-time board persists; seasonal boards expire
+   - Pre-create the next season key to avoid a rollover gap
+
+7. **How would you build a "trending" board (decaying scores)?**
+   - Score = engagement with time decay (e.g., add `weight * 2^(t/half_life)` and compare in a moving reference frame, like Hacker News / Reddit hot ranking)
+   - Periodically recompute, or use a monotonically increasing base so you never rewrite old scores
+   - Separate "hot" (decayed) from "top" (absolute) boards
+
+---
+
 ## Summary: Key Tradeoffs
 
 | System | Key Tradeoff |
@@ -4802,6 +5563,9 @@ Multiple scheduler instances run simultaneously. Only the leader creates DAG Run
 | Video Streaming | Quality vs bandwidth |
 | Distributed File Storage | Consistency vs throughput |
 | Task Scheduler | Exactly-once execution vs latency |
+| Proximity / Geo Service | Index precision vs query cost |
+| Payment System | Correctness/consistency vs availability |
+| Leaderboard / Ranking | Real-time accuracy vs scale |
 
 ---
 
