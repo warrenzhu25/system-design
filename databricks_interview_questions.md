@@ -365,6 +365,12 @@ def find_optimal_commute(grid, costs, times):
     return [-1, -1]
 ```
 
+**Cost model note:** the step cost charged when moving to a neighbor is the
+*current* cell's transport mode (`grid[node]`), i.e. you pay for the cell you are
+leaving. The start cell costs 0, and the destination cell's own mode is never
+charged. If you instead want to charge for the cell you enter, compute
+`step_time`/`step_cost` from `grid[nr][nc]` inside the neighbor loop.
+
 ---
 
 ## 6. Hit Counter With Variable Window Queries
@@ -435,6 +441,9 @@ class HitCounter:
 **Discussion:**
 - Cache recent `get_load` results for repeated windows
 - Use multi-level buckets for large time ranges with bounded memory
+- Window boundary: `get_load(seconds)` counts hits with `timestamp > current_time - seconds`,
+  i.e. the half-open window `(current_time - seconds, current_time]`. If you want an
+  inclusive last-`N`-seconds window, search for `timestamps[mid] < target` instead.
 
 ---
 
@@ -508,6 +517,13 @@ class IpFirewall:
 - Insert: `O(32)`
 - Query: `O(32)`
 
+**Note on precedence:** this uses *first-match-by-rule-order* — the lowest rule
+index along the matched path wins. So with `ALLOW 1.2.3.0/24` (index 0) then
+`DENY 1.2.3.4` (index 1), the IP `1.2.3.4` is **allowed**: the broader earlier
+rule wins. To deny a specific IP inside an allowed subnet, list the `DENY` first,
+or switch the precedence rule to *longest-prefix wins* (take the action of the
+deepest matched node instead of the lowest index).
+
 ---
 
 ## 8. Circuit Breaker Gateway
@@ -559,6 +575,7 @@ class Gateway:
             process_primary = False
             process_secondary = False
             fail_primary = True
+            fail_secondary = True
 
             if not self.primaryBreaker.is_open:
                 process_primary = True
@@ -582,6 +599,7 @@ class Gateway:
                     process_secondary = True
                     ok = self.secondaryBreaker.server.handle(r)
                     if ok:
+                        fail_secondary = False
                         self.secondaryBreaker.fail_count = 0
                     else:
                         self.secondaryBreaker.fail_count += 1
@@ -594,12 +612,13 @@ class Gateway:
                         self.secondaryBreaker.is_open = False
                         self.secondaryBreaker.skip_count = 0
 
-            if process_primary and process_secondary:
-                res.append("Primary -> Secondary")
-            elif process_primary:
+            # Label by what actually SUCCEEDED, not just what was attempted.
+            # A primary failure with no working fallback must be "Rejected",
+            # not "Primary" (which previously looked like a success).
+            if process_primary and not fail_primary:
                 res.append("Primary")
-            elif process_secondary:
-                res.append("Secondary")
+            elif process_secondary and not fail_secondary:
+                res.append("Primary -> Secondary" if process_primary else "Secondary")
             else:
                 res.append("Rejected")
 
@@ -654,6 +673,13 @@ class Solution:
 **Complexity:**
 - Time: `O(n + e)`
 - Space: `O(n + e)`
+
+**Note on the definition:** this finds *topological layers of size 1*, which is
+**not** the same as a graph dominator (a node every path must cross). Example:
+edges `0->1, 1->2, 0->3` report node `2` as a bottleneck, but the path `0->3`
+never passes through it. The single-node-layer heuristic is fine if that is the
+stated definition; for true must-pass-through nodes you need a dominator-tree
+algorithm.
 
 ---
 
@@ -859,7 +885,9 @@ class Solution:
             if log.startswith("RLE"):
                 info = log[4:-1]
                 number, count = info.split(",")
-                res += [number] * int(count)
+                # Cast number to int so RLE and BP decode to the same type
+                # (the original returned ints for BP but strings for RLE).
+                res += [int(number)] * int(count)
             elif log.startswith("BP"):
                 info = log[3:-1]
                 number_list = info.split(",")
@@ -869,7 +897,9 @@ class Solution:
 ```
 
 **Note:**
-The decode implementation mirrors the source file exactly, including its original string parsing behavior.
+The string parsing mirrors the source file. The one change from the original is
+casting the RLE `number` to `int`, so `decode` returns a consistent list of ints
+(the original returned ints for `BP` groups but strings for `RLE` runs).
 
 ---
 
@@ -974,6 +1004,11 @@ class TimeMap:
 **Complexity:**
 - `set`: `O(1)` amortized
 - `get`: `O(log n)` per key history
+
+**Assumption:** `set` is called with non-decreasing timestamps per key (the usual
+contract), so each key's list stays sorted and `get` can binary search. If writes
+can arrive out of order, insert with `bisect.insort` (making `set` `O(n)`), or
+sort lazily before the first `get`.
 
 ---
 
@@ -1803,6 +1838,7 @@ This avoids a coarse synchronized lock around the entire call path.
 ```java
 import java.time.Duration;
 import java.time.Instant;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
@@ -1816,6 +1852,7 @@ public class CircuitBreaker<T> {
     private final AtomicReference<State> state = new AtomicReference<>(State.CLOSED);
     private final AtomicInteger failureCount = new AtomicInteger(0);
     private final AtomicReference<Instant> lastFailureTime = new AtomicReference<>(null);
+    private final AtomicBoolean probeInFlight = new AtomicBoolean(false);
 
     private final int failureThreshold;
     private final Duration recoveryTimeout;
@@ -1826,28 +1863,57 @@ public class CircuitBreaker<T> {
     }
 
     public T call(Supplier<T> supplier) throws Exception {
-        Instant now = Instant.now();
         State current = state.get();
 
+        // OPEN: block until the recovery timeout elapses, then let exactly one
+        // caller flip the breaker to HALF_OPEN to probe the dependency.
         if (current == State.OPEN) {
             Instant lastFailure = lastFailureTime.get();
-            if (lastFailure != null
-                    && Duration.between(lastFailure, now).compareTo(recoveryTimeout) > 0) {
-                if (!state.compareAndSet(State.OPEN, State.HALF_OPEN)) {
-                    throw new RuntimeException("Circuit is OPEN. Request blocked.");
-                }
-            } else {
+            boolean timedOut = lastFailure != null
+                    && Duration.between(lastFailure, Instant.now()).compareTo(recoveryTimeout) > 0;
+            if (!timedOut) {
                 throw new RuntimeException("Circuit is OPEN. Request blocked.");
+            }
+            state.compareAndSet(State.OPEN, State.HALF_OPEN);  // one winner; others see HALF_OPEN
+            current = state.get();
+        }
+
+        // HALF_OPEN: admit only ONE probe at a time. Without this gate, every
+        // concurrent caller would slip through once the state flips to HALF_OPEN
+        // and flood the still-recovering dependency.
+        if (current == State.HALF_OPEN) {
+            if (!probeInFlight.compareAndSet(false, true)) {
+                throw new RuntimeException("Circuit is HALF_OPEN. Probe already in progress.");
+            }
+            return runProbe(supplier);
+        }
+
+        // CLOSED: normal path.
+        if (current == State.CLOSED) {
+            try {
+                T result = supplier.get();
+                onSuccess();
+                return result;
+            } catch (Exception e) {
+                onFailure();
+                throw e;
             }
         }
 
+        // State changed concurrently (e.g. a probe just reopened it): block.
+        throw new RuntimeException("Circuit is OPEN. Request blocked.");
+    }
+
+    private T runProbe(Supplier<T> supplier) throws Exception {
         try {
             T result = supplier.get();
-            onSuccess();
+            onSuccess();   // HALF_OPEN -> CLOSED
             return result;
         } catch (Exception e) {
-            onFailure();
+            onFailure();   // HALF_OPEN -> OPEN
             throw e;
+        } finally {
+            probeInFlight.set(false);  // release the single probe permit
         }
     }
 
@@ -2402,6 +2468,7 @@ class Customer:
         self.revenue = revenue
         self.total_revenue = revenue
         self.referrals = []
+        self.parent = None   # referrer id; None for a top-level customer
 ```
 
 ### Approach 1: Hash Map + Sort on Query
@@ -2646,9 +2713,11 @@ def insert(self, revenue: int, referrer_id: int = None) -> int:
     self.next_id += 1
 
     customer = Customer(customer_id, revenue)
+    customer.parent = referrer_id   # record the referrer so we can walk upward
     self.customers[customer_id] = customer
 
     if referrer_id is not None:
+        # Bubble this revenue up the entire referral chain
         current_id = referrer_id
         while current_id is not None:
             self.customers[current_id].total_revenue += revenue

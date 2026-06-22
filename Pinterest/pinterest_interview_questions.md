@@ -1324,6 +1324,8 @@ def findCheapestPrice(n: int, flights: list[list[int]], src: int, dst: int, k: i
     return prices[dst] if prices[dst] != float('inf') else -1
 ```
 
+> **Caveat:** this BFS keeps a single global `prices[]` and prunes with `new_cost < prices[neighbor]`. Pruning by a global best-cost (rather than best-cost *per stop count*) can occasionally block a valid fewer-stops path that a node already reached more cheaply with more stops. The level-by-level loop usually saves it, but the **Bellman-Ford temp-array version (Solution 2/4)** and the **stop-aware Dijkstra (Solution 3)** are the canonical, provably-correct choices — prefer those.
+
 **Solution 2: Bellman-Ford (K+1 Relaxations)**
 
 ```python
@@ -1722,7 +1724,7 @@ k = 3, t = 5
 Output: ["user1"]
 
 Explanation:
-- user1 has actions at timestamps [1, 2, 4, 5] within window [1, 5] -> 4 actions > 3
+- user1 has actions at timestamps [1, 2, 4, 5] within window [1, 6] (i.e. [ts, ts+t]) -> 4 actions > 3
 - user2 only has 1-2 actions in any 5-second window
 ```
 
@@ -1875,18 +1877,137 @@ class ViolationDetector:
 
 ### Design Pinterest Home Feed
 
-**Requirements:**
-- Show personalized pins to users
-- Support infinite scroll
-- Handle billions of pins
-- Real-time updates for new pins
+**Problem:** Design the Pinterest home feed — the personalized, infinitely-scrolling grid of pins each user sees.
 
-**Key Components:**
-1. **Pin Storage**: Distributed storage for pin metadata and images
-2. **Recommendation Engine**: ML-based pin ranking
-3. **Feed Generation**: Pre-computed vs real-time feed
-4. **Caching**: Multi-layer caching for hot pins
-5. **CDN**: Image delivery optimization
+**Requirements:**
+
+**Functional:**
+- Show a personalized, ranked grid of pins (not purely chronological)
+- Support infinite scroll with stable pagination
+- Surface fresh pins (newly created, trending) alongside evergreen recommendations
+- Avoid showing pins the user has already seen or dismissed
+- A "Following" view for pins from boards/users the person follows
+
+**Non-Functional:**
+- Feed load P99 < 300ms; first screen feels instant
+- 500M+ users, billions of pins; ~hundreds of K feed requests/sec at peak
+- Eventually consistent (a new pin appearing seconds late is fine)
+- Personalization quality is the product
+
+**Key insight — Pinterest is a *recommendation* feed, not a follow feed.** Unlike Twitter/Facebook, most of the home feed comes from *interest-based recommendation*, not a follow graph. So the dominant pattern is **candidate generation → ranking**, not classic fan-out. Fan-out matters mainly for the smaller "Following" surface.
+
+### Capacity Estimation
+
+```
+Users: 500M, DAU ~150M
+Feed requests: 150M DAU × ~10 sessions × ~5 page loads ≈ 7.5B/day ≈ 90K rps avg, ~250K peak
+Pins scored per request: ~1-2K candidates -> rank -> top ~25 returned
+Pin metadata: ~2 KB × tens of billions of pins -> tens of TB (sharded KV)
+Embeddings: pin embedding 256-512 dims × billions -> vector index in the hundreds of GB-TB
+```
+
+### High-Level Architecture
+
+```
++--------+    +-------------+    +----------------------+
+| Client | -> | API Gateway | -> |   Feed Service       |
++--------+    +-------------+    +----------+-----------+
+                                            |
+        +-----------------------------------+-----------------------------------+
+        |                     |                       |                         |
++-------v-------+   +---------v--------+    +---------v---------+      +---------v--------+
+| Candidate Gen |   |  Ranking Service |    |  Seen/Dedup Store |      |  Feed Cache      |
+| - your boards |   | (two-tower +     |    | (Bloom + recent   |      | (materialized    |
+| - interests   |   |  gradient-boost/ |    |  seen pins/user)  |      |  page per user)  |
+| - follow graph|   |  neural ranker)  |    +-------------------+      +------------------+
+| - trending    |   +---------+--------+
+| - candidate   |             |
+|   ANN (vector)|             v
++-------+-------+    +---------+--------+    +------------------+
+        |            |  Pin Metadata    |    |   CDN (images)   |
+        +----------->|  Store (KV)      |    +------------------+
+                     +------------------+
+```
+
+### Feed Generation: Candidate Gen + Ranking (vs Fan-out)
+
+| Surface | Approach | Why |
+|---------|----------|-----|
+| **Home (For You)** | Candidate generation + ML ranking, computed at request time (with cached candidate sets) | Interest-driven; the "interesting" pins aren't tied to who you follow |
+| **Following tab** | Fan-out-on-write into a per-user feed list for low-follow users; pull-on-read for accounts following many | Classic feed tradeoff (see §8 News Feed) |
+| **Trending / fresh injection** | Pull a small set of globally/again topically trending pins, blended in at ranking time | Freshness and discovery |
+
+```python
+def build_home_feed(user_id, cursor, limit=25):
+    profile = profile_service.get(user_id)           # interests, recent activity
+
+    # 1. Candidate generation (union of cheap retrievers, ~1-2K candidates)
+    candidates = set()
+    candidates |= board_based_candidates(user_id)            # pins similar to your boards
+    candidates |= interest_candidates(profile.interests)     # topic clusters
+    candidates |= ann_candidates(profile.embedding, top=500) # vector nearest-neighbors
+    candidates |= follow_graph_candidates(user_id)           # recent pins from follows
+    candidates |= trending_candidates(profile.locale)        # freshness/discovery
+
+    # 2. Filter already-seen / dismissed (Bloom filter is the cheap first pass)
+    candidates = [p for p in candidates if not seen_store.probably_seen(user_id, p)]
+
+    # 3. Heavy ML ranking (engagement + diversity + freshness)
+    ranked = ranking_service.rank(user_id, candidates, profile)
+
+    # 4. Diversity pass: avoid clustering same board/creator/topic
+    ranked = diversify(ranked)
+
+    # 5. Record what we're about to show (so next page dedups) and paginate by cursor
+    page = paginate(ranked, cursor, limit)
+    seen_store.add(user_id, [p.id for p in page])
+    return page
+```
+
+### Ranking Signals
+
+| Signal | Example |
+|--------|---------|
+| Engagement prediction | P(save), P(click), P(close-up), P(hide) from a multi-task model |
+| Personalization | Affinity between user embedding and pin embedding |
+| Freshness | Recency boost for new/trending pins |
+| Diversity | Penalize repeated creator/board/topic in one page |
+| Quality | Image quality, spam/low-quality demotion |
+
+### Infinite Scroll & Pagination
+
+- **Cursor-based**, not offset — the cursor encodes the ranked position + a feed-session id so new pins arriving mid-scroll don't shift or duplicate results.
+- Snapshot the ranked candidate set per feed session (cache it) so pages 2..N are cheap and consistent.
+
+### Caching & CDN
+
+- **Feed cache:** materialize the next 1–2 pages per active user (Redis) so scroll is instant; recompute on session start or after significant new activity.
+- **Pin metadata cache:** hot pins in Redis in front of the KV store.
+- **CDN:** images served from edge, with responsive sizes; the feed returns image URLs, not bytes.
+
+### Failure Scenarios & Mitigation
+
+| Failure Mode | Impact | Mitigation |
+|--------------|--------|------------|
+| Ranking service down | No personalization | Fall back to trending/topic feed (still useful) |
+| Candidate gen partial | Thinner feed | Union of independent retrievers degrades gracefully |
+| Seen-store unavailable | Repeats shown | Bloom filter is best-effort; accept some repeats |
+| Hot pin (viral) | Metadata hotspot | Local cache + replication for hot keys |
+| Embedding/index stale | Slightly worse recs | Acceptable; refresh embeddings on a schedule |
+
+### Monitoring & Observability
+
+- **Feed latency P50/P99**, candidates scored per request, ranking-model latency
+- **Engagement per impression** (save rate, click rate, hide rate) — the quality metric
+- **Repeat-pin rate** (seen-store effectiveness), **diversity score** per page
+- **Candidate-gen coverage** (% requests with enough candidates)
+
+### Interview Deep-Dive Questions
+
+1. **Why not fan-out-on-write like Twitter?** Pinterest's value is interest-based discovery; most relevant pins aren't from accounts you follow, so a precomputed follow-feed would miss the point. Candidate-gen + ranking is the right primitive; fan-out is reserved for the "Following" tab.
+2. **How do you keep scroll consistent as new pins arrive?** Snapshot the ranked set per feed session and paginate by cursor over that snapshot; inject "new pins" only on explicit refresh.
+3. **How do you avoid showing the same pin repeatedly?** Per-user seen-store (Bloom filter for the cheap probabilistic check + a bounded recent-seen set), updated as pages are served.
+4. **How do you cold-start a new user?** Onboarding interest picker → topic-based candidates; lean on trending/popular until enough interaction signal accrues.
 
 ### Design Pinterest Search Engine
 
@@ -2083,6 +2204,9 @@ entities = {
 
 **2. Conversation Manager**
 ```python
+from dataclasses import dataclass, field
+
+@dataclass
 class ConversationContext:
     user_id: str
     session_id: str
@@ -2140,9 +2264,12 @@ def generate_response(pins: list[Pin], context: ConversationContext) -> str:
 
     Generate a friendly response introducing these pins.
     Explain why they match the user's request.
+    Only reference pins from the list above by their id/title; do not invent pins.
     """
     return llm.generate(prompt)
 ```
+
+> **Grounding note:** the recommendations come from the retrieval/ranking engine, **not** the LLM — the LLM only *narrates* the already-chosen pins. Pass the concrete pin ids/titles and instruct the model to reference only those, so it can't hallucinate pins that don't exist. For production, also stream the response and add output guardrails.
 
 **Personalization Signals:**
 - Historical pin interactions (saves, clicks, time spent)
@@ -2172,11 +2299,108 @@ A/B Test New Models
 
 ### Design Pinterest Notifications
 
+**Problem:** Design the notification system that drives users back to Pinterest — push, email, and in-app — without spamming them.
+
 **Requirements:**
-- Push notifications (mobile)
-- Email notifications
-- In-app notifications
-- User preferences and throttling
+
+**Functional:**
+- Channels: mobile push (APNs/FCM), email, in-app inbox
+- Triggered notifications (someone saved your pin, new follower) and recommendation notifications ("ideas for you", boards you might like)
+- Per-user, per-channel, per-type preferences and unsubscribe
+- Aggregation/digest ("12 people saved your pin") and frequency throttling
+- Scheduled/batched sends respecting the user's timezone and quiet hours
+
+**Non-Functional:**
+- Millions of notifications/minute at peak; high deliverability
+- Eventually consistent; at-least-once delivery with dedup
+- Low cost (email/push are cheap, but volume is huge)
+- Notifications must be *useful* — over-notifying churns users
+
+### High-Level Architecture
+
+```
++-------------+    +------------------+    +------------------+
+| Event       | -> | Notification     | -> |  Kafka topic     |
+| sources     |    | Service (API)    |    |  per channel     |
+| (saves,     |    | - preference     |    +--------+---------+
+|  follows,   |    |   check          |             |
+|  rec engine)|    | - rate limit     |   +---------+---------+----------+
++-------------+    | - dedup          |   |         |                    |
+                   | - aggregation    | +-v---+  +--v---+           +-----v----+
+                   +------------------+ |Push |  |Email |           | In-app   |
+                                        |Worker| |Worker|           | Worker   |
+                                        +--+--+  +--+---+           +----+-----+
+                                           |        |                    |
+                                        APNs/FCM  SES/SendGrid     Inbox store (KV)
+```
+
+This is the §6 Notification System pattern, specialized for Pinterest. The interesting Pinterest-specific parts are **aggregation, send-time optimization, and fatigue control** — Pinterest sends a lot of "recommendation" notifications, so quality gating matters more than raw delivery.
+
+### Key Components
+
+**1. Notification Service (the gate)** — before anything is queued, apply, in order:
+1. **Preference check** — channel + type enabled? quiet hours? unsubscribed?
+2. **Frequency cap** — per-user-per-channel budget (e.g. ≤ N pushes/day); recommendation notifications are capped harder than transactional ones.
+3. **Dedup** — idempotency key per (user, event) so retries/duplicate events don't double-send.
+4. **Aggregation** — buffer similar events in a short window and collapse ("12 people saved *Autumn Recipes*").
+
+**2. Aggregation / digest**
+
+```python
+class NotificationAggregator:
+    """Collapse bursts of similar events into one notification."""
+    def add(self, user_id, event):
+        key = (user_id, event.type, event.target_id)  # e.g. (u, "save", pin_id)
+        self.buffer[key].append(event)
+        # Flush after a quiet window or when the buffer is large enough
+        if self.should_flush(key):
+            events = self.buffer.pop(key)
+            actor_count = len({e.actor_id for e in events})
+            self.enqueue(summarize(user_id, event.type, event.target_id, actor_count))
+```
+
+**3. Send-time optimization** — for non-urgent (recommendation) notifications, schedule for when the user is most likely to engage (per-user model of active hours), respecting timezone and quiet hours. Transactional notifications (new follower) send promptly.
+
+**4. Channel workers** — pull from the per-channel Kafka topic, render the payload, call the provider (APNs/FCM/SES), handle invalid tokens (deactivate) and transient failures (retry with backoff). In-app notifications write to a per-user inbox KV store read by the app.
+
+### Data Model (sketch)
+
+```sql
+notification_preferences(user_id PK, channel, type, enabled, quiet_hours, freq_cap)
+device_tokens(user_id, platform, token, is_active)        -- push targets
+notifications(id PK, user_id, type, channel, payload, status, created_at, sent_at)
+```
+
+### Fatigue Control (the Pinterest-specific crux)
+
+- **Frequency caps** per channel and per notification *class* (transactional vs recommendation).
+- **Engagement-based backoff** — if a user repeatedly ignores or dismisses a notification type, suppress or downrank it.
+- **Importance scoring** — only send a recommendation push if its predicted engagement clears a bar; otherwise leave it for the in-app inbox.
+- **Global send budget** per user per day across all channels.
+
+### Failure Scenarios & Mitigation
+
+| Failure Mode | Impact | Mitigation |
+|--------------|--------|------------|
+| Provider outage (APNs/FCM) | Push not delivered | Retry queue; fall back to email/in-app for important events |
+| Duplicate events | Double notifications | Idempotency key per (user, event) |
+| Invalid/expired tokens | Wasted sends, errors | Deactivate token on provider rejection; cleanup job |
+| Aggregation worker down | Notification storm | Cap per-user sends even if aggregation is unavailable |
+| Preference store down | Risk of spamming opted-out users | Fail *closed* for marketing/rec notifications (don't send if unsure) |
+
+### Monitoring & Observability
+
+- **Delivery rate by channel**, provider error/throttle rate
+- **Open/click/save rate** per notification type (usefulness), **unsubscribe rate** (fatigue)
+- **Send volume vs cap** per user, aggregation collapse ratio
+- **Queue depth** per channel
+
+### Interview Deep-Dive Questions
+
+1. **How do you prevent notification fatigue?** Per-channel + per-type frequency caps, engagement-based suppression, importance scoring so low-value recommendation pushes are downgraded to the in-app inbox, and a global daily budget per user.
+2. **How do you aggregate "12 people saved your pin"?** Buffer events keyed by (user, type, target) in a short window, collapse to one summary with an actor count, flush on a quiet timer or size threshold.
+3. **How do you pick send time?** Per-user active-hours model for non-urgent notifications, respecting timezone and quiet hours; transactional notifications send immediately.
+4. **At-least-once vs exactly-once?** At-least-once delivery with an idempotency key per (user, event) for dedup — exactly-once across external providers isn't achievable, so make the consumer idempotent instead.
 
 ---
 

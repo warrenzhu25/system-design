@@ -34,6 +34,16 @@ A comprehensive guide to frequently asked system design questions with detailed 
 15. [Payment System](#15-payment-system)
 16. [Leaderboard / Ranking](#16-leaderboard--ranking)
 
+### Platform Infrastructure
+17. [API Gateway](#17-api-gateway)
+18. [Distributed Logging / Observability Platform](#18-distributed-logging--observability-platform)
+
+### Common Product Systems
+19. [Ticket Booking / Seat Reservation](#19-ticket-booking--seat-reservation)
+20. [Ride Sharing / Driver Matching](#20-ride-sharing--driver-matching)
+21. [Collaborative Document Editing](#21-collaborative-document-editing)
+22. [Ad Click Aggregation / Real-Time Analytics](#22-ad-click-aggregation--real-time-analytics)
+
 ---
 
 ## 1. URL Shortener
@@ -86,6 +96,9 @@ Storage (5 years):
 ### URL Encoding Approaches
 
 **Option 1: Base62 Encoding**
+
+*How it works:* treat the numeric ID as a base-62 number. Repeatedly take `num % 62` as the next character and integer-divide `num` by 62, collecting digits least-significant-first, then reverse. 7 characters give 62⁷ ≈ 3.5 trillion unique codes.
+
 ```python
 CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
@@ -158,6 +171,11 @@ CREATE INDEX idx_urls_expires ON urls(expires_at) WHERE expires_at IS NOT NULL;
 | **DynamoDB** | Managed, auto-scaling | Vendor lock-in, cost at scale |
 
 ### Caching Strategy
+
+*How it works (cache-aside read):*
+1. Check Redis first — most redirects are repeat hits, so this is the hot path.
+2. On a miss, read from the database and write the result back to Redis with a TTL.
+3. If neither has it, the code doesn't exist → return 404.
 
 ```python
 class URLShortener:
@@ -353,6 +371,8 @@ def create_short_url(long_url: str, max_retries: int = 3) -> str:
 
 #### 1. Token Bucket
 
+*How it works:* a bucket holds up to `capacity` tokens and refills at `refill_rate` tokens/sec. Each request spends a token. `_refill()` adds tokens *lazily* from the time elapsed since the last call (no background timer), capped at capacity. A request is allowed only if a token is available — which lets short bursts through up to the bucket size.
+
 ```python
 class TokenBucket:
     def __init__(self, capacity: int, refill_rate: float):
@@ -380,6 +400,8 @@ class TokenBucket:
 
 #### 2. Sliding Window Log
 
+*How it works:* store the exact timestamp of every request. On each call, drop timestamps older than the window, then allow the request only if fewer than `max_requests` remain. Exact (no boundary error), but memory grows with request volume.
+
 ```python
 class SlidingWindowLog:
     def __init__(self, window_size: int, max_requests: int):
@@ -404,6 +426,8 @@ class SlidingWindowLog:
 **Cons:** Memory intensive for high-volume APIs
 
 #### 3. Sliding Window Counter
+
+*How it works:* instead of storing every timestamp, keep one counter per fixed window. Estimate the current rate as the current window's count plus a *weighted fraction* of the previous window's count (the weight is how far we are into the current window). O(1) memory and ~99% accurate.
 
 ```python
 class SlidingWindowCounter:
@@ -446,6 +470,8 @@ class SlidingWindowCounter:
 | Sliding Counter | O(1) | Approximate | Limited bursts | Medium |
 
 ### Distributed Rate Limiting
+
+*How it works:* across many gateways the check-and-increment must be atomic, so it runs as a single Redis Lua script: `INCR` the key, set its expiry on first use, and return 0 (deny) once the count passes the limit. One round trip, with no read-then-write race between gateways.
 
 ```python
 class DistributedRateLimiter:
@@ -698,6 +724,8 @@ Retry-After: 60
 
 ### Data Partitioning: Consistent Hashing
 
+*How it works:* map both nodes and keys onto a hash ring (0 … 2¹²⁸). Each node is placed at `virtual_nodes` points on the ring (so load spreads evenly and removing one node only reshuffles its slice). To find a key's node, hash the key and walk clockwise to the next node — `bisect_right` does that in O(log n), wrapping with `% len(ring)`.
+
 ```python
 import hashlib
 from bisect import bisect_right
@@ -738,6 +766,10 @@ class ConsistentHash:
 ```
 
 ### Eviction Policies
+
+*How it works:*
+- **LRU** uses an `OrderedDict` as an access-ordered list: on every `get`/`put`, `move_to_end` marks the key most-recently-used; when full, `popitem(last=False)` drops the oldest (front).
+- **LFU** tracks a frequency per key and a bucket of keys at each frequency. `get` promotes a key from bucket `f` to `f+1`; `min_freq` remembers the lowest non-empty bucket so eviction pops the least-frequently-used in O(1).
 
 ```python
 class LRUCache:
@@ -795,6 +827,11 @@ class LFUCache:
 | **TTL** | Time-sensitive data | Automatic cleanup | May evict hot data |
 
 ### Cache Invalidation Strategies
+
+*How it works — three ways to keep cache and DB in sync:*
+- **Write-through**: write cache and DB together (consistent, slower writes).
+- **Write-behind**: write cache now, queue the DB write (fast, eventually consistent).
+- **Cache-aside**: reads populate the cache on miss; writes *delete* the cached key (don't update it) so the next read reloads fresh — avoids serving a half-updated value.
 
 ```python
 class CacheInvalidation:
@@ -858,6 +895,8 @@ class ReplicatedCache:
 ```
 
 ### Hot Key Handling
+
+*How it works:* a single viral key can overwhelm one cache node. Track per-key access frequency; once a key crosses a "hot" threshold, cache it in a tiny short-TTL *local* (in-process) cache so most reads never hit the shared node. Trades a little staleness for removing the hotspot.
 
 ```python
 class HotKeyHandler:
@@ -1101,6 +1140,8 @@ class PartitionManager:
 
 ### Quorum-Based Consistency
 
+*How it works (N/W/R quorum):* data is replicated to `N` nodes. A write succeeds once `W` acknowledge; a read polls replicas and needs `R` responses, returning the newest version. Choosing `W + R > N` forces the read and write quorums to overlap on at least one node, so a read always sees the latest committed write.
+
 ```python
 class QuorumCoordinator:
     def __init__(self, n: int = 3, w: int = 2, r: int = 2):
@@ -1156,6 +1197,11 @@ class QuorumCoordinator:
 
 ### Write Path (LSM-Tree)
 
+*How it works (write-optimized storage):*
+1. A **write** goes to a write-ahead log (durability) then an in-memory sorted `memtable` — no random disk I/O.
+2. When the memtable fills, flush it to an immutable on-disk **SSTable** and clear the WAL.
+3. A **read** checks the memtable first, then SSTables newest-to-oldest (first hit wins). Background compaction later merges SSTables to keep read cost bounded.
+
 ```python
 class LSMTree:
     def __init__(self):
@@ -1197,6 +1243,8 @@ class LSMTree:
 
 ### SSTable with Bloom Filter
 
+*How it works:* an SSTable is sorted on disk with a sparse index for binary search. To avoid a disk read for keys that aren't there, each SSTable keeps a **Bloom filter**: `add` sets `k` hash-bit positions; `might_contain` returns False if *any* of those bits is 0 (definitely absent) and True otherwise (probably present — a small false-positive rate, never a false negative). A negative lookup skips the disk entirely.
+
 ```python
 class SSTable:
     def __init__(self, data: dict):
@@ -1236,6 +1284,8 @@ class BloomFilter:
 ```
 
 ### Conflict Resolution
+
+*How it works:* a vector clock maps each node to its event counter. `merge` takes the element-wise max. `compare` decides causal order: if one clock is ≤ the other on every node it's `BEFORE`/`AFTER`; equal everywhere is `EQUAL`; otherwise the two writes are `CONCURRENT` (a true conflict) and the `ConflictResolver` must pick a winner — last-write-wins, keep-both, or a CRDT merge.
 
 ```python
 class VectorClock:
@@ -1473,6 +1523,8 @@ class ConflictResolver:
 
 ### Message Storage
 
+*How it works:* each partition is an append-only log. `append` writes an entry at the current `offset`, records its position in an index, and bumps the offset — giving every message a monotonic id. `read` walks forward from a start offset, returning a batch bounded by `max_bytes`. Sequential append plus an offset index is what makes the log fast to write and cheap to replay.
+
 ```python
 class Partition:
     def __init__(self, partition_id: int):
@@ -1516,6 +1568,8 @@ class Partition:
 
 ### Consumer Groups
 
+*How it works:* a consumer group splits a topic's partitions across its members so each partition is consumed by exactly one member — parallelism without duplication. `rebalance` reassigns partitions round-robin when membership changes. Each partition's progress is a single committed `offset`, so a restarted consumer resumes exactly where it left off.
+
 ```python
 class ConsumerGroup:
     def __init__(self, group_id: str, topic: str):
@@ -1550,6 +1604,10 @@ class ConsumerGroup:
 ```
 
 ### Delivery Guarantees
+
+*How it works:*
+- The **producer** picks a partition by hashing the message key (same key → same partition → order preserved) or round-robin if keyless; `acks` controls durability (`0` fire-and-forget, `1` leader-only, `all` all in-sync replicas).
+- The **consumer** fetches from each assigned partition starting at its committed offset, then `commit`s. Committing *after* processing gives at-least-once; committing *before* gives at-most-once.
 
 ```python
 class Producer:
@@ -1607,6 +1665,8 @@ class Consumer:
 | **Exactly-once** | Idempotent producers + transactions | Higher latency, complexity |
 
 ### Replication
+
+*How it works:* the partition leader appends the message, then forwards it to followers. The write is acknowledged only once at least `min_insync_replicas` (the ISR set) have it — that's the durability guarantee. On leader failure, `elect_leader` promotes an in-sync replica; promoting a non-ISR follower ("unclean" election) trades durability for availability and can lose data.
 
 ```python
 class ReplicationManager:
@@ -1889,6 +1949,8 @@ CREATE TABLE notifications (
 
 ### Notification Service
 
+*How it works (the send gate):* before queuing, run three cheap checks — (1) user **preferences** (channel enabled, quiet hours), (2) **rate limit** per user, (3) **dedup**. Only if all pass is the notification handed to Kafka, keyed by user id, for async per-channel delivery. Filtering up front keeps the workers doing only real sends.
+
 ```python
 class NotificationService:
     def __init__(self):
@@ -1933,6 +1995,8 @@ class NotificationService:
 ```
 
 ### Push Notification Worker
+
+*How it works:* look up the user's device tokens and send to the right provider per platform (APNs for iOS, FCM for Android). Two failure paths matter: an `InvalidTokenError` means the token is dead → deactivate it (token hygiene), while a transient `ProviderError` is retried with backoff. The payload is shaped to each provider's schema.
 
 ```python
 class PushWorker:
@@ -1985,6 +2049,8 @@ class PushWorker:
 ```
 
 ### Priority and Batching
+
+*How it works:* urgent notifications send immediately; everything else accumulates per channel and flushes when the batch fills (or on a timer). Batching amortizes provider API calls for channels that support it (email), while channels that don't (SMS) still loop one at a time. Trades a little latency for much higher throughput.
 
 ```python
 class NotificationBatcher:
@@ -2249,6 +2315,8 @@ class DeliveryTracker:
 
 ### Connection Management
 
+*How it works (connection routing):* each server keeps a local `user_id → websocket` map and registers `user_id → server_id` in Redis so any server can find where a user is connected. To send: if the recipient is on *this* server, write to their socket directly; otherwise publish to the recipient's Redis channel, which their server is subscribed to. This keeps the chat servers stateless and horizontally scalable.
+
 ```python
 class ChatServer:
     def __init__(self):
@@ -2283,6 +2351,8 @@ class ChatServer:
 ```
 
 ### Message Flow
+
+*How it works (send path):* assign a sortable id (Snowflake) and persist *first* so history survives a crash, then fan out to participants. For each recipient, `deliver_message` checks Redis for an active connection: online → publish for real-time delivery; offline → enqueue a push notification. The sender gets an ack so the UI can show "sent".
 
 ```python
 class MessageService:
@@ -2369,6 +2439,8 @@ CREATE TABLE user_chats (
 
 ### Read Receipts
 
+*How it works:* instead of a read flag per message, store one **read pointer** per user per chat — the id of the last message they've read. Marking read updates that pointer and notifies the other participants. "Who has read message X?" then becomes "whose pointer ≥ X?" — O(participants) instead of O(messages).
+
 ```python
 class ReadReceiptService:
     async def mark_read(self, user_id: str, chat_id: str, message_id: str):
@@ -2399,6 +2471,8 @@ class ReadReceiptService:
 ```
 
 ### Presence Service
+
+*How it works:* presence is a Redis key per user with a short TTL (~2× the heartbeat interval). `set_online` writes it and the client refreshes it with periodic `heartbeat`s; if the client dies, the key simply *expires* → offline, with no explicit cleanup. `set_offline` also records `last_seen`. Reads are pipelined to fetch many users' status in one round trip.
 
 ```python
 class PresenceService:
@@ -2611,6 +2685,8 @@ class PresenceService:
 
 #### 1. Pull Model (Fan-out on Read)
 
+*How it works:* store nothing per-follower. At read time, fetch who you follow, pull each one's recent posts, merge, and sort by time. Cheap writes, but every read does O(following) work — slow for users who follow many accounts.
+
 ```python
 class PullFeedService:
     def get_feed(self, user_id: str, limit: int = 20) -> list:
@@ -2632,6 +2708,8 @@ class PullFeedService:
 **Cons:** Slow for users following many accounts, high read latency
 
 #### 2. Push Model (Fan-out on Write)
+
+*How it works:* when a user posts, immediately push the post id into every follower's precomputed feed list (capped to recent N). Reads become a trivial lookup. Fast reads, but a single celebrity post triggers millions of writes.
 
 ```python
 class PushFeedService:
@@ -2659,6 +2737,8 @@ class PushFeedService:
 **Cons:** Expensive for celebrities (millions of followers), storage heavy
 
 #### 3. Hybrid Model
+
+*How it works:* combine both — push for normal users (fast reads), but for celebrities (followers above a threshold) *skip* fan-out, store their posts separately, and pull them at read time, merging with the precomputed feed. Avoids the celebrity fan-out storm while keeping most reads fast.
 
 ```python
 class HybridFeedService:
@@ -2722,6 +2802,8 @@ class HybridFeedService:
 ```
 
 ### Ranking Algorithm
+
+*How it works:* score each candidate post by a weighted blend of signals — recency (time decay), engagement (likes/comments/shares), author affinity, and a media boost — then sort by score. Tuning the weights (or learning them) trades chronological purity for relevance.
 
 ```python
 class FeedRanker:
@@ -2946,6 +3028,8 @@ class FeedRanker:
 
 ### Trie Data Structure
 
+*How it works:* a trie stores characters along edges, and each node caches the top-N suggestions for the prefix ending there. `insert` walks the word's characters and updates each prefix node's top-N (precomputing popular completions). `search` then walks the typed prefix and returns that node's cached suggestions in O(prefix length).
+
 ```python
 class TrieNode:
     def __init__(self):
@@ -2989,6 +3073,8 @@ class AutocompleteTrie:
 
 ### Redis Implementation
 
+*How it works:* instead of an in-memory trie, keep one Redis **sorted set per prefix**, scored by popularity. `index` adds the term to every one of its prefixes' sorted sets (trimming each to top-N); `search` is a single `ZREVRANGE` on the prefix key. Trades write amplification (one term touches all its prefixes) for O(1) lookups and easy sharding.
+
 ```python
 class RedisAutocomplete:
     def __init__(self, redis_client):
@@ -3027,6 +3113,8 @@ class RedisAutocomplete:
 ```
 
 ### Handling Scale
+
+*How it works:* two levers — **shard** prefix keys across Redis nodes by leading character(s) so load spreads, and keep a small in-process **hot cache** of short, frequently typed prefixes (most queries are 1–3 chars) so the common case never leaves the box.
 
 ```python
 class ShardedAutocomplete:
@@ -3068,6 +3156,8 @@ class TieredAutocomplete:
 
 ### Real-Time Trend Updates
 
+*How it works:* count searches into per-minute buckets, each with a TTL. "Trending now" unions the last hour of buckets and takes the top scorers — so popularity is measured over a sliding recent window rather than all-time.
+
 ```python
 class TrendingAutocomplete:
     def __init__(self):
@@ -3098,6 +3188,8 @@ class TrendingAutocomplete:
 ```
 
 ### Fuzzy Matching
+
+*How it works (tiered match):* try an exact prefix match first; if there aren't enough results, fall back to edit-distance candidates (typos), then phonetic matches (sound-alikes), dedup, and return the top-N. The cheap exact path runs first; the expensive fuzzy paths run only when needed.
 
 ```python
 class FuzzyAutocomplete:
@@ -3336,6 +3428,8 @@ class FuzzyAutocomplete:
 
 ### URL Frontier
 
+*How it works (politeness queue):* keep one sub-queue per host plus a global priority queue ordered by each host's next-allowed crawl time. `get_next_url` pops the host that's ready, waits if its `crawl_delay` hasn't elapsed, takes one URL, then re-queues the host (a `waiting_hosts` set prevents enqueueing a host twice). This enforces per-host rate limits while still crawling many hosts in parallel.
+
 ```python
 class URLFrontier:
     def __init__(self, num_queues: int = 1000):
@@ -3384,7 +3478,100 @@ class URLFrontier:
                 return url
 ```
 
+#### Frontier Queue Design at Scale
+
+The version above runs in one process and conflates two concerns. A production frontier (the classic **Mercator** design) separates **priority** from **politeness** using two tiers of queues:
+
+```
+                 incoming URLs
+                      |
+              +-------v--------+
+              |  Prioritizer   |  score 1..P (domain authority, freshness, depth)
+              +-------+--------+
+        +-------------+-------------+        FRONT QUEUES (one per priority level)
+   +----v---+    +----v---+    +----v---+
+   | F-high |    | F-med  |    | F-low  |
+   +----+---+    +----+---+    +----+---+
+        +-------------+-------------+
+              +-------v--------+
+              | Front->Back    |  biased pull: higher-priority fronts drained more
+              | router         |
+              +-------+--------+
+        +-------------+-------------+        BACK QUEUES (one per active host)
+   +----v---+    +----v---+    +----v---+
+   | host A |    | host B |    | host C |    each back queue holds ONE host's URLs
+   +----+---+    +----+---+    +----+---+
+        +-------------+-------------+
+              +-------v--------+
+              | Back-queue     |  min-heap keyed by each host's next-fetch time
+              | heap (politeness)
+              +-------+--------+
+                  worker pops the earliest-ready host
+```
+
+- **Front queues (priority):** one FIFO per priority level. The prioritizer scores each URL (domain authority, freshness, crawl depth, sitemap signals) and routes it to a front queue; selection from the fronts is *biased* so higher-priority fronts drain more often.
+- **Back queues (politeness):** one queue per *active host*, with the invariant that a host lives in exactly one back queue (a `host → back_queue` table enforces it). This serializes each host without any global lock.
+- **Back-queue heap:** a min-heap of `(next_fetch_time, back_queue_id)`. A worker pops the earliest-ready host, fetches one URL, then re-inserts the host at `now + crawl_delay` (delay from robots.txt `Crawl-delay`, else a default). When a back queue empties it is refilled from a front queue and re-mapped to a new host.
+
+```python
+import heapq, time
+from collections import deque, defaultdict
+
+class MercatorFrontier:
+    def __init__(self, num_priorities=3, num_back_queues=10000):
+        self.front_queues = [deque() for _ in range(num_priorities)]  # high..low
+        self.back_queues = defaultdict(deque)   # back_queue_id -> URLs (single host)
+        self.host_to_bq = {}                    # host -> back_queue_id (1:1 invariant)
+        self.bq_heap = []                       # (next_fetch_time, back_queue_id)
+        self.num_back_queues = num_back_queues
+
+    def add_url(self, url, priority, host):
+        self.front_queues[priority].append((url, host))
+
+    def _refill_back_queue(self, bq_id):
+        # Pull from the highest-priority non-empty front queue
+        for fq in self.front_queues:            # high -> low priority
+            if fq:
+                url, host = fq.popleft()
+                self.back_queues[bq_id].append(url)
+                self.host_to_bq[host] = bq_id
+                heapq.heappush(self.bq_heap, (time.time(), bq_id))
+                return True
+        return False
+
+    def get_next_url(self):
+        if not self.bq_heap:                    # bootstrap: map back queues to hosts
+            for bq_id in range(self.num_back_queues):
+                if not self._refill_back_queue(bq_id):
+                    break
+
+        next_time, bq_id = heapq.heappop(self.bq_heap)
+        if next_time > time.time():
+            time.sleep(next_time - time.time())  # politeness wait
+
+        url = self.back_queues[bq_id].popleft()
+        if self.back_queues[bq_id]:              # same host has more URLs
+            heapq.heappush(self.bq_heap, (time.time() + self._delay(bq_id), bq_id))
+        else:                                    # host drained -> remap to a new host
+            self._refill_back_queue(bq_id)
+        return url
+```
+
+**Making it distributed and durable** — a real frontier holds billions of URLs and must survive restarts, so it can't be in-memory `deque`s:
+
+| Concern | Approach |
+|---------|----------|
+| Capacity | Spill back queues to disk / a durable store; keep only queue *heads* in memory |
+| Distribution | Shard the frontier by `hash(host)` so each crawler node owns a disjoint host set |
+| Persistence / recovery | Back queues with a durable log (a Kafka topic per shard) or a DB table; checkpoint offsets so a crashed node resumes without losing or re-crawling URLs |
+| Dedup at enqueue | Check the seen-set (Bloom filter + exact store) *before* enqueue so the frontier never holds duplicates |
+| Backpressure | Cap per-host and total queue depth; defer or drop low-priority URLs when full |
+
+> **Why shard by host, not by URL?** Politeness is per-host. If two nodes could hold URLs for the same host, they'd have to coordinate that host's crawl-delay. Hashing by host keeps each host — and its rate limit — entirely on one node, so no cross-node coordination is needed.
+
 ### Crawler Worker
+
+*How it works (fetch loop):* pull the next URL, skip it if the Bloom filter says it's already seen, check robots.txt, fetch it (with a DNS cache and timeout), store the content, extract links, and push each new link back into the frontier with a computed priority. The Bloom filter keeps the "seen" set tiny even at billions of URLs.
 
 ```python
 class CrawlerWorker:
@@ -3440,6 +3627,8 @@ class CrawlerWorker:
 
 ### Duplicate Detection
 
+*How it works:* two kinds of dedup. **URL** dedup uses a Bloom filter over normalized URLs (memory-cheap, rare false positives). **Content** dedup uses **SimHash**: a 64-bit fingerprint where near-identical pages produce near-identical hashes, so a small Hamming distance (< 3 bits) flags a near-duplicate even when the bytes differ slightly (ads, timestamps).
+
 ```python
 class DuplicateDetector:
     def __init__(self):
@@ -3491,6 +3680,8 @@ class DuplicateDetector:
 
 ### Robots.txt Parser
 
+*How it works:* fetch and cache each host's `robots.txt` (24h TTL) so it's parsed once, not per URL. A lookup checks the cached rules for the path and user-agent; if the file can't be fetched, default to allowed. It also exposes the host's `Crawl-delay` for the frontier.
+
 ```python
 class RobotsCache:
     def __init__(self):
@@ -3521,6 +3712,8 @@ class RobotsCache:
 ```
 
 ### Priority Calculation
+
+*How it works:* give each URL a crawl priority from signals — domain authority, shallower paths first, content-type hints (HTML > PDF), and parent-page freshness — so important pages are fetched before low-value ones. The frontier orders its work by this score.
 
 ```python
 class PriorityCalculator:
@@ -3746,6 +3939,8 @@ class PriorityCalculator:
 
 ### Video Processing Pipeline
 
+*How it works (transcode pipeline):* validate the upload, transcode it in parallel into several resolution/bitrate profiles (1080p…360p), segment each rendition into short chunks for adaptive streaming (HLS/DASH), generate thumbnails, and mark the video ready. Producing multiple renditions up front is what lets the player switch quality on the fly.
+
 ```python
 class VideoProcessor:
     PROFILES = [
@@ -3808,6 +4003,8 @@ class VideoProcessor:
 
 ### Adaptive Bitrate Streaming
 
+*How it works (adaptive bitrate):* the server publishes a master playlist listing each rendition's bandwidth. The player measures its throughput and buffer health and picks the highest rendition it can sustain, dropping down when bandwidth falls or the buffer runs low — maximizing quality without stalling.
+
 ```python
 # HLS Master Playlist (m3u8)
 """
@@ -3857,6 +4054,8 @@ class AdaptivePlayer:
 
 ### CDN and Caching
 
+*How it works:* serve video segments from the edge location nearest the viewer, behind signed, expiring URLs. Predicted-popular videos are pre-warmed to edges (all edges for very popular, key edges otherwise) so the first viewers don't pay an origin round trip.
+
 ```python
 class CDNManager:
     def __init__(self):
@@ -3883,6 +4082,8 @@ class CDNManager:
 ```
 
 ### View Count System
+
+*How it works:* dedup repeat views per user with a short-TTL key, increment a fast Redis counter (the source of truth for display), and flush accumulated views to the database in batches — so a viral video doesn't generate one DB write per view. (The flush claims the delta atomically so concurrent increments aren't skipped.)
 
 ```python
 class ViewCounter:
@@ -4110,6 +4311,8 @@ class ViewCounter:
 
 ### Chunk Management
 
+*How it works:* a single **master** holds all metadata — the file→chunk mapping and chunk→servers locations — while chunk servers hold the actual data. `allocate_chunk` picks N rack-aware servers for a new 64MB chunk and records the placement. Metadata on one node stays consistent; keeping data off it keeps the master lightweight.
+
 ```python
 class MasterNode:
     def __init__(self):
@@ -4180,6 +4383,8 @@ class MasterNode:
 
 ### Write Path
 
+*How it works:* split the file into fixed-size chunks; for each, ask the master where to write, then **pipeline** the bytes to the primary and its replicas. The primary commits and drives commit on the replicas, so a chunk is durable on N nodes before the next chunk begins.
+
 ```python
 class ChunkClient:
     def __init__(self, master: MasterNode):
@@ -4240,6 +4445,8 @@ class ChunkServer:
 
 ### Read Path
 
+*How it works:* ask the master for the chunk list and each chunk's replica locations, then read each chunk from a replica, verifying its checksum and falling over to the next replica if one is corrupt or down. The master is consulted for metadata only — bulk data flows client↔chunk-server directly.
+
 ```python
 class ChunkClient:
     async def read_file(self, path: str) -> bytes:
@@ -4271,6 +4478,8 @@ class ChunkClient:
 ```
 
 ### Heartbeat and Lease
+
+*How it works:* chunk servers send periodic heartbeats reporting their chunks and health. The master tracks last-seen time; if a server misses its lease window, the master declares it dead and re-replicates its chunks elsewhere to restore the replication factor.
 
 ```python
 class ChunkServer:
@@ -4312,6 +4521,8 @@ class MasterNode:
 ```
 
 ### Replication and Recovery
+
+*How it works:* a background job keeps every chunk at the target replication factor — when a replica is lost it copies the chunk from a surviving replica to a new (different-rack) server. A separate balancer moves chunks off overloaded servers to even out disk usage.
 
 ```python
 class ReplicationManager:
@@ -4869,6 +5080,8 @@ range/prefix scan returns a small candidate set.
 
 #### 1. Geohash (prefix-based)
 
+*How it works:* `geohash.encode` turns (lat, lng) into a base-32 string where a shared prefix means physical proximity. Store each entity in a Redis set keyed by its cell. A radius search queries the center cell **plus its 8 neighbors** (so entities just over a cell edge aren't missed), then filters candidates by exact haversine distance. Longer geohash = smaller cells = fewer candidates to filter.
+
 ```python
 import geohash  # python-geohash
 
@@ -4912,6 +5125,8 @@ radius. For variable radius, query at the precision whose cell ≳ the radius.
 
 #### 2. Redis Native Geo (sorted set + geohash score)
 
+*How it works:* let Redis do it — `GEOADD` stores members with a 52-bit geohash as the sorted-set score, and `GEOSEARCH` returns members within a radius already sorted by distance. Least code; fine on a single cluster.
+
 ```python
 class RedisGeoIndex:
     """Redis GEO* commands store a 52-bit geohash as the sorted-set score."""
@@ -4928,6 +5143,8 @@ class RedisGeoIndex:
 ```
 
 #### 3. Quadtree (adaptive density)
+
+*How it works:* recursively divide space into four quadrants, splitting a node only when it exceeds capacity — so dense areas (cities) subdivide deeply while sparse areas stay shallow. A range query prunes whole quadrants that don't intersect the search box. Adapts to skewed density better than uniform geohash cells.
 
 ```python
 class QuadTreeNode:
@@ -4971,6 +5188,8 @@ class QuadTreeNode:
 | **S2 / H3** | O(1) | Cell cover + filter | Hierarchical, uniform-ish | Google/Uber-scale, multi-resolution |
 
 ### Handling Moving Entities (Drivers)
+
+*How it works (write optimization):* drivers send location updates several times a second, but re-indexing every update would be millions of set ops/sec. So always refresh the precise location (a cheap `SET`), but only move the driver between cells in the spatial index when their **cell actually changes**.
 
 ```python
 class DriverLocationService:
@@ -5118,6 +5337,8 @@ class DriverLocationService:
 
 ### Idempotency (the core requirement)
 
+*How it works:* the client sends a unique idempotency key. The server atomically *claims* it (`INSERT ... ON CONFLICT DO NOTHING`); the first caller performs the charge and stores the result, while any retry with the same key replays the stored result instead of charging again. A reused key with a *different* body is rejected as a client bug.
+
 A network retry must never charge twice. The client sends a unique
 **idempotency key**; the server records the key with the first result and
 replays that result for any retry.
@@ -5158,6 +5379,8 @@ class IdempotentPaymentHandler:
 ```
 
 ### Double-Entry Ledger
+
+*How it works:* every transfer is a matched debit and credit that sum to zero, written in one serializable DB transaction after a `SELECT FOR UPDATE` funds check. Balances are derived from the immutable, append-only ledger, so the books always reconcile and any nonzero per-transaction sum signals corruption.
 
 Money is never created or destroyed: every transaction is balanced debits and
 credits that sum to zero. Balances are *derived* from immutable ledger entries.
@@ -5207,6 +5430,8 @@ CREATE TABLE idempotency_keys (
 ```
 
 ### Transactional Outbox (reliable provider calls + events)
+
+*How it works:* calling an external provider *inside* a DB transaction risks "committed locally but the call was lost." Instead, write the state change and an **outbox** row in the same transaction; after commit, a separate worker reads the outbox and calls the provider (using the txn id as the provider's idempotency key) — giving reliable, effectively-once external effects.
 
 Calling an external provider inside the DB transaction risks "DB committed but
 provider call lost" (or vice-versa). Write the intent to an **outbox** in the
@@ -5365,6 +5590,8 @@ set) is needed.
 
 ### Core: Redis Sorted Set
 
+*How it works:* a sorted set gives O(log n) score updates, O(log n) rank lookups, and O(log n + N) range scans — exactly the leaderboard operations. `submit_score` keeps the best score (`ZADD GT`); `top_n` is `ZREVRANGE`; a player's rank is `ZREVRANK`; "players around me" is a range centered on that rank.
+
 A Redis sorted set (`ZSET`) is a skip list + hash map: O(log n) inserts, O(log n)
 rank lookups, O(log n + N) range scans — exactly the leaderboard operations.
 
@@ -5397,6 +5624,8 @@ class Leaderboard:
 
 ### Time-Windowed Boards
 
+*How it works:* keep a separate sorted set per time window, with the period in the key (e.g. `lb:daily:2026-06-22`). Writes update every relevant window, and a TTL auto-expires old windows so they reset cleanly without accumulating memory.
+
 ```python
 class TimeWindowedLeaderboard:
     """Separate ZSET per window; key embeds the period."""
@@ -5418,6 +5647,8 @@ class TimeWindowedLeaderboard:
 ```
 
 ### Scaling Beyond One Node
+
+*How it works:* shard players across N sorted sets to spread load. Top-N is easy — merge each shard's top-N. **Global rank** is the hard part: sum, across all shards, the count of players scoring higher than you (`ZCOUNT` above your score) and add one.
 
 A single ZSET of 50M entries (~a few GB) fits in memory, but write/read throughput
 and memory eventually force sharding. Exact global rank across shards is the hard
@@ -5546,6 +5777,921 @@ rank is the sum of counts in higher buckets (O(buckets), not O(n)).
 
 ---
 
+## 17. API Gateway
+
+**Problem:** Design an API gateway that fronts many backend services and handles routing, authentication, rate limiting, and observability.
+
+### Requirements
+
+**Functional:**
+- Route requests to the correct backend service
+- Authenticate users and authorize service access
+- Enforce rate limits and quotas
+- Terminate TLS and normalize request/response formats
+- Support service discovery, canary routing, and versioned APIs
+
+**Non-Functional:**
+- Low overhead (< 10ms gateway processing at P99)
+- High availability across regions
+- Safe configuration rollout
+- Strong observability for every request path
+
+### High-Level Architecture
+
+```
++--------+     +-------------+     +----------------+
+| Client | --> | Edge / CDN  | --> | API Gateway    |
++--------+     +-------------+     +-------+--------+
+                                      |  |  |
+                   +------------------+  |  +------------------+
+                   |                     |                     |
+             +-----v------+        +-----v------+        +-----v------+
+             | Auth       |        | Service    |        | Rate Limit |
+             | Provider   |        | Discovery  |        | Store      |
+             +------------+        +------------+        +------------+
+                                      |
+                         +------------+------------+
+                         |                         |
+                   +-----v------+            +-----v------+
+                   | Service A  |            | Service B  |
+                   +------------+            +------------+
+```
+
+### Request Flow
+
+*How it works (per-request pipeline):* match the route → verify identity (JWT) → authorize the route's scope → check the rate limit (keyed by account + route) → pick a healthy upstream (least-loaded) → forward with a timeout → record metrics. Each stage can short-circuit (e.g. 429 on rate limit), and the worker stays stateless so it scales horizontally.
+
+```python
+class Gateway:
+    def handle(self, request):
+        route = self.router.match(request.method, request.path)
+        identity = self.auth.verify(request.headers.get("Authorization"))
+        self.authz.check(identity, route.required_scope)
+
+        key = f"rl:{identity.account_id}:{route.name}"
+        if not self.rate_limiter.allow(key, route.limit):
+            return Response(429, {"error": "rate_limited"})
+
+        upstream = self.discovery.pick(route.service, policy="least_loaded")
+        response = self.proxy.forward(request, upstream, timeout=route.timeout_ms)
+        self.metrics.record(route.name, response.status_code, response.latency_ms)
+        return response
+```
+
+### Routing and Configuration
+
+| Concern | Design Choice | Notes |
+|---------|---------------|-------|
+| Route matching | Prefix + method + host | Fast lookup, supports public/private APIs |
+| Service discovery | Control-plane pushed endpoints | Avoid registry lookup on every request |
+| Config rollout | Versioned config with staged deployment | Prevent global bad config blast radius |
+| Load balancing | EWMA / least-loaded | Better tail latency than round-robin |
+| Retries | Only safe idempotent requests | Avoid duplicate writes |
+
+### Key Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Data plane | Stateless gateway workers | Easy horizontal scaling |
+| Control plane | Central config service | Auditable route and policy changes |
+| Auth | JWT validation + introspection fallback | Fast common path, revocation support |
+| Rate limit | Redis / local token bucket hybrid | Low latency with bounded inaccuracy |
+| Protocols | HTTP/2 or gRPC upstream | Multiplexing, lower connection overhead |
+
+### Interview Discussion Points
+
+1. **Gateway vs load balancer?**
+   - Load balancer distributes traffic; gateway applies application-level policy
+   - Gateway understands routes, users, auth scopes, and request metadata
+
+2. **How to avoid the gateway becoming a bottleneck?**
+   - Keep workers stateless
+   - Cache auth keys and route configs locally
+   - Use streaming proxying instead of buffering large bodies
+
+3. **How to roll out a breaking backend change?**
+   - Add versioned routes
+   - Canary a small traffic percentage
+   - Keep old route until clients migrate
+
+### Failure Scenarios & Mitigation
+
+| Failure Mode | Impact | Detection | Mitigation |
+|--------------|--------|-----------|------------|
+| Bad gateway config | Routes fail globally | Synthetic checks | Staged rollout, automatic rollback |
+| Auth provider down | Login/auth fails | Dependency health | Validate cached JWT keys; fail closed for sensitive APIs |
+| Rate limit store down | Quotas unavailable | Redis errors | Local fallback buckets with conservative limits |
+| Upstream overload | High latency/errors | P99 and 5xx per route | Circuit breakers, load shedding, retries for idempotent calls |
+
+### Monitoring & Observability
+
+**Key Metrics:**
+- Requests, error rate, and latency by route/service/status
+- Auth failure rate and rate-limit decisions
+- Upstream connection pool saturation
+- Config version deployed per gateway instance
+
+**Alerting:**
+- 5xx spike for a route
+- Gateway P99 overhead exceeds target
+- Config version skew across instances
+- Circuit breaker open for a critical upstream
+
+### Security Considerations
+
+- Terminate TLS with modern cipher policy; use mTLS to sensitive upstreams
+- Validate JWT issuer, audience, expiry, and signature
+- Strip spoofable headers before forwarding identity to services
+- Enforce request body limits and schema validation for public APIs
+- Log security decisions without leaking tokens or secrets
+
+### Interview Deep-Dive Questions
+
+4. **How do you support multi-region gateways?**
+   - Anycast or DNS-based routing to nearest healthy region
+   - Region-local gateway workers and replicated config
+   - Avoid cross-region auth or rate-limit dependency on the hot path
+
+5. **How would you implement per-tenant quotas?**
+   - Rate-limit key includes tenant and route
+   - Config service stores plan limits
+   - Emit quota usage events for billing and abuse detection
+
+6. **How do you debug a single failed request?**
+   - Generate/request a correlation ID at the gateway
+   - Propagate trace headers upstream
+   - Join gateway access log, upstream spans, and auth decision log
+
+---
+
+## 18. Distributed Logging / Observability Platform
+
+**Problem:** Design a platform that collects logs, metrics, and traces from thousands of services and makes them searchable in near real-time.
+
+### Requirements
+
+**Functional:**
+- Ingest application logs, infrastructure logs, metrics, and traces
+- Search logs by service, host, trace ID, time range, and free text
+- Support dashboards, alerts, and retention policies
+- Handle high-cardinality labels carefully
+
+**Non-Functional:**
+- Ingest millions of events per second
+- Query recent data within seconds
+- Durable ingestion with bounded data loss
+- Cost-efficient retention and tiered storage
+
+### High-Level Architecture
+
+```
++----------+     +--------+     +-----------+     +-----------+
+| Services | --> | Agent  | --> | Ingest LB | --> | Kafka     |
++----------+     +--------+     +-----------+     +-----+-----+
+                                                     |
+                         +---------------------------+-------------------+
+                         |                           |                   |
+                   +-----v------+              +-----v------+      +-----v------+
+                   | Parser     |              | Metrics    |      | Trace      |
+                   | Pipeline   |              | Aggregator |      | Pipeline   |
+                   +-----+------+              +-----+------+      +-----+------+
+                         |                           |                   |
+                   +-----v------+              +-----v------+      +-----v------+
+                   | Search     |              | TSDB       |      | Trace DB   |
+                   | Index      |              |            |      |            |
+                   +------------+              +------------+      +------------+
+```
+
+### Ingestion Pipeline
+
+*How it works:* normalize each record (parse, canonical service name, bounded timestamp, extracted trace id), drop it if sampling says so, then publish to a per-service Kafka topic keyed by trace id or host. Kafka decouples ingestion from indexing and absorbs bursts; sampling and keying control cost and keep one request's logs together.
+
+```python
+class LogPipeline:
+    def process(self, record):
+        record = self.parse_json_or_text(record)
+        record["service"] = self.normalize_service(record)
+        record["timestamp"] = self.bound_timestamp(record["timestamp"])
+        record["trace_id"] = record.get("trace_id") or self.extract_trace_id(record)
+
+        if self.sampler.should_drop(record):
+            return
+
+        self.kafka.produce(
+            topic=f"logs.{record['service']}",
+            key=record.get("trace_id") or record["host"],
+            value=record,
+        )
+```
+
+### Storage Strategy
+
+| Data Type | Hot Store | Cold Store | Query Pattern |
+|-----------|-----------|------------|---------------|
+| Logs | Inverted index / columnar store | Object storage | Time range + filters + text |
+| Metrics | Time-series DB | Downsampled object storage | Aggregations over labels |
+| Traces | Trace store keyed by trace ID | Object storage | Trace ID and service graph |
+| Raw events | Kafka + object storage | Object storage | Replay and compliance |
+
+### Key Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Agent | Node-local collector | Buffers during network blips, enriches metadata |
+| Transport | Kafka / log bus | Backpressure, replay, pipeline decoupling |
+| Indexing | Index selected fields only | Controls cost and cardinality explosion |
+| Retention | Hot/warm/cold tiers | Fast recent queries, cheaper history |
+| Sampling | Tail and rule-based sampling | Keep important traces/errors |
+
+### Interview Discussion Points
+
+1. **Logs vs metrics vs traces?**
+   - Logs explain discrete events
+   - Metrics are compact numeric time series
+   - Traces connect work across services for one request
+
+2. **How to control cost?**
+   - Sample noisy events
+   - Limit indexed fields
+   - Downsample old metrics
+   - Move old data to object storage
+
+3. **How to handle backpressure?**
+   - Agents buffer locally
+   - Kafka absorbs bursts
+   - Drop or sample low-priority debug logs first
+
+### Failure Scenarios & Mitigation
+
+| Failure Mode | Impact | Detection | Mitigation |
+|--------------|--------|-----------|------------|
+| Agent disk full | Logs dropped on host | Agent disk metrics | Bounded queues, drop policy by severity |
+| Kafka lag | Delayed search/alerts | Consumer lag | Autoscale consumers, shed debug traffic |
+| Index cluster overload | Slow queries/ingest | CPU, heap, queue depth | Bulk indexing, shard rebalancing, hot-tier scaling |
+| Cardinality explosion | Storage and query cost spike | Unique label count | Label allowlists, cardinality budgets |
+
+### Monitoring & Observability
+
+**Key Metrics:**
+- Ingest events/bytes per second by tenant and service
+- End-to-end freshness lag
+- Dropped/sampled event counts
+- Query latency and index size
+- Alert evaluation delay
+
+**Alerting:**
+- Critical pipeline lag above SLA
+- Drop rate for error logs above threshold
+- Search cluster disk above 80%
+- Alert evaluator behind schedule
+
+### Security Considerations
+
+- Redact secrets and PII at the agent or parser layer
+- Encrypt data in transit and at rest
+- Enforce tenant isolation and role-based search access
+- Audit every query against sensitive logs
+- Apply retention and deletion policies consistently
+
+### Interview Deep-Dive Questions
+
+4. **How do you search by trace ID quickly?**
+   - Extract trace ID into an indexed field
+   - Partition or route related logs by trace ID where practical
+   - Link logs and traces in the query UI
+
+5. **How do you avoid losing logs during deploys?**
+   - Run agents as node daemons
+   - Use local durable buffers
+   - Flush on shutdown with a bounded timeout
+
+6. **How would you build alerting?**
+   - Evaluate metric rules in a scheduler
+   - Deduplicate and group notifications
+   - Track alert state to avoid repeated pages
+
+---
+
+## 19. Ticket Booking / Seat Reservation
+
+**Problem:** Design a ticket booking system for concerts, flights, or movies where many users compete for limited seats.
+
+### Requirements
+
+**Functional:**
+- Search events and available seats
+- Hold seats for a short time while a user checks out
+- Confirm booking after payment
+- Release expired holds
+- Prevent double booking
+
+**Non-Functional:**
+- Handle flash-sale traffic spikes
+- Strong correctness for seat ownership
+- Low latency availability reads
+- Auditable booking and payment history
+
+### High-Level Architecture
+
+```
++--------+     +------------+     +----------------+
+| Client | --> | API Layer  | --> | Inventory Svc  |
++--------+     +------------+     +-------+--------+
+                                      |
+                     +----------------+----------------+
+                     |                                 |
+               +-----v------+                    +-----v------+
+               | Seat Store |                    | Hold Queue |
+               | SQL/Redis  |                    | / Timer    |
+               +-----+------+                    +------------+
+                     |
+               +-----v------+     +------------+     +--------+
+               | Booking    | --> | Payment    | --> | Ledger |
+               | Service    |     | Provider   |     |        |
+               +------------+     +------------+     +--------+
+```
+
+### Seat State Model
+
+```
+AVAILABLE -> HELD -> BOOKED
+     ^        |
+     |        v
+     +---- EXPIRED
+```
+
+```sql
+CREATE TABLE seats (
+    event_id UUID NOT NULL,
+    seat_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    hold_id UUID,
+    hold_expires_at TIMESTAMPTZ,
+    booking_id UUID,
+    version BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (event_id, seat_id)
+);
+```
+
+### Holding Seats
+
+*How it works (correctness via conditional update):* a single `UPDATE ... WHERE status = 'AVAILABLE'` flips the requested seats to `HELD` in one transaction; if the affected row count ≠ the number of seats asked for, someone else grabbed one, so abort. The hold gets a TTL and a delayed `hold.expiry` message so abandoned holds auto-release. The DB write — not the cache — is the source of truth that prevents double booking.
+
+```python
+def hold_seats(event_id, seat_ids, user_id, ttl_seconds=300):
+    hold_id = uuid4()
+    expires_at = now() + timedelta(seconds=ttl_seconds)
+
+    with db.transaction():
+        updated = db.execute("""
+            UPDATE seats
+            SET status = 'HELD', hold_id = ?, hold_expires_at = ?, version = version + 1
+            WHERE event_id = ?
+              AND seat_id = ANY(?)
+              AND status = 'AVAILABLE'
+        """, hold_id, expires_at, event_id, seat_ids)
+
+        if updated.rowcount != len(seat_ids):
+            raise SeatUnavailable()
+
+        db.insert("holds", hold_id=hold_id, user_id=user_id, expires_at=expires_at)
+        queue.publish("hold.expiry", hold_id, delay=ttl_seconds)
+    return hold_id
+```
+
+### Key Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Seat ownership | Transactional conditional update | Prevents double booking |
+| Holds | Short TTL with async expiry | User-friendly checkout without permanent lock |
+| Availability cache | Read-through cache by event/section | Fast browsing; DB remains source of truth |
+| Payment | Confirm booking only after payment authorization | Avoid selling unpaid seats |
+| Idempotency | Idempotency key per checkout | Safe retries under payment/network failures |
+
+### Interview Discussion Points
+
+1. **Why not rely only on cache for seat status?**
+   - Cache can be stale
+   - Final hold/booking must be guarded by a transactional write
+
+2. **How to handle 100K users waiting for the same event?**
+   - Waiting room / token gate
+   - Rate limit seat-map refreshes
+   - Queue checkout attempts to protect inventory DB
+
+3. **What happens if payment succeeds but booking write fails?**
+   - Use idempotent booking transaction
+   - Retry from payment webhook or outbox
+   - Refund or void if booking cannot be finalized
+
+### Failure Scenarios & Mitigation
+
+| Failure Mode | Impact | Detection | Mitigation |
+|--------------|--------|-----------|------------|
+| Expiry worker down | Seats held too long | Hold expiry lag | DB query releases expired holds; delayed queue replay |
+| Payment timeout | User uncertain | Payment status mismatch | Idempotent provider lookup and retry |
+| Cache stale | Incorrect availability display | Cache/DB mismatch metrics | Short TTL and invalidate on hold/book |
+| Hot event overload | Checkout failures | QPS, DB lock wait | Waiting room, partition by event, precomputed seat maps |
+
+### Monitoring & Observability
+
+**Key Metrics:**
+- Hold success/failure rate
+- Booking conversion rate
+- Hold expiry lag
+- Seat DB lock wait time
+- Payment authorization and capture failures
+
+**Alerting:**
+- Double-booking invariant violation
+- Checkout error rate spike
+- Expired holds not released within SLA
+
+### Security Considerations
+
+- Validate price server-side at checkout
+- Prevent seat hold hoarding with per-user limits
+- Use signed waiting-room tokens
+- Protect payment data; store provider tokens, not card details
+- Audit seat state transitions
+
+### Interview Deep-Dive Questions
+
+4. **How do you support general admission?**
+   - Track inventory count instead of individual seats
+   - Conditional decrement available count
+   - Hold reserves quantity; booking commits quantity
+
+5. **How do you support seat maps at scale?**
+   - Serve static venue layout from CDN
+   - Overlay dynamic seat availability from cache
+   - Delta-update changed seats via polling or WebSocket
+
+6. **How do you prevent bots?**
+   - Waiting room, CAPTCHA/risk scoring, per-account limits
+   - Device/IP velocity checks
+   - Delay or challenge suspicious checkout attempts
+
+---
+
+## 20. Ride Sharing / Driver Matching
+
+**Problem:** Design a ride sharing system that matches riders with nearby drivers and tracks trips in real time.
+
+### Requirements
+
+**Functional:**
+- Riders request rides with pickup/dropoff
+- Drivers publish location and availability
+- Match rider to a nearby driver
+- Track trip state from request to completion
+- Estimate price and ETA
+
+**Non-Functional:**
+- Low matching latency (< 2 seconds)
+- Location freshness within a few seconds
+- High availability during regional spikes
+- Correct trip/payment state transitions
+
+### High-Level Architecture
+
+```
++--------+     +------------+     +----------------+
+| Rider  | --> | API Layer  | --> | Matching Svc   |
++--------+     +------------+     +-------+--------+
+                                      |
+            +-------------------------+--------------------------+
+            |                         |                          |
+      +-----v------+            +-----v------+             +-----v------+
+      | Geo Index  |            | Trip Store |             | Pricing    |
+      | Redis/S2   |            | SQL        |             | Service    |
+      +------------+            +------------+             +------------+
+            ^
+            |
+      +-----+------+
+      | Driver App |
+      +------------+
+```
+
+### Geo Indexing
+
+Drivers periodically update location. Store available drivers by geohash/S2 cell with a short TTL.
+
+*How it works:* store each driver's precise location with a short TTL (a driver who stops reporting auto-disappears), and add available drivers to a per-cell geo set keyed by their S2 cell. TTLs mean stale drivers need no explicit cleanup.
+
+```python
+def update_driver_location(driver_id, lat, lng, status):
+    cell = s2_cell(lat, lng, level=13)
+    redis.setex(f"driver:{driver_id}:loc", 10, {"lat": lat, "lng": lng, "cell": cell})
+
+    if status == "AVAILABLE":
+        redis.geoadd(f"available:{cell}", lng, lat, driver_id)
+        redis.expire(f"available:{cell}", 10)
+```
+
+### Matching Flow
+
+*How it works:* gather candidate drivers from the pickup cell and its neighbors (a radius query), rank them by ETA/acceptance/vehicle, then **offer** the ride to the top drivers one at a time with a short timeout until one accepts. Offering sequentially (rather than assigning outright) avoids handing the same driver to two riders.
+
+```python
+def match_ride(ride_id, pickup):
+    candidate_cells = nearby_cells(pickup, radius_km=3)
+    candidates = []
+    for cell in candidate_cells:
+        candidates.extend(redis.georadius(f"available:{cell}", pickup.lng, pickup.lat, 3, unit="km"))
+
+    ranked = rank(candidates, by=["eta", "driver_acceptance", "vehicle_type"])
+    for driver_id in ranked[:10]:
+        if try_offer_driver(ride_id, driver_id, timeout_seconds=8):
+            return driver_id
+    raise NoDriverAvailable()
+```
+
+### Trip State Machine
+
+```
+REQUESTED -> OFFERED -> ACCEPTED -> ARRIVING -> IN_PROGRESS -> COMPLETED
+      |          |           |             |              |
+      v          v           v             v              v
+   CANCELED   EXPIRED     CANCELED      CANCELED       PAID
+```
+
+### Key Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Location store | Redis geo/S2 with TTL | Fast nearby queries; auto-removes stale drivers |
+| Trip source of truth | SQL with state transitions | Strong consistency for money and disputes |
+| Matching | Candidate ranking + driver offer timeout | Balances speed and driver choice |
+| Pricing | Estimate at request, finalize at completion | Handles route/time changes |
+| Events | Kafka trip events | Notifications, analytics, fraud, support workflows |
+
+### Interview Discussion Points
+
+1. **How to avoid assigning one driver to two riders?**
+   - Conditional driver status update from AVAILABLE to OFFERED/ON_TRIP
+   - Idempotent trip assignment transaction
+
+2. **How to handle stale driver locations?**
+   - TTL every location and availability entry
+   - Exclude drivers with old heartbeat
+   - Show degraded availability when freshness is poor
+
+3. **How to scale matching regionally?**
+   - Partition by city/region
+   - Keep matching close to location data
+   - Use spillover only near region borders
+
+### Failure Scenarios & Mitigation
+
+| Failure Mode | Impact | Detection | Mitigation |
+|--------------|--------|-----------|------------|
+| Driver app disconnects | Bad matches | Heartbeat timeout | TTL removes driver; re-match ride |
+| Matching service overload | Slow ride requests | Queue depth/P99 | Regional autoscaling, load shedding |
+| Duplicate accept | Two drivers accept | State transition conflict | Atomic compare-and-set on trip assignment |
+| Payment failure | Completed unpaid trip | Payment status monitor | Retry, debt balance, block future rides |
+
+### Monitoring & Observability
+
+**Key Metrics:**
+- Match latency and success rate
+- Driver location freshness
+- Offer acceptance rate
+- Cancel rate by trip stage
+- ETA prediction error
+
+**Alerting:**
+- Match success drops by city
+- Location freshness exceeds threshold
+- Trip state transition failures spike
+
+### Security Considerations
+
+- Protect precise location data with strict access controls
+- Validate driver identity and vehicle status before matching
+- Rate limit location spoofing and impossible movement patterns
+- Use least-privilege support tooling for trip lookup
+- Audit all payment and fare adjustments
+
+### Interview Deep-Dive Questions
+
+4. **How do you compute ETA?**
+   - Start with road-network distance and traffic model
+   - Continuously compare predicted vs actual arrival
+   - Cache common origin/destination estimates by area
+
+5. **How would surge pricing work?**
+   - Compute demand/supply ratio by region and time window
+   - Smooth multipliers to avoid sudden jumps
+   - Cap and explain price before user confirms
+
+6. **How do you handle scheduled rides?**
+   - Store reservation intent
+   - Start matching shortly before pickup
+   - Notify user if supply is low
+
+---
+
+## 21. Collaborative Document Editing
+
+**Problem:** Design a Google Docs-like collaborative editor where multiple users edit the same document concurrently.
+
+### Requirements
+
+**Functional:**
+- Create, edit, and share documents
+- Multiple users edit concurrently
+- Show collaborators, cursors, and comments
+- Preserve document history and support recovery
+
+**Non-Functional:**
+- Low editing latency (< 100ms perceived locally)
+- Eventual convergence across clients
+- Durable document snapshots
+- Access control for shared documents
+
+### High-Level Architecture
+
+```
++---------+     +-----------+     +----------------+
+| Browser | <-> | Realtime  | <-> | Collaboration  |
+| Client  | WS  | Gateway   |     | Service        |
++---------+     +-----------+     +-------+--------+
+                                           |
+                  +------------------------+------------------+
+                  |                        |                  |
+            +-----v------+           +-----v------+     +-----v------+
+            | Operation  |           | Snapshot   |     | Presence   |
+            | Log        |           | Store      |     | Store      |
+            +------------+           +------------+     +------------+
+```
+
+### Concurrency Model
+
+Use either Operational Transformation (OT) or CRDTs. For an interview, choose one and explain convergence.
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| OT | Mature for text editors, compact operations | Complex transform logic |
+| CRDT | Offline-friendly, naturally convergent | More metadata and storage overhead |
+
+### Operation Flow
+
+*How it works (OT apply):* serialize edits per document with a lock. If a client's edit was based on an older version, **transform** it against the operations it didn't see so it still applies cleanly to the current state. Then append it to the op log, bump the version, and publish to subscribers. This transform step is what makes concurrent edits converge to the same document.
+
+```python
+class CollaborationService:
+    def apply_operation(self, doc_id, user_id, base_version, op):
+        with lock.for_document(doc_id):
+            current_version = self.version_store.get(doc_id)
+            if base_version < current_version:
+                op = self.transform(op, self.op_log.after(doc_id, base_version))
+
+            new_version = current_version + 1
+            self.op_log.append(doc_id, new_version, user_id, op)
+            self.version_store.set(doc_id, new_version)
+            self.pubsub.publish(f"doc:{doc_id}", {"version": new_version, "op": op})
+            return new_version
+```
+
+### Snapshot and History
+
+- Append every accepted operation to an immutable operation log
+- Periodically compact operations into document snapshots
+- Rebuild a document by loading the latest snapshot and replaying later operations
+- Store comments and permissions separately from text operations
+
+### Key Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Transport | WebSocket | Bidirectional low-latency updates |
+| Concurrency | OT for text operations | Common interview choice, compact payloads |
+| Durability | Operation log + snapshots | Recovery and history |
+| Presence | Ephemeral store with TTL | Cursor/user status does not need durable writes |
+| Access | Document ACL checked on connect and edit | Prevent unauthorized subscriptions |
+
+### Interview Discussion Points
+
+1. **How do clients feel fast if server round-trip takes time?**
+   - Apply local optimistic edits immediately
+   - Reconcile with transformed server operations
+   - Show pending state only for failures
+
+2. **How to scale a hot document?**
+   - Route all edits for one document to one collaboration shard
+   - Fan out accepted operations through pub/sub
+   - Keep large read-only viewers on separate broadcast path
+
+3. **How to support offline edits?**
+   - Queue operations locally
+   - Rebase or transform when reconnecting
+   - CRDTs make this easier for long offline windows
+
+### Failure Scenarios & Mitigation
+
+| Failure Mode | Impact | Detection | Mitigation |
+|--------------|--------|-----------|------------|
+| Realtime gateway disconnect | User stops receiving edits | WS disconnect rate | Reconnect and replay from last version |
+| Collaboration shard crash | Temporary edit outage | Shard health | Recover from op log and resume |
+| Transform bug | Divergent documents | Client/server checksum mismatch | Force resync from snapshot; alert |
+| Pub/sub lag | Delayed collaborators | Publish lag | Backpressure, shard scaling |
+
+### Monitoring & Observability
+
+**Key Metrics:**
+- Edit acknowledgement latency
+- WebSocket connection count
+- Operation transform failures
+- Snapshot age and replay length
+- Document checksum mismatch rate
+
+**Alerting:**
+- Ack latency exceeds target
+- Checksum mismatches above zero baseline
+- Operation log write failures
+
+### Security Considerations
+
+- Enforce ACLs on every document subscription and mutation
+- Encrypt documents at rest
+- Sanitize pasted/imported content
+- Keep audit history for enterprise documents
+- Limit public sharing and link permissions
+
+### Interview Deep-Dive Questions
+
+4. **How do you handle comments and suggestions?**
+   - Store comments as anchored metadata referencing document ranges
+   - Transform anchors as text changes
+   - Suggestions are operations with approval state
+
+5. **How do you avoid unbounded operation replay?**
+   - Snapshot every N operations or M minutes
+   - Compact old operations after retention window
+   - Keep full history in cold storage if required
+
+6. **How would you support images/tables?**
+   - Store binary assets separately
+   - Represent document as structured blocks
+   - Apply operations at block and text levels
+
+---
+
+## 22. Ad Click Aggregation / Real-Time Analytics
+
+**Problem:** Design a system that ingests ad impressions/clicks and produces real-time campaign analytics for advertisers.
+
+### Requirements
+
+**Functional:**
+- Track impressions, clicks, conversions, spend, and revenue
+- Aggregate by campaign, ad, country, device, and time window
+- Deduplicate events
+- Serve dashboards and export reports
+
+**Non-Functional:**
+- Ingest millions of events per second
+- Dashboard freshness under one minute
+- Accurate billing and auditable raw events
+- Tolerate late and duplicate events
+
+### High-Level Architecture
+
+```
++--------+     +-------------+     +-----------+     +-------------+
+| Client | --> | Event API   | --> | Kafka     | --> | Stream Proc |
++--------+     +-------------+     +-----+-----+     +------+------+
+                                      |                  |
+                                      |                  +-----> Real-time OLAP
+                                      |
+                                      +------------------------> Raw Data Lake
+```
+
+### Event Schema
+
+```json
+{
+  "event_id": "uuid",
+  "event_type": "click",
+  "campaign_id": "cmp_123",
+  "ad_id": "ad_456",
+  "user_id_hash": "hmac_sha256",
+  "timestamp": "2026-06-21T10:15:00Z",
+  "country": "US",
+  "device": "mobile",
+  "cost_micros": 12500
+}
+```
+
+### Stream Aggregation
+
+*How it works:* dedup by event id (a TTL store) so retries don't double-count, then bucket the event by (campaign, ad, country, device, **minute window**) and increment the right counters per event type. Event-time windowing handles late arrivals; raw events are kept separately for exact billing reconciliation.
+
+```python
+def process_event(event):
+    if dedupe_store.exists(event.event_id):
+        return
+    dedupe_store.set(event.event_id, ttl_hours=48)
+
+    window = floor_to_minute(event.timestamp)
+    key = (event.campaign_id, event.ad_id, event.country, event.device, window)
+
+    if event.event_type == "impression":
+        aggregates.increment(key, impressions=1)
+    elif event.event_type == "click":
+        aggregates.increment(key, clicks=1, spend_micros=event.cost_micros)
+    elif event.event_type == "conversion":
+        aggregates.increment(key, conversions=1, revenue_micros=event.revenue_micros)
+```
+
+### Accuracy Model
+
+| Use Case | Data Source | Accuracy | Latency |
+|----------|-------------|----------|---------|
+| Live dashboard | Stream aggregates | Near real-time, eventually corrected | Seconds |
+| Billing | Raw events + batch reconciliation | Highest | Hours/day |
+| Debugging | Raw event lookup | Exact event-level | Minutes |
+| Forecasting | Aggregates + historical warehouse | Approximate | Minutes/hours |
+
+### Key Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Ingestion | Append-only event log | Replayable and auditable |
+| Processing | Stream processor with event-time windows | Handles late events |
+| Dedupe | Event ID TTL store | Prevents retry double-counting |
+| Serving | OLAP store for aggregates | Fast group-by queries |
+| Billing | Batch reconciliation from raw data | Stronger correctness than live counters |
+
+### Interview Discussion Points
+
+1. **How do you handle late events?**
+   - Use event-time windows with allowed lateness
+   - Emit corrections for closed windows
+   - Keep raw events for batch recomputation
+
+2. **How do you prevent duplicate clicks?**
+   - Require unique event IDs from SDK/server
+   - Deduplicate by event ID
+   - Add fraud rules for repeated clicks from same source
+
+3. **Why not update SQL rows directly on every click?**
+   - Hot rows for popular campaigns
+   - Poor write scalability
+   - Hard to replay and reconcile
+
+### Failure Scenarios & Mitigation
+
+| Failure Mode | Impact | Detection | Mitigation |
+|--------------|--------|-----------|------------|
+| Kafka consumer lag | Stale dashboard | Consumer lag/freshness | Autoscale processors |
+| Dedupe store loss | Duplicate counts | Dedupe miss spike | Rebuild from compacted/raw event log |
+| Hot campaign key | Processor skew | Partition lag by key | Key salting and downstream merge |
+| Bad client timestamps | Wrong windows | Timestamp sanity checks | Bound skew; use server receive time fallback |
+
+### Monitoring & Observability
+
+**Key Metrics:**
+- Events ingested per second
+- End-to-end freshness lag
+- Duplicate and invalid event rate
+- Stream processing lag by partition
+- Aggregate correction volume
+
+**Alerting:**
+- Dashboard freshness exceeds SLA
+- Event API error rate spikes
+- Billing reconciliation mismatch exceeds threshold
+
+### Security Considerations
+
+- Sign server-to-server conversion events
+- Hash or tokenize user identifiers
+- Validate campaign/ad ownership before serving dashboards
+- Detect click fraud and abnormal traffic patterns
+- Keep raw event access restricted and audited
+
+### Interview Deep-Dive Questions
+
+4. **How do you support advertiser dashboards with arbitrary filters?**
+   - Pre-aggregate common dimensions
+   - Use OLAP columnar storage for ad hoc filters
+   - Limit high-cardinality dimensions or move them to drill-down views
+
+5. **How do you correct already-shown numbers?**
+   - Store aggregates as upserts by window/dimension
+   - Emit correction records
+   - Make dashboard indicate data freshness/finality
+
+6. **How would you design fraud detection?**
+   - Real-time rules for obvious abuse
+   - Offline models using historical behavior
+   - Quarantine suspicious events before billing
+
+---
+
 ## Summary: Key Tradeoffs
 
 | System | Key Tradeoff |
@@ -5566,6 +6712,12 @@ rank is the sum of counts in higher buckets (O(buckets), not O(n)).
 | Proximity / Geo Service | Index precision vs query cost |
 | Payment System | Correctness/consistency vs availability |
 | Leaderboard / Ranking | Real-time accuracy vs scale |
+| API Gateway | Centralized control vs gateway bottleneck |
+| Distributed Logging / Observability Platform | Query flexibility vs ingestion/storage cost |
+| Ticket Booking / Seat Reservation | User-friendly holds vs inventory correctness |
+| Ride Sharing / Driver Matching | Match speed vs assignment quality |
+| Collaborative Document Editing | Low-latency local edits vs convergence complexity |
+| Ad Click Aggregation / Real-Time Analytics | Fresh dashboards vs billing accuracy |
 
 ---
 
