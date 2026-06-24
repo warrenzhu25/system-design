@@ -444,6 +444,9 @@ class HitCounter:
 - Window boundary: `get_load(seconds)` counts hits with `timestamp > current_time - seconds`,
   i.e. the half-open window `(current_time - seconds, current_time]`. If you want an
   inclusive last-`N`-seconds window, search for `timestamps[mid] < target` instead.
+- Assumption: `hit()` is called with non-decreasing timestamps, so `timestamps`/`prefix_count`
+  stay sorted for the binary search. An out-of-order hit appended at the tail would break that
+  invariant — handle it by inserting in sorted position (`bisect`) if clocks can go backwards.
 
 ---
 
