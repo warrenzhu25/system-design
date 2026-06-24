@@ -2874,8 +2874,8 @@ ReentrantLock lk = new ReentrantLock();           // more flexible lock
 lk.lock();
 try { /* ... */ } finally { lk.unlock(); }        // ALWAYS unlock in finally
 
-BlockingQueue<Task> q = new LinkedBlockingQueue<>();  // producer-consumer
-q.put(task);            // blocks if full
+BlockingQueue<Task> q = new ArrayBlockingQueue<>(1000);  // bounded producer-consumer
+q.put(task);            // blocks if full (use a bounded queue for backpressure)
 Task t = q.take();      // blocks if empty
 
 Semaphore sem = new Semaphore(10);                // cap concurrent access
@@ -2930,6 +2930,10 @@ class CommandSystem:
     def get_status(self, cmd_id):
         with self.lock:
             return self.status.get(cmd_id)
+
+    def get_result(self, cmd_id):
+        with self.lock:
+            return self.results.get(cmd_id)        # None until status == "done"
 
     def _worker(self):
         while True:
@@ -3157,6 +3161,8 @@ class ChatServer:
 ```
 Each user has a sender thread draining its outbox to the socket. **Key tradeoffs:** per-channel lock (not global) so channels don't block each other; queue + dispatcher (not inline broadcast) so a slow client doesn't stall the publisher; snapshot the subscriber set so subscribe/unsubscribe can run concurrently with publish.
 
+> **Caveat:** `defaultdict(threading.Lock)` can momentarily create two locks if two threads first-touch the same new channel concurrently (CPython's GIL usually hides it, but it isn't guaranteed). Pre-register channels, or use a small guarded `get_lock(channel)` helper, so each channel has exactly one lock.
+
 ## 30. File Block Cache
 
 **Problem:** a `CacheFile` reads from a remote store by `(offset, length)`, with many random reads. Make client reads efficient — avoid re-fetching, and dedup concurrent fetches of the same region.
@@ -3186,23 +3192,29 @@ class FileBlockCache:
 
     def _get_block(self, file, b):
         key = (file, b)
-        with self.lock:
-            if key in self.cache:
-                return self.cache[key]              # hit
-            ev = self.inflight.get(key)
-            leader = ev is None
-            if leader:
-                ev = self.inflight[key] = threading.Event()
-        if leader:
-            data = self.remote.fetch(file, b * BLOCK, BLOCK)   # only the leader fetches
+        while True:
             with self.lock:
-                self.cache[key] = data
-                del self.inflight[key]
-            ev.set()
-            return data
-        ev.wait()                                   # others wait, then read from cache
-        with self.lock:
-            return self.cache[key]
+                if key in self.cache:
+                    return self.cache[key]              # hit
+                ev = self.inflight.get(key)
+                leader = ev is None
+                if leader:
+                    ev = self.inflight[key] = threading.Event()
+            if leader:
+                try:
+                    data = self.remote.fetch(file, b * BLOCK, BLOCK)  # only the leader fetches
+                    with self.lock:
+                        self.cache[key] = data
+                    return data
+                finally:
+                    # ALWAYS clear in-flight + wake waiters, even if fetch raised,
+                    # so a failed leader can't deadlock everyone waiting on this block.
+                    with self.lock:
+                        self.inflight.pop(key, None)
+                    ev.set()
+            else:
+                ev.wait()                              # wait for the leader, then re-check
+                # loop again: cache hit if the leader succeeded, else we become leader
 ```
 Add LRU eviction when the cache exceeds capacity. The in-flight dedup is the key concurrency win — without it, N threads needing the same hot block all fetch it remotely.
 
