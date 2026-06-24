@@ -2789,3 +2789,462 @@ def get_revenue_n_levels(self, customer_id: int, n: int) -> int:
 ### Interview Summary
 
 This problem is mainly about choosing the right tradeoff between write speed and query speed. If inserts dominate, use a hash map and sort at query time. If reads dominate, maintain a sorted structure keyed by `(total_revenue, id)`. The core business rule is simple: direct referrals immediately increase the referrer's total revenue, but not the revenue of higher ancestors in the base version.
+
+---
+
+## 22. Merge Graph
+
+*From interview-experience notes ([coding](https://garnet-bluebell-0e5.notion.site/coding-3403f77c7145801c90dfd948bebbd4e0)). The source's "Remove Covered Point" and "Find Dependency Bottleneck" duplicate [#11](#11-delete-index-from-interval-list) and [#9](#9-bottleneck-nodes-in-a-dag) and are not repeated.*
+
+**Problem:** You are given `N` already-connected graphs. Add new edges to merge them into a single connected graph using the **minimum** number of edges, choosing the new connections **randomly**. A `random(n)` primitive returns an int in `[0, n)`. Return the list of new edges.
+
+**Key insight:** with `N` connected components, the minimum to connect them into one is exactly `N - 1` edges (this is not MST — there are no weights). So the task is: pick one representative node per component, then connect the components with `N - 1` edges. If the interviewer wants a *uniform* distribution over all ways to connect the components, sample a uniform random spanning tree of the `N` components via a **Prüfer sequence**.
+
+```python
+import random, heapq
+from typing import List, Dict, Set, Tuple
+
+Graph = Dict[int, Set[int]]
+Edge = Tuple[int, int]
+
+def merge_graphs_simple(graphs: List[Graph]) -> List[Edge]:
+    """Connect N components with N-1 new edges. Random, but NOT uniform
+    over all labeled trees of the components."""
+    if len(graphs) <= 1:
+        return []
+    reps = [random.choice(list(g.keys())) for g in graphs]  # one node per component
+    random.shuffle(reps)
+    return [(reps[i - 1], reps[i]) for i in range(1, len(reps))]  # random chain
+
+
+def merge_graphs_uniform(graphs: List[Graph]) -> List[Edge]:
+    """Uniformly random spanning tree over the N components via a Prufer
+    sequence (each of the N^(N-2) labeled trees is equally likely)."""
+    n = len(graphs)
+    if n <= 1:
+        return []
+    if n == 2:
+        return [(random.choice(list(graphs[0])), random.choice(list(graphs[1])))]
+
+    # 1. sample a Prufer sequence of length n-2 over component indices
+    prufer = [random.randrange(n) for _ in range(n - 2)]
+
+    # 2. decode it into n-1 component-level tree edges
+    degree = [1] * n
+    for x in prufer:
+        degree[x] += 1
+    leaves = [i for i in range(n) if degree[i] == 1]
+    heapq.heapify(leaves)
+
+    comp_edges = []
+    for x in prufer:
+        leaf = heapq.heappop(leaves)
+        comp_edges.append((leaf, x))
+        degree[leaf] -= 1
+        degree[x] -= 1
+        if degree[x] == 1:
+            heapq.heappush(leaves, x)
+    comp_edges.append((heapq.heappop(leaves), heapq.heappop(leaves)))
+
+    # 3. realize each component edge as an edge between random nodes
+    nodes = [list(g.keys()) for g in graphs]
+    return [(random.choice(nodes[i]), random.choice(nodes[j])) for i, j in comp_edges]
+```
+
+**Complexity:** simple `O(V + N)`; uniform `O(V + N log N)`. The caller adds each returned edge to both endpoints' adjacency sets.
+
+---
+
+# System Programming
+
+*From interview-experience notes ([System Programming](https://garnet-bluebell-0e5.notion.site/System-Programming-3763f77c7145801b8fc3ded3f95f7ab0)). Single-machine concurrency design problems; the interview usually starts single-threaded and then adds thread-safety. Solutions below are clean reference implementations in Python.*
+
+## 23. Threading Primitives (Java & Python)
+
+A quick reference of the building blocks interviewers expect you to name.
+
+**Java:**
+```java
+// Bounded thread pool (prefer over `new Thread` per task)
+ExecutorService pool = Executors.newFixedThreadPool(8);
+Future<Integer> f = pool.submit(() -> compute());
+
+synchronized (lock) { /* critical section */ }   // mutual exclusion
+ReentrantLock lk = new ReentrantLock();           // more flexible lock
+lk.lock();
+try { /* ... */ } finally { lk.unlock(); }        // ALWAYS unlock in finally
+
+BlockingQueue<Task> q = new LinkedBlockingQueue<>();  // producer-consumer
+q.put(task);            // blocks if full
+Task t = q.take();      // blocks if empty
+
+Semaphore sem = new Semaphore(10);                // cap concurrent access
+AtomicInteger counter = new AtomicInteger();      // lock-free counting
+```
+
+**Python** — mind the GIL: threads help **I/O-bound** work, not CPU-bound; use `multiprocessing` for CPU-bound.
+```python
+import threading, queue
+
+t = threading.Thread(target=work, args=(path,)); t.start(); t.join()
+
+lock = threading.Lock()
+with lock:            # protect shared mutable state
+    ...
+
+q = queue.Queue()     # thread-safe producer-consumer
+q.put(item); item = q.get()
+
+cond = threading.Condition()
+with cond:
+    cond.wait_for(lambda: ready)   # sleep until shared state changes
+    cond.notify_all()
+
+sem = threading.Semaphore(10)      # cap concurrency
+```
+One-liner: *"In Python I use `threading` for I/O-bound concurrency, `Lock` to protect shared state, and `queue.Queue` for producer-consumer; for CPU-bound work I use `multiprocessing` because of the GIL."*
+
+## 24. Command Execution System
+
+**Problem:** `submit(files, limit)` returns immediately with a command id; a background system reads lines from the given text files and returns **at most `limit` total lines**, preserving file order. Clarify: `limit` is total (not per file); strict order required; minimize over-read.
+
+```python
+import threading, queue, uuid
+
+class CommandSystem:
+    def __init__(self, num_workers=4):
+        self.status = {}                       # cmd_id -> "pending"|"done"
+        self.results = {}                      # cmd_id -> list[str]
+        self.lock = threading.Lock()
+        self.jobs = queue.Queue()
+        for _ in range(num_workers):
+            threading.Thread(target=self._worker, daemon=True).start()
+
+    def submit(self, files, limit) -> str:
+        cmd_id = str(uuid.uuid4())
+        with self.lock:
+            self.status[cmd_id] = "pending"
+        self.jobs.put((cmd_id, files, limit))
+        return cmd_id                          # returns immediately
+
+    def get_status(self, cmd_id):
+        with self.lock:
+            return self.status.get(cmd_id)
+
+    def _worker(self):
+        while True:
+            cmd_id, files, limit = self.jobs.get()
+            lines = self._read_in_order(files, limit)
+            with self.lock:
+                self.results[cmd_id] = lines
+                self.status[cmd_id] = "done"
+            self.jobs.task_done()
+
+    def _read_in_order(self, files, limit):
+        """Total `limit` across files, preserving file order, stopping early."""
+        out = []
+        for path in files:
+            if len(out) >= limit:
+                break
+            with open(path) as f:
+                for line in f:
+                    out.append(line.rstrip("\n"))
+                    if len(out) >= limit:
+                        break
+        return out[:limit]
+```
+**Tradeoff:** sequential reading guarantees order + zero over-read but limits parallelism (you don't know how many lines earlier files contribute until you read them). To parallelize, read files into per-file buffers concurrently and merge in original order — at the cost of possible over-read, which you bound with a worker pool or small read windows.
+
+## 25. Log Writer (Durable, Concurrent)
+
+**Problem:** many producer threads call `write(record)`; the call must not return until the record is **durably persisted** (survives process crash *and* machine restart — not just a memory buffer), and records must not be corrupted or interleaved. Clarify ordering (global vs per-producer).
+
+**Solution — group commit:** producers enqueue and block on a per-record event; a single writer thread drains the queue, frames each record, appends, calls `fsync` **once per batch**, then releases all waiters. (Same design as [#18 Durable Concurrent Data Writer](#18-durable-concurrent-data-writer).)
+
+```python
+import threading, queue, os, struct, zlib
+
+class LogWriter:
+    def __init__(self, path):
+        self.f = open(path, "ab", buffering=0)
+        self.q = queue.Queue()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def write(self, record: bytes) -> None:
+        done = threading.Event()
+        self.q.put((record, done))
+        done.wait()                       # block until durably persisted
+
+    def _run(self):
+        while True:
+            batch = [self.q.get()]
+            try:                          # drain whatever else is queued
+                while True:
+                    batch.append(self.q.get_nowait())
+            except queue.Empty:
+                pass
+            for record, _ in batch:
+                self.f.write(self._frame(record))
+            self.f.flush()
+            os.fsync(self.f.fileno())     # ONE fsync for the whole batch
+            for _, done in batch:
+                done.set()                # only now release the producers
+
+    @staticmethod
+    def _frame(record: bytes) -> bytes:
+        # [len:4][payload][crc32:4] -> detects torn/corrupt tail on recovery
+        return struct.pack(">I", len(record)) + record + struct.pack(">I", zlib.crc32(record))
+```
+**Recovery:** scan from the start, validate each record's length + CRC, truncate at the first bad/partial frame. Batching amortizes the expensive `fsync` across many writes while keeping the durability contract.
+
+## 26. Job Scheduler (DAG)
+
+**Problem:** schedule tasks with dependencies (a DAG); run a task only after all upstreams finish; use a worker pool. Clarify: DAG (no cycles)? need status/progress?
+
+**Solution:** Kahn's topological order with a thread-safe ready queue. Indegree-0 tasks are ready; on completion, decrement children's indegree and enqueue the newly-ready ones.
+
+```python
+import threading, queue
+from collections import defaultdict
+
+def run_dag(task_ids, dependencies, run, num_workers=4):
+    children = defaultdict(list)
+    indegree = defaultdict(int)
+    for before, after in dependencies:
+        children[before].append(after)
+        indegree[after] += 1
+
+    ready = queue.Queue()
+    for t in task_ids:
+        if indegree[t] == 0:
+            ready.put(t)
+
+    lock = threading.Lock()
+    remaining = len(task_ids)
+    done_event = threading.Event()
+
+    def worker():
+        nonlocal remaining
+        while True:
+            task_id = ready.get()
+            run(task_id)                          # execute the task
+            with lock:
+                for child in children[task_id]:
+                    indegree[child] -= 1
+                    if indegree[child] == 0:
+                        ready.put(child)
+                remaining -= 1
+                if remaining == 0:
+                    done_event.set()
+            ready.task_done()
+
+    for _ in range(num_workers):
+        threading.Thread(target=worker, daemon=True).start()
+    done_event.wait()
+```
+**Worker count:** more workers help I/O-bound tasks; CPU-bound tasks are bounded by cores (and the GIL — use processes). A cycle leaves some tasks with indegree > 0 forever (`remaining` never reaches 0) — detectable as a deadlock/timeout.
+
+## 27. Concurrent HashMap
+
+**Problem:** implement a thread-safe map and explain why a plain dict isn't thread-safe (a concurrent resize/rehash or read-modify-write race can corrupt state or lose updates). Show progressively better locking.
+
+```python
+import threading
+
+# V1: one global lock — correct, but serializes everything
+class GlobalLockMap:
+    def __init__(self):
+        self._d, self._lk = {}, threading.Lock()
+    def get(self, k):
+        with self._lk: return self._d.get(k)
+    def put(self, k, v):
+        with self._lk: self._d[k] = v
+
+# V2: read-write lock — many readers OR one writer (best for read-heavy)
+
+# V3: lock striping — N shards each with its own lock, so writes to
+#     different shards proceed concurrently (how Java's ConcurrentHashMap
+#     historically worked)
+class StripedMap:
+    def __init__(self, num_shards=16):
+        self._shards = [{} for _ in range(num_shards)]
+        self._locks = [threading.Lock() for _ in range(num_shards)]
+    def _shard(self, k):
+        i = hash(k) % len(self._shards)
+        return self._locks[i], self._shards[i]
+    def get(self, k):
+        lk, d = self._shard(k)
+        with lk: return d.get(k)
+    def put(self, k, v):
+        lk, d = self._shard(k)
+        with lk: d[k] = v
+```
+**Tradeoff:** global lock is simplest; striping gives concurrency proportional to the shard count with bounded memory overhead.
+
+## 28. Durable KV Store
+
+**Problem:** `put` / `get` / `delete`, where `put` is durable before it returns. Use a write-ahead log + in-memory map; recover by replaying the WAL.
+
+```python
+import threading, os, json
+
+class DurableKV:
+    def __init__(self, wal_path):
+        self.map = {}
+        self.lock = threading.Lock()
+        self.wal = open(wal_path, "a+")
+        self._recover()
+
+    def _recover(self):
+        self.wal.seek(0)
+        for line in self.wal:                  # replay WAL from the beginning
+            op = json.loads(line)
+            if op["t"] == "put":
+                self.map[op["k"]] = op["v"]
+            elif op["t"] == "del":
+                self.map.pop(op["k"], None)
+
+    def put(self, k, v):
+        with self.lock:
+            self._append({"t": "put", "k": k, "v": v})
+            self.map[k] = v
+
+    def delete(self, k):
+        with self.lock:
+            self._append({"t": "del", "k": k})
+            self.map.pop(k, None)
+
+    def get(self, k):
+        with self.lock:
+            return self.map.get(k)
+
+    def _append(self, op):
+        self.wal.write(json.dumps(op) + "\n")
+        self.wal.flush()
+        os.fsync(self.wal.fileno())            # durable before returning
+```
+**Scaling the lock:** a read-write lock for read-heavy loads; sharded/striped locks; or a **single writer thread** that serializes WAL appends and **batches `fsync`** (higher throughput; write latency bounded by the writer). Periodically snapshot + truncate the WAL (compaction) so recovery stays fast.
+
+## 29. Multi-Threaded Chat System (single machine)
+
+**Problem:** users subscribe to channels; when a user publishes to a channel, all subscribers receive the message. Single machine, in-memory.
+
+**Design:** per-channel subscriber set guarded by a **per-channel lock** (channels are independent, so no global lock); publish **enqueues** rather than broadcasting inline; a dispatcher fans out to each subscriber's **outbound queue** so one slow client can't block the channel.
+
+```python
+import threading, queue
+from collections import defaultdict
+
+class ChatServer:
+    def __init__(self):
+        self.subs = defaultdict(set)                 # channel -> set[user_id]
+        self.locks = defaultdict(threading.Lock)     # per-channel lock
+        self.outbox = defaultdict(queue.Queue)       # user_id -> outbound queue
+
+    def subscribe(self, user_id, channel):
+        with self.locks[channel]:
+            self.subs[channel].add(user_id)
+
+    def unsubscribe(self, user_id, channel):
+        with self.locks[channel]:
+            self.subs[channel].discard(user_id)
+
+    def publish(self, channel, message):
+        with self.locks[channel]:
+            targets = list(self.subs[channel])       # snapshot to avoid mutate-while-iterate
+        for user_id in targets:
+            self.outbox[user_id].put(message)        # per-user queue: a slow client only backs up itself
+```
+Each user has a sender thread draining its outbox to the socket. **Key tradeoffs:** per-channel lock (not global) so channels don't block each other; queue + dispatcher (not inline broadcast) so a slow client doesn't stall the publisher; snapshot the subscriber set so subscribe/unsubscribe can run concurrently with publish.
+
+## 30. File Block Cache
+
+**Problem:** a `CacheFile` reads from a remote store by `(offset, length)`, with many random reads. Make client reads efficient — avoid re-fetching, and dedup concurrent fetches of the same region.
+
+**Solution:** cache fixed-size **blocks** keyed by `(file, block_id)`. A read for `[offset, offset+length)` touches the blocks it overlaps and fetches only the missing ones. Under concurrency, an **in-flight map** ensures the first thread fetches a block while others wait on the same event, instead of all hitting the remote.
+
+```python
+import threading
+
+BLOCK = 64 * 1024
+
+class FileBlockCache:
+    def __init__(self, remote):
+        self.remote = remote
+        self.cache = {}                 # (file, block_id) -> bytes  (+ LRU eviction)
+        self.inflight = {}              # (file, block_id) -> Event
+        self.lock = threading.Lock()
+
+    def read(self, file, offset, length):
+        out = bytearray()
+        for b in range(offset // BLOCK, (offset + length - 1) // BLOCK + 1):
+            data = self._get_block(file, b)
+            lo = max(offset, b * BLOCK) - b * BLOCK
+            hi = min(offset + length, (b + 1) * BLOCK) - b * BLOCK
+            out += data[lo:hi]
+        return bytes(out)
+
+    def _get_block(self, file, b):
+        key = (file, b)
+        with self.lock:
+            if key in self.cache:
+                return self.cache[key]              # hit
+            ev = self.inflight.get(key)
+            leader = ev is None
+            if leader:
+                ev = self.inflight[key] = threading.Event()
+        if leader:
+            data = self.remote.fetch(file, b * BLOCK, BLOCK)   # only the leader fetches
+            with self.lock:
+                self.cache[key] = data
+                del self.inflight[key]
+            ev.set()
+            return data
+        ev.wait()                                   # others wait, then read from cache
+        with self.lock:
+            return self.cache[key]
+```
+Add LRU eviction when the cache exceeds capacity. The in-flight dedup is the key concurrency win — without it, N threads needing the same hot block all fetch it remotely.
+
+## 31. Multi-Threaded Web Crawler
+
+**Problem:** crawl pages from a seed — fetch, parse links, continue — using multiple threads to improve I/O throughput.
+
+**Design:** a thread-safe `visited` set (lock) and a `Queue` frontier; a fixed-size worker pool fetches different URLs concurrently (crawling is I/O-bound, so threads overlap network waits).
+
+```python
+import threading, queue
+
+class Crawler:
+    def __init__(self, fetch, parse_links, num_workers=10):
+        self.fetch, self.parse_links = fetch, parse_links
+        self.frontier = queue.Queue()
+        self.visited = set()
+        self.lock = threading.Lock()
+        self.num_workers = num_workers
+
+    def crawl(self, seeds):
+        for url in seeds:
+            self._enqueue(url)
+        for _ in range(self.num_workers):
+            threading.Thread(target=self._worker, daemon=True).start()
+        self.frontier.join()                  # block until all tasks done
+
+    def _enqueue(self, url):
+        with self.lock:
+            if url in self.visited:
+                return
+            self.visited.add(url)             # mark visited at enqueue time (dedup)
+        self.frontier.put(url)
+
+    def _worker(self):
+        while True:
+            url = self.frontier.get()
+            try:
+                html = self.fetch(url)                       # network I/O
+                for link in self.parse_links(html, url):
+                    self._enqueue(link)
+            finally:
+                self.frontier.task_done()
+```
+**Thread-safety:** `visited` is guarded and updated at *enqueue* time so the same URL isn't queued twice; a fixed worker pool bounds resource use. **Production follow-up:** a per-domain rate limiter (token bucket per host) so you don't overload one site — see the full distributed frontier design in `common_system_design_questions.md` §10.
