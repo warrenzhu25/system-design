@@ -2960,6 +2960,55 @@ class CommandSystem:
                         break
         return out[:limit]
 ```
+
+**Java:**
+```java
+import java.io.*;
+import java.nio.file.*;
+import java.util.*;
+import java.util.concurrent.*;
+
+class CommandSystem {
+    enum Status { PENDING, DONE }
+    private final Map<String, Status> status = new ConcurrentHashMap<>();
+    private final Map<String, List<String>> results = new ConcurrentHashMap<>();
+    private final ExecutorService pool;
+
+    CommandSystem(int numWorkers) {
+        this.pool = Executors.newFixedThreadPool(numWorkers);
+    }
+
+    String submit(List<String> files, int limit) {
+        String cmdId = UUID.randomUUID().toString();
+        status.put(cmdId, Status.PENDING);
+        pool.submit(() -> {                         // background; returns immediately
+            results.put(cmdId, readInOrder(files, limit));
+            status.put(cmdId, Status.DONE);
+        });
+        return cmdId;
+    }
+
+    Status getStatus(String cmdId) { return status.get(cmdId); }
+    List<String> getResult(String cmdId) { return results.get(cmdId); }  // null until DONE
+
+    private List<String> readInOrder(List<String> files, int limit) {
+        List<String> out = new ArrayList<>();
+        for (String path : files) {
+            if (out.size() >= limit) break;
+            try (BufferedReader br = Files.newBufferedReader(Path.of(path))) {
+                String line;
+                while (out.size() < limit && (line = br.readLine()) != null) {
+                    out.add(line);
+                }
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }
+        return out;
+    }
+}
+```
+
 **Tradeoff:** sequential reading guarantees order + zero over-read but limits parallelism (you don't know how many lines earlier files contribute until you read them). To parallelize, read files into per-file buffers concurrently and merge in original order — at the cost of possible over-read, which you bound with a worker pool or small read windows.
 
 ## 25. Log Writer (Durable, Concurrent)
@@ -3002,6 +3051,79 @@ class LogWriter:
         # [len:4][payload][crc32:4] -> detects torn/corrupt tail on recovery
         return struct.pack(">I", len(record)) + record + struct.pack(">I", zlib.crc32(record))
 ```
+
+**Java** (group commit — the same design as [#18](#18-durable-concurrent-data-writer)):
+```java
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.file.*;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.zip.CRC32;
+
+class LogWriter {
+    private final FileChannel channel;
+    private final BlockingQueue<Req> queue = new LinkedBlockingQueue<>();
+    private volatile boolean running = true;
+
+    private static final class Req {
+        final byte[] data;
+        final CountDownLatch done = new CountDownLatch(1);
+        volatile IOException error;
+        Req(byte[] data) { this.data = data; }
+    }
+
+    LogWriter(String path) throws IOException {
+        this.channel = FileChannel.open(Path.of(path),
+            StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND);
+        Thread t = new Thread(this::run, "log-writer");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    void write(byte[] record) throws IOException, InterruptedException {
+        Req req = new Req(record);
+        queue.put(req);
+        req.done.await();                         // block until durably persisted
+        if (req.error != null) throw req.error;
+    }
+
+    private void run() {
+        List<Req> batch = new ArrayList<>();
+        while (running) {
+            try {
+                batch.clear();
+                Req first = queue.poll(1, TimeUnit.MILLISECONDS);
+                if (first == null) continue;
+                batch.add(first);
+                queue.drainTo(batch);             // group commit: take everything queued
+                for (Req r : batch) {
+                    ByteBuffer buf = frame(r.data);
+                    while (buf.hasRemaining()) channel.write(buf);
+                }
+                channel.force(true);              // ONE fsync for the whole batch
+                for (Req r : batch) r.done.countDown();
+            } catch (Exception e) {
+                for (Req r : batch) {             // fail the in-flight batch, don't hang producers
+                    r.error = (e instanceof IOException io) ? io : new IOException(e);
+                    r.done.countDown();
+                }
+            }
+        }
+    }
+
+    private static ByteBuffer frame(byte[] data) {
+        CRC32 crc = new CRC32();
+        crc.update(data);
+        ByteBuffer buf = ByteBuffer.allocate(8 + data.length);  // [len:4][payload][crc:4]
+        buf.putInt(data.length).put(data).putInt((int) crc.getValue());
+        buf.flip();
+        return buf;
+    }
+}
+```
+
 **Recovery:** scan from the start, validate each record's length + CRC, truncate at the first bad/partial frame. Batching amortizes the expensive `fsync` across many writes while keeping the durability contract.
 
 ## 26. Job Scheduler (DAG)
@@ -3049,6 +3171,57 @@ def run_dag(task_ids, dependencies, run, num_workers=4):
         threading.Thread(target=worker, daemon=True).start()
     done_event.wait()
 ```
+
+**Java:**
+```java
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
+
+class DagScheduler {
+    void run(List<Integer> taskIds, int[][] deps, Consumer<Integer> run, int numWorkers)
+            throws InterruptedException {
+        Map<Integer, List<Integer>> children = new HashMap<>();
+        Map<Integer, Integer> indegree = new HashMap<>();
+        for (int t : taskIds) indegree.put(t, 0);
+        for (int[] e : deps) {                                  // e = {before, after}
+            children.computeIfAbsent(e[0], k -> new ArrayList<>()).add(e[1]);
+            indegree.merge(e[1], 1, Integer::sum);
+        }
+
+        BlockingQueue<Integer> ready = new LinkedBlockingQueue<>();
+        for (int t : taskIds) if (indegree.get(t) == 0) ready.add(t);
+
+        AtomicInteger remaining = new AtomicInteger(taskIds.size());
+        CountDownLatch done = new CountDownLatch(1);
+        Object lock = new Object();
+        ExecutorService pool = Executors.newFixedThreadPool(numWorkers);
+
+        for (int i = 0; i < numWorkers; i++) {
+            pool.submit(() -> {
+                try {
+                    while (true) {
+                        int task = ready.take();
+                        run.accept(task);                      // execute the task
+                        synchronized (lock) {
+                            for (int child : children.getOrDefault(task, List.of())) {
+                                if (indegree.merge(child, -1, Integer::sum) == 0) ready.add(child);
+                            }
+                        }
+                        if (remaining.decrementAndGet() == 0) done.countDown();
+                    }
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();        // shutdownNow stops idle workers
+                }
+            });
+        }
+        done.await();
+        pool.shutdownNow();
+    }
+}
+```
+
 **Worker count:** more workers help I/O-bound tasks; CPU-bound tasks are bounded by cores (and the GIL — use processes). A cycle leaves some tasks with indegree > 0 forever (`remaining` never reaches 0) — detectable as a deadlock/timeout.
 
 ## 27. Concurrent HashMap
@@ -3086,6 +3259,39 @@ class StripedMap:
         lk, d = self._shard(k)
         with lk: d[k] = v
 ```
+
+**Java** (lock striping; in practice use `java.util.concurrent.ConcurrentHashMap`, which does this internally — striped locks historically, CAS + per-bin locking since Java 8):
+```java
+import java.util.*;
+
+class StripedMap<K, V> {
+    private final Object[] locks;
+    private final Map<K, V>[] shards;
+
+    @SuppressWarnings("unchecked")
+    StripedMap(int numShards) {
+        locks = new Object[numShards];
+        shards = new HashMap[numShards];
+        for (int i = 0; i < numShards; i++) {
+            locks[i] = new Object();
+            shards[i] = new HashMap<>();
+        }
+    }
+
+    private int idx(K k) { return (k.hashCode() & 0x7fffffff) % shards.length; }
+
+    V get(K k) {
+        int i = idx(k);
+        synchronized (locks[i]) { return shards[i].get(k); }
+    }
+
+    void put(K k, V v) {
+        int i = idx(k);
+        synchronized (locks[i]) { shards[i].put(k, v); }
+    }
+}
+```
+
 **Tradeoff:** global lock is simplest; striping gives concurrency proportional to the shard count with bounded memory overhead.
 
 ## 28. Durable KV Store
@@ -3130,6 +3336,60 @@ class DurableKV:
         self.wal.flush()
         os.fsync(self.wal.fileno())            # durable before returning
 ```
+
+**Java** (read-write lock for read-heavy loads):
+```java
+import java.io.*;
+import java.nio.file.*;
+import java.util.*;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+
+class DurableKV {
+    private final Map<String, String> map = new HashMap<>();
+    private final ReentrantReadWriteLock rw = new ReentrantReadWriteLock();
+    private final FileOutputStream wal;
+
+    DurableKV(String walPath) throws IOException {
+        recover(walPath);
+        this.wal = new FileOutputStream(walPath, true);     // append
+    }
+
+    private void recover(String walPath) throws IOException {
+        Path p = Path.of(walPath);
+        if (!Files.exists(p)) return;
+        for (String line : Files.readAllLines(p)) {          // replay WAL
+            String[] f = line.split("\t", 3);                // op \t key [\t value]
+            if (f[0].equals("put")) map.put(f[1], f[2]);
+            else if (f[0].equals("del")) map.remove(f[1]);
+        }
+    }
+
+    void put(String k, String v) throws IOException {
+        rw.writeLock().lock();
+        try { append("put\t" + k + "\t" + v); map.put(k, v); }
+        finally { rw.writeLock().unlock(); }
+    }
+
+    void delete(String k) throws IOException {
+        rw.writeLock().lock();
+        try { append("del\t" + k); map.remove(k); }
+        finally { rw.writeLock().unlock(); }
+    }
+
+    String get(String k) {
+        rw.readLock().lock();
+        try { return map.get(k); } finally { rw.readLock().unlock(); }
+    }
+
+    private void append(String record) throws IOException {
+        wal.write((record + "\n").getBytes());
+        wal.flush();
+        wal.getFD().sync();                                  // durable before returning
+    }
+}
+```
+*(This naive WAL framing assumes keys/values contain no tab/newline; use length-prefixed or escaped records otherwise.)*
+
 **Scaling the lock:** a read-write lock for read-heavy loads; sharded/striped locks; or a **single writer thread** that serializes WAL appends and **batches `fsync`** (higher throughput; write latency bounded by the writer). Periodically snapshot + truncate the WAL (compaction) so recovery stays fast.
 
 ## 29. Multi-Threaded Chat System (single machine)
@@ -3162,6 +3422,38 @@ class ChatServer:
         for user_id in targets:
             self.outbox[user_id].put(message)        # per-user queue: a slow client only backs up itself
 ```
+
+**Java** (concurrent collections replace the explicit per-channel lock + snapshot):
+```java
+import java.util.*;
+import java.util.concurrent.*;
+
+class ChatServer {
+    private final Map<String, Set<String>> subs = new ConcurrentHashMap<>();           // channel -> users
+    private final Map<String, BlockingQueue<String>> outbox = new ConcurrentHashMap<>(); // user -> queue
+
+    void subscribe(String userId, String channel) {
+        subs.computeIfAbsent(channel, c -> ConcurrentHashMap.newKeySet()).add(userId);
+    }
+
+    void unsubscribe(String userId, String channel) {
+        Set<String> s = subs.get(channel);
+        if (s != null) s.remove(userId);
+    }
+
+    void publish(String channel, String message) {
+        Set<String> targets = subs.getOrDefault(channel, Set.of());
+        for (String user : targets) {                  // ConcurrentHashMap keySet is safe to iterate
+            inbox(user).offer(message);                // per-user queue: a slow client only backs up itself
+        }
+    }
+
+    BlockingQueue<String> inbox(String userId) {       // a per-user sender thread drains this to the socket
+        return outbox.computeIfAbsent(userId, u -> new LinkedBlockingQueue<>());
+    }
+}
+```
+
 Each user has a sender thread draining its outbox to the socket. **Key tradeoffs:** per-channel lock (not global) so channels don't block each other; queue + dispatcher (not inline broadcast) so a slow client doesn't stall the publisher; snapshot the subscriber set so subscribe/unsubscribe can run concurrently with publish.
 
 > **Caveat:** `defaultdict(threading.Lock)` can momentarily create two locks if two threads first-touch the same new channel concurrently (CPython's GIL usually hides it, but it isn't guaranteed). Pre-register channels, or use a small guarded `get_lock(channel)` helper, so each channel has exactly one lock.
@@ -3219,6 +3511,56 @@ class FileBlockCache:
                 ev.wait()                              # wait for the leader, then re-check
                 # loop again: cache hit if the leader succeeded, else we become leader
 ```
+
+**Java** (`CompletableFuture` makes the in-flight dedup clean — the leader fetches, others `join` the same future):
+```java
+import java.io.ByteArrayOutputStream;
+import java.util.concurrent.*;
+
+class FileBlockCache {
+    interface Remote { byte[] fetch(String file, long offset, int length); }
+
+    private static final int BLOCK = 64 * 1024;
+    private final Remote remote;
+    private final ConcurrentMap<String, byte[]> cache = new ConcurrentHashMap<>();             // + LRU eviction
+    private final ConcurrentMap<String, CompletableFuture<byte[]>> inflight = new ConcurrentHashMap<>();
+
+    FileBlockCache(Remote remote) { this.remote = remote; }
+
+    byte[] read(String file, long offset, int length) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        for (long b = offset / BLOCK; b <= (offset + length - 1) / BLOCK; b++) {
+            byte[] data = getBlock(file, b);
+            int lo = (int) (Math.max(offset, b * BLOCK) - b * BLOCK);
+            int hi = (int) (Math.min(offset + length, (b + 1) * BLOCK) - b * BLOCK);
+            out.write(data, lo, hi - lo);
+        }
+        return out.toByteArray();
+    }
+
+    private byte[] getBlock(String file, long b) {
+        String key = file + "#" + b;
+        byte[] hit = cache.get(key);
+        if (hit != null) return hit;
+
+        CompletableFuture<byte[]> mine = new CompletableFuture<>();
+        CompletableFuture<byte[]> leader = inflight.putIfAbsent(key, mine);
+        if (leader != null) return leader.join();          // someone else is already fetching
+        try {
+            byte[] data = remote.fetch(file, b * BLOCK, BLOCK);   // only the leader fetches
+            cache.put(key, data);
+            mine.complete(data);
+            return data;
+        } catch (RuntimeException e) {
+            mine.completeExceptionally(e);                 // wake waiters even on failure
+            throw e;
+        } finally {
+            inflight.remove(key);
+        }
+    }
+}
+```
+
 Add LRU eviction when the cache exceeds capacity. The in-flight dedup is the key concurrency win — without it, N threads needing the same hot block all fetch it remotely.
 
 ## 31. Multi-Threaded Web Crawler
@@ -3262,4 +3604,59 @@ class Crawler:
             finally:
                 self.frontier.task_done()
 ```
+
+**Java** (Python's `queue.join()` has no direct equivalent — track outstanding work with an `AtomicInteger` and signal a latch when it hits zero):
+```java
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+class Crawler {
+    interface Fetcher { Iterable<String> fetchLinks(String url); }
+
+    private final Fetcher fetcher;
+    private final BlockingQueue<String> frontier = new LinkedBlockingQueue<>();
+    private final Set<String> visited = ConcurrentHashMap.newKeySet();   // thread-safe set
+    private final AtomicInteger outstanding = new AtomicInteger(0);
+    private final CountDownLatch done = new CountDownLatch(1);
+    private final ExecutorService pool;
+    private final int numWorkers;
+
+    Crawler(Fetcher fetcher, int numWorkers) {
+        this.fetcher = fetcher;
+        this.numWorkers = numWorkers;
+        this.pool = Executors.newFixedThreadPool(numWorkers);
+    }
+
+    void crawl(List<String> seeds) throws InterruptedException {
+        for (String url : seeds) enqueue(url);
+        for (int i = 0; i < numWorkers; i++) pool.submit(this::worker);
+        done.await();                       // block until all work drained
+        pool.shutdownNow();
+    }
+
+    private void enqueue(String url) {
+        if (visited.add(url)) {             // add() is false if already present -> dedup at enqueue
+            outstanding.incrementAndGet();
+            frontier.offer(url);
+        }
+    }
+
+    private void worker() {
+        try {
+            while (true) {
+                String url = frontier.take();
+                try {
+                    for (String link : fetcher.fetchLinks(url)) enqueue(link);  // children inc before parent dec
+                } finally {
+                    if (outstanding.decrementAndGet() == 0) done.countDown();
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+}
+```
+
 **Thread-safety:** `visited` is guarded and updated at *enqueue* time so the same URL isn't queued twice; a fixed worker pool bounds resource use. **Production follow-up:** a per-domain rate limiter (token bucket per host) so you don't overload one site — see the full distributed frontier design in `common_system_design_questions.md` §10.
