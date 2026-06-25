@@ -3683,3 +3683,91 @@ class Crawler {
 ```
 
 **Thread-safety:** `visited` is guarded and updated at *enqueue* time so the same URL isn't queued twice; a fixed worker pool bounds resource use. **Production follow-up:** a per-domain rate limiter (token bucket per host) so you don't overload one site — see the full distributed frontier design in `common_system_design_questions.md` §10.
+
+---
+
+## 32. String Pattern Partition
+
+**Problem:** Given a source string `a` and a target string `b`, partition `b` into the **minimum** number of contiguous substrings such that each substring also occurs as a contiguous substring of `a`. Return one index range into `a` per partition (the substring's location in `a`). **Follow-up:** after deleting one character from `b`, recompute the minimum partition.
+
+**Clarify first** (the prompt's example is ambiguous — its target `"sabcd"` contains `'s'`, which is absent from `a = "abcdbcd"`):
+- **Indexing convention:** 0-based vs 1-based, inclusive vs half-open. Below uses **0-based inclusive** `[start, end]` into `a`.
+- **Unmatched characters:** if a character of `b` never appears in `a`, the target can't be covered at all → return a sentinel (`None`). (No single-char substring would match, so the DP is unsolvable.)
+- **Ties:** multiple minimum-count partitions can exist; any valid one is acceptable unless the interviewer wants a specific tie-break.
+
+### Clean DP
+
+`dp[i]` = fewest partitions covering `b[:i]`. Transition: `dp[i] = min(dp[j] + 1)` over all `j < i` where `b[j:i]` occurs in `a`. Keep a parent pointer to reconstruct the ranges.
+
+```python
+def min_partition(a: str, b: str):
+    """Fewest contiguous substrings of b that each occur in a.
+    Returns 0-based inclusive ranges [start, end] into a, or None if impossible."""
+    n = len(b)
+    dp = [float("inf")] * (n + 1)
+    dp[0] = 0
+    parent = [None] * (n + 1)            # parent[i] = (j, (lo, hi) range in a)
+
+    for i in range(1, n + 1):
+        for j in range(i):
+            if dp[j] + 1 < dp[i]:
+                pos = a.find(b[j:i])     # first occurrence of b[j:i] in a (-1 if none)
+                if pos != -1:
+                    dp[i] = dp[j] + 1
+                    parent[i] = (j, [pos, pos + (i - j) - 1])
+
+    if dp[n] == float("inf"):
+        return None                      # some character/substring of b is not in a
+
+    ranges = []                          # reconstruct from the end
+    i = n
+    while i > 0:
+        j, rng = parent[i]
+        ranges.append(rng)
+        i = j
+    ranges.reverse()
+    return ranges
+```
+
+**Example:** `a = "abcdbcd"`, `b = "abcbcd"` → `[[0, 2], [1, 3]]` — `"abc"` = `a[0:2]` then `"bcd"` = `a[1:3]` (its first occurrence; `a[4:6]` is an equally valid range), two partitions covering `"abc"+"bcd" = "abcbcd"`.
+
+**Complexity:** `O(n²)` `(j, i)` pairs, each doing an `a.find` (`O(|a|·(i−j))` worst case) → roughly `O(n² · |a| · n)` naively. Tighten the substring test below.
+
+### Faster substring membership
+
+The hot operation is "does `b[j:i]` occur in `a`?" — make it `O(length)` instead of `O(|a|·length)`:
+
+```python
+# Option A: precompute every substring of a (O(|a|^2) space) for O(1) membership.
+def all_substrings(a):
+    subs = set()
+    for i in range(len(a)):
+        for j in range(i + 1, len(a) + 1):
+            subs.add(a[i:j])
+    return subs                          # `b[j:i] in subs` is O(len) for hashing
+```
+
+- **Suffix automaton / suffix tree of `a`** — walk `b[j:i]` character by character; membership in `O(length)` and `O(|a|)` space (the scalable choice for large `a`).
+- **Rolling hash (Rabin–Karp)** of all `a` substrings of each needed length, or a **suffix array + binary search**.
+- Either way, recover the range with one `a.find` (or store positions in the automaton) only for the substrings actually chosen during reconstruction.
+
+### Follow-up: delete one character
+
+Deleting `b[d]` gives `b' = b[:d] + b[d+1:]`; the answer is `min_partition(a, b')`.
+
+```python
+def min_partition_after_delete(a: str, b: str, d: int):
+    return min_partition(a, b[:d] + b[d + 1:])
+```
+
+- **Small inputs:** just recompute — `O(n²)` per deletion, fine.
+- **Large inputs / many deletions:** the `dp` prefix `dp[0..d]` is unchanged (it doesn't depend on anything past index `d`), so only positions `> d` need recomputation. Discuss **incremental DP**: keep `dp`/`parent`, invalidate from `d` onward, and re-run the inner loop only for `i > d`. Substrings spanning the deletion point change, so the transition source `j` can range back to `0`, but you still save the prefix work.
+
+### Tests to prepare
+
+- Character of `b` absent from `a` → `None`.
+- Repeated source substrings (multiple valid positions) — any is fine.
+- Tie among equal partition counts.
+- Empty target `b = ""` → `[]` (zero partitions).
+- `b` fully equal to a substring of `a` → single range.
+- Deletion at the **beginning / middle / end** of `b`, and deleting the only occurrence-breaking character.
