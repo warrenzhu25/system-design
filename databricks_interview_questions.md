@@ -3136,7 +3136,8 @@ class LogWriter {
 import threading, queue
 from collections import defaultdict
 
-def run_dag(task_ids, dependencies, run, num_workers=4):
+def run_dag(task_ids, dependencies, run, num_workers=4) -> bool:
+    """Run the DAG. Returns True if every task ran, False if a cycle left some unrun."""
     children = defaultdict(list)
     indegree = defaultdict(int)
     for before, after in dependencies:
@@ -3144,16 +3145,22 @@ def run_dag(task_ids, dependencies, run, num_workers=4):
         indegree[after] += 1
 
     ready = queue.Queue()
+    lock = threading.Lock()
+    total = len(task_ids)
+    scheduled = 0          # tasks ever placed on the ready queue
+    completed = 0
+    done_event = threading.Event()
+
     for t in task_ids:
         if indegree[t] == 0:
             ready.put(t)
-
-    lock = threading.Lock()
-    remaining = len(task_ids)
-    done_event = threading.Event()
+            scheduled += 1
+    # Empty graph, or a cycle with no entry point: nothing is runnable.
+    if scheduled == 0:
+        done_event.set()
 
     def worker():
-        nonlocal remaining
+        nonlocal scheduled, completed
         while True:
             task_id = ready.get()
             run(task_id)                          # execute the task
@@ -3162,14 +3169,17 @@ def run_dag(task_ids, dependencies, run, num_workers=4):
                     indegree[child] -= 1
                     if indegree[child] == 0:
                         ready.put(child)
-                remaining -= 1
-                if remaining == 0:
+                        scheduled += 1
+                completed += 1
+                # Every scheduled task done -> finished, or a cycle left the rest unschedulable.
+                if completed == scheduled:
                     done_event.set()
             ready.task_done()
 
     for _ in range(num_workers):
         threading.Thread(target=worker, daemon=True).start()
     done_event.wait()
+    return completed == total                     # False => a cycle left some tasks unrun
 ```
 
 **Java:**
@@ -3234,7 +3244,7 @@ class DagScheduler {
 }
 ```
 
-**Worker count:** more workers help I/O-bound tasks; CPU-bound tasks are bounded by cores (and the GIL — use processes). **Cycle handling:** a cyclic (or otherwise unsatisfiable) graph leaves some tasks that never reach indegree 0. The Java version detects this — when every *scheduled* task has finished but `completed < total` — and returns `false` instead of hanging. Add the same `completed == scheduled` check to the Python sketch, which otherwise blocks forever on `done_event.wait()`.
+**Worker count:** more workers help I/O-bound tasks; CPU-bound tasks are bounded by cores (and the GIL — use processes). **Cycle handling:** a cyclic (or otherwise unsatisfiable) graph leaves some tasks that never reach indegree 0. Both versions detect this — when every *scheduled* task has finished but `completed < total`, a cycle left the rest unrun — and return `False`/`false` instead of blocking forever on `done_event.wait()` / `done.await()`.
 
 ## 27. Concurrent HashMap
 
