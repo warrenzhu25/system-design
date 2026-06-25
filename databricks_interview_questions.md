@@ -12,6 +12,8 @@ Given a matrix of `'0'` and `'1'`, find the area of the largest square containin
 **Answer:**
 Use dynamic programming where `dp[i][j]` is the side length of the largest square whose bottom-right corner is `(i, j)`.
 
+*Main logic:* `dp[i][j]` = side of the largest all-`1` square whose **bottom-right corner** is `(i, j)`. A square can only extend if its top, left, and top-left neighbors all support the same size, so `dp[i][j] = 1 + min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1])`. Track the max side; the area is side².
+
 ```python
 def maximal_square(matrix: list[list[str]]) -> int:
     if not matrix or not matrix[0]:
@@ -38,6 +40,8 @@ def maximal_square(matrix: list[list[str]]) -> int:
 ```
 
 **Follow-up: Maximal Rectangle**
+
+*Main logic:* reduce to "largest rectangle in a histogram" per row. `heights[j]` is the run of consecutive `1`s ending at the current row; the best rectangle resting on that row is the largest histogram rectangle, which a monotonic increasing stack computes in O(n) (each bar is pushed/popped once; when a shorter bar arrives, pop taller bars and measure the rectangle each one bounds).
 
 ```python
 def maximal_rectangle(matrix: list[list[str]]) -> int:
@@ -90,6 +94,8 @@ Design a lazy array that supports chained `map(fn)` calls without eagerly applyi
 **Answer:**
 Store the original array plus a linked list of deferred operations. When `indexOf` is called, replay the operation chain only as needed.
 
+*Main logic:* `map` is O(1) — it just prepends the function to a linked list of deferred ops and returns a new view that shares the original array. All work is deferred to `indexOf`: replay the op chain on each element left-to-right, cache transformed values, and return at the first one equal to the target.
+
 ```python
 class OpNode:
     def __init__(self, func, pre=None):
@@ -141,6 +147,8 @@ Design a set supporting `add`, `remove`, `contains`, and `getIterator()`, where 
 
 **Answer:**
 Track each element with a start version and end version. A snapshot iterator stores the current version and only yields elements alive in that version.
+
+*Main logic:* give every mutation a global version number and tag each element with `[value, start_version, end_version]`. An iterator captures the current version on creation and yields only elements alive then — those with `start < version <= end`. This gives a consistent point-in-time view with no copying of the set.
 
 ```python
 class SnapshotSet:
@@ -214,6 +222,8 @@ Design a generalized tic-tac-toe game on an `n x m` board where a player wins af
 **Answer:**
 For each player, keep a set of occupied cells. After each move, expand in four directions and count consecutive marks in both forward and backward directions.
 
+*Main logic:* keep each player's occupied cells in a set. After a move, for each of the 4 axes (horizontal, vertical, two diagonals) walk forward and backward from the new cell counting contiguous same-player marks; a run of `k` wins. O(k) per move — no full-board scan.
+
 ```python
 import collections
 
@@ -275,6 +285,8 @@ Given a grid with start `S`, destination `D`, blocked cells `X`, and transport-m
 
 Run BFS for each mode independently. Compute path length, then convert to total time and total cost using that mode's per-step values.
 
+*Main logic:* committing to one mode means you may only step on that mode's cells (plus `D`). So run an independent BFS per mode for the shortest step count to `D`, convert steps → `(time, cost)` using that mode's per-step values, and keep the lexicographically best `(time, then cost)`.
+
 ```python
 from collections import deque
 
@@ -323,6 +335,8 @@ def find_optimal_single_mode(grid, modes, costs, times):
 **Answer 2: Mixed Modes**
 
 Use Dijkstra with state priority `(time, cost)` to minimize time first and cost second.
+
+*Main logic:* Dijkstra over grid cells with the priority key `(time, cost)`, so it minimizes time first and cost as the tiebreak. Each move charges the *leaving* cell's mode; the first time `D` is popped from the heap yields the optimal `(time, cost)`.
 
 ```python
 import heapq
@@ -392,6 +406,8 @@ The file contains two versions:
 
 **Exact Version**
 
+*Main logic:* store distinct timestamps alongside a running `prefix_count` of hits. `get_load(seconds)` binary-searches the cutoff timestamp (`current_time - seconds`) and returns `total - prefix_count[cutoff]` — the hits inside the window — in O(log n). Results are cached per window size and the cache is cleared on each new hit.
+
 ```python
 class HitCounter:
     def __init__(self):
@@ -459,6 +475,8 @@ Given firewall rules such as `ALLOW 1.2.3.0/24` and `DENY 1.2.3.4`, determine wh
 
 **Answer:**
 Convert IPs to 32-bit binary strings and store rule prefixes in a trie. During lookup, walk the trie while tracking the highest-priority matching rule.
+
+*Main logic:* convert each IP to its 32-bit string and insert each rule's prefix (the first `mask` bits) into a binary trie, recording the rule's index (priority) and action at the prefix's end node. To classify an IP, walk its bits down the trie and keep the best (lowest-index) rule encountered along the path.
 
 ```python
 class Trie:
@@ -545,6 +563,8 @@ Each breaker tracks:
 - whether the breaker is open
 
 If the primary is unavailable or fails, try the secondary. If both are open, reject the request.
+
+*Main logic:* each backend has a breaker that **opens** after `failureThreshold` consecutive failures and **auto-closes** after `resetThreshold` skipped requests. Per request: try the primary if its breaker is closed; if the primary is open or fails, fall back to the secondary; label the outcome by what actually succeeded (a failed primary with no working fallback is `"Rejected"`).
 
 ```python
 class Server:
@@ -640,6 +660,8 @@ Given a DAG with `n` nodes and directed edges, find the bottleneck nodes. In thi
 **Answer:**
 Run topological sorting with indegree counting. Whenever the queue size is exactly `1`, record that node as a bottleneck candidate.
 
+*Main logic:* run Kahn's topological sort **layer by layer** (process the entire current frontier, which becomes the next layer). Whenever a layer contains exactly one node, that node is the only option at its level — record it as a bottleneck (per this problem's "layer of size 1" definition).
+
 ```python
 import collections
 from collections import deque
@@ -702,6 +724,8 @@ Use:
 - `id_to_revenue` for direct lookup
 - a sorted ranking structure ordered by revenue descending
 - an adjacency list for referral relationships
+
+*Main logic:* keep a hash map `id → revenue`, a `SortedSet` of `(-revenue, id)` for instant top-k by revenue, and an adjacency list for referrals. A referral bumps the referrer's revenue (remove + re-insert in the sorted set to keep it ordered) and records the child; `getRelations` BFSes the referral tree level by level.
 
 ```python
 from sortedcontainers import SortedSet
@@ -779,6 +803,8 @@ The file contains two variants:
 
 **Answer: Inclusive Intervals**
 
+*Main logic:* walk the intervals, subtracting each one's length from `index` until the target falls inside the current interval. Removing that point either drops the interval (if length 1), trims one boundary, or splits it into two; intervals after the removal are copied through unchanged.
+
 ```python
 def remove_intervals_include(intervals, index):
     found = False
@@ -805,6 +831,8 @@ def remove_intervals_include(intervals, index):
 ```
 
 **Answer: Half-Open Intervals**
+
+*Main logic:* identical walk to the inclusive version, but with half-open lengths (`end - start`) and boundaries — trim to `[start, remove_point)` on the left and `[remove_point + 1, end)` on the right.
 
 ```python
 def remove_intervals_not_include(intervals, index):
@@ -845,6 +873,8 @@ Design an encoder/decoder for integer sequences using:
 The solution uses RLE when a run length is at least `8`, otherwise it falls back to bit-packing groups.
 
 **Answer:**
+
+*Main logic:* scan maximal runs of equal values. A run of length ≥ 8 (or the final run) is emitted as `RLE[value, count]`; otherwise pack up to 8 short-run values into a `BP[...]` group. `decode` reverses each token. The point is to use run-length encoding for long runs and bit-packing for choppy regions.
 
 ```python
 class Solution:
@@ -916,6 +946,8 @@ Find the path between two nodes in an implicit Fibonacci tree. The file also inc
 **Answer:**
 The Fibonacci tree version computes subtree sizes recursively and uses them to determine whether a target lies in the left or right subtree.
 
+*Main logic:* the implicit tree's nodes are laid out in a fixed index order, so subtree **sizes** (a Fibonacci-like recurrence) tell you whether a target index lies in the left or right subtree. Build the root→source and root→destination paths, strip their common prefix (the part above the LCA), then emit `U`s to climb from source up to the LCA followed by the destination's suffix.
+
 ```python
 class Solution:
     def findPath(self, order: int, source: int, dest: int) -> str:
@@ -973,6 +1005,8 @@ Implement a time-based key-value store supporting:
 
 **Answer:**
 Store timestamp-sorted values per key and binary search during `get`.
+
+*Main logic:* per key, append `[timestamp, value]` in increasing-time order; `get` binary-searches for the rightmost timestamp ≤ the query and returns its value — the most recent value at or before that time.
 
 ```python
 class TimeMap:
@@ -1040,6 +1074,8 @@ Use:
 - a pointer for global undo cleanup
 
 For `undo(tag)`, keep popping stale indices from that tag's stack until the top points to an active command. For plain `undo()`, walk backward from the global tail until an active command is found.
+
+*Main logic:* commands are an append-only array with an `active` flag; each tag keeps its own stack of command indices. `undo(tag)` pops already-undone (stale) indices off that tag's stack until it finds an active command; plain `undo()` walks a global pointer left past inactive commands. Each index is pushed and popped at most once, giving amortized O(1).
 
 ```python
 from collections import defaultdict
@@ -1318,6 +1354,8 @@ At each house:
 
 ### Best Solution: O(1) Space
 
+*Main logic:* the only state needed is the best total up to the previous two houses, so roll two variables — at each house, `curr = max(skip = curr, rob = prev + num)`.
+
 ```python
 def rob(nums: list[int]) -> int:
     prev, curr = 0, 0
@@ -1333,6 +1371,8 @@ def rob(nums: list[int]) -> int:
 - Space: `O(1)`
 
 ### Recursive + Memo
+
+*Main logic:* top-down form of the same recurrence — `dp(i) = max(nums[i] + dp(i-2), dp(i-1))`, memoized by index.
 
 ```python
 def rob_memo(nums: list[int]) -> int:
@@ -1357,6 +1397,8 @@ def rob_memo(nums: list[int]) -> int:
 - Space: `O(n)`
 
 ### Iterative DP Table
+
+*Main logic:* bottom-up table of the same recurrence, `dp[i] = max(dp[i-1], nums[i] + dp[i-2])`.
 
 ```python
 def rob_table(nums: list[int]) -> int:
@@ -1384,6 +1426,8 @@ If houses form a circle, you cannot rob both the first and last house.
 Solve two linear cases:
 - rob from `0..n-2`
 - rob from `1..n-1`
+
+*Main logic:* the first and last houses are adjacent on a circle, so they can't both be robbed — run the linear robber twice (once excluding the last house, once excluding the first) and take the max.
 
 ```python
 def rob_circular(nums: list[int]) -> int:
@@ -1414,6 +1458,8 @@ If robbing house `i` means you must skip the next `k` houses, then:
 dp[i] = max(dp[i - 1], nums[i] + dp[i - k - 1])
 ```
 
+*Main logic:* robbing house `i` forces skipping the next `k`, so the recurrence reaches back `k+1`: `dp[i] = max(dp[i-1], nums[i] + dp[i-k-1])`.
+
 ```python
 def rob_with_gap(nums: list[int], k: int) -> int:
     n = len(nums)
@@ -1443,6 +1489,8 @@ If houses are arranged in a binary tree, you cannot rob a node and its direct ch
 For each node, return:
 - best value if you rob this node
 - best value if you skip this node
+
+*Main logic:* post-order DFS returning two values per node — best if you **rob** it (`node.val` + both children's *skip* totals) and best if you **skip** it (each child contributes its own max of rob/skip). The answer is the root's max.
 
 ```python
 def rob_tree(root) -> int:
@@ -2478,6 +2526,8 @@ class Customer:
 
 Best when inserts are frequent and queries are relatively rare.
 
+*Main logic:* store customers in a hash map and do nothing special on insert (a referral just bumps the referrer's `total_revenue`). `get_lowest_k_by_total_revenue` filters by the threshold and sorts by `(total_revenue, id)` at query time — O(1) insert, O(n log n) query.
+
 ```python
 class Customer:
     def __init__(self, customer_id: int, revenue: int):
@@ -2531,6 +2581,8 @@ Use:
 - balanced tree or sorted list keyed by `(total_revenue, id)`
 
 Python version using `SortedList`:
+
+*Main logic:* keep a `SortedList` ordered by `(total_revenue, id)` so queries are a binary search plus a short scan. A referral that changes a referrer's total must **remove then re-insert** that entry to keep the structure ordered — O(log n) insert, O(log n + k) query. Best when reads dominate.
 
 ```python
 from sortedcontainers import SortedList
@@ -2599,6 +2651,8 @@ class RevenueSystem:
 ### Approach 3: Lazy Sorting
 
 Best when writes come in bursts and reads are occasional.
+
+*Main logic:* a compromise — keep customers in a map plus a cached sorted list that is invalidated (`sorted_cache = None`) on every write and rebuilt lazily on the next query. A burst of writes pays for one re-sort instead of one per write.
 
 ```python
 class RevenueSystem:
@@ -2802,6 +2856,8 @@ This problem is mainly about choosing the right tradeoff between write speed and
 **Problem:** You are given `N` already-connected graphs. Add new edges to merge them into a single connected graph using the **minimum** number of edges, choosing the new connections **randomly**. A `random(n)` primitive returns an int in `[0, n)`. Return the list of new edges.
 
 **Key insight:** with `N` connected components, the minimum to connect them into one is exactly `N - 1` edges (this is not MST — there are no weights). So the task is: pick one representative node per component, then connect the components with `N - 1` edges. If the interviewer wants a *uniform* distribution over all ways to connect the components, sample a uniform random spanning tree of the `N` components via a **Prüfer sequence**.
+
+*Main logic:* connecting `N` components needs exactly `N-1` new edges. `merge_graphs_simple` picks one random node per component and links them in a shuffled chain (random, but not uniform over all spanning trees). `merge_graphs_uniform` instead samples a uniform random labeled tree over the components via a **Prüfer sequence**, then realizes each component-level tree edge as an edge between two random nodes.
 
 ```python
 import random, heapq
