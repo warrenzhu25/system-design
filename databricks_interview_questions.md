@@ -3195,6 +3195,7 @@ class DagScheduler {
 
         AtomicInteger remaining = new AtomicInteger(taskIds.size());
         CountDownLatch done = new CountDownLatch(1);
+        if (remaining.get() == 0) done.countDown();   // empty DAG -> nothing to run
         Object lock = new Object();
         ExecutorService pool = Executors.newFixedThreadPool(numWorkers);
 
