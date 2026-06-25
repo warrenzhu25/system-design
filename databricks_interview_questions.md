@@ -3630,6 +3630,7 @@ class Crawler {
 
     void crawl(List<String> seeds) throws InterruptedException {
         for (String url : seeds) enqueue(url);
+        if (outstanding.get() == 0) done.countDown();   // nothing to crawl (empty/all-dup seeds)
         for (int i = 0; i < numWorkers; i++) pool.submit(this::worker);
         done.await();                       // block until all work drained
         pool.shutdownNow();
