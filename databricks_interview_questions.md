@@ -3176,11 +3176,11 @@ def run_dag(task_ids, dependencies, run, num_workers=4):
 ```java
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 class DagScheduler {
-    void run(List<Integer> taskIds, int[][] deps, Consumer<Integer> run, int numWorkers)
+    /** Runs the DAG; returns true if every task ran, false if a cycle left some unrun. */
+    boolean run(List<Integer> taskIds, int[][] deps, Consumer<Integer> run, int numWorkers)
             throws InterruptedException {
         Map<Integer, List<Integer>> children = new HashMap<>();
         Map<Integer, Integer> indegree = new HashMap<>();
@@ -3191,14 +3191,17 @@ class DagScheduler {
         }
 
         BlockingQueue<Integer> ready = new LinkedBlockingQueue<>();
-        for (int t : taskIds) if (indegree.get(t) == 0) ready.add(t);
-
-        AtomicInteger remaining = new AtomicInteger(taskIds.size());
-        CountDownLatch done = new CountDownLatch(1);
-        if (remaining.get() == 0) done.countDown();   // empty DAG -> nothing to run
         Object lock = new Object();
-        ExecutorService pool = Executors.newFixedThreadPool(numWorkers);
+        int total = taskIds.size();
+        int[] scheduled = {0};          // tasks ever placed on the ready queue
+        int[] completed = {0};
+        CountDownLatch done = new CountDownLatch(1);
 
+        for (int t : taskIds) if (indegree.get(t) == 0) { ready.add(t); scheduled[0]++; }
+        // Empty graph, or a cycle with no entry point: nothing is runnable.
+        if (scheduled[0] == 0) done.countDown();
+
+        ExecutorService pool = Executors.newFixedThreadPool(numWorkers);
         for (int i = 0; i < numWorkers; i++) {
             pool.submit(() -> {
                 try {
@@ -3207,23 +3210,31 @@ class DagScheduler {
                         run.accept(task);                      // execute the task
                         synchronized (lock) {
                             for (int child : children.getOrDefault(task, List.of())) {
-                                if (indegree.merge(child, -1, Integer::sum) == 0) ready.add(child);
+                                if (indegree.merge(child, -1, Integer::sum) == 0) {
+                                    ready.add(child);
+                                    scheduled[0]++;
+                                }
                             }
+                            completed[0]++;
+                            // Every scheduled task is done -> either finished, or a cycle
+                            // left the rest unschedulable. Either way, stop waiting.
+                            if (completed[0] == scheduled[0]) done.countDown();
                         }
-                        if (remaining.decrementAndGet() == 0) done.countDown();
                     }
                 } catch (InterruptedException ignored) {
                     Thread.currentThread().interrupt();        // shutdownNow stops idle workers
                 }
             });
         }
+
         done.await();
         pool.shutdownNow();
+        return completed[0] == total;   // false => a cycle left some tasks unrun
     }
 }
 ```
 
-**Worker count:** more workers help I/O-bound tasks; CPU-bound tasks are bounded by cores (and the GIL — use processes). A cycle leaves some tasks with indegree > 0 forever (`remaining` never reaches 0) — detectable as a deadlock/timeout.
+**Worker count:** more workers help I/O-bound tasks; CPU-bound tasks are bounded by cores (and the GIL — use processes). **Cycle handling:** a cyclic (or otherwise unsatisfiable) graph leaves some tasks that never reach indegree 0. The Java version detects this — when every *scheduled* task has finished but `completed < total` — and returns `false` instead of hanging. Add the same `completed == scheduled` check to the Python sketch, which otherwise blocks forever on `done_event.wait()`.
 
 ## 27. Concurrent HashMap
 
