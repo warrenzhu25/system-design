@@ -77,6 +77,8 @@ Explanation:
 
 **Solution:**
 
+*Main logic:* a box must clear **every** room it passes, so first turn the warehouse into **effective heights** (prefix-min of ceilings from the left). Then greedily match: sort boxes ascending and fill from the **rightmost** room with the smallest box that fits. (The two-pointer alternative sorts boxes descending and walks rooms left-to-right instead.)
+
 ```python
 def maxBoxesInWarehouse(boxes: list[int], warehouse: list[int]) -> int:
     """
@@ -169,6 +171,8 @@ Explanation:
 ```
 
 **Solution 1: Greedy with Sorting (Largest First)**
+
+*Main logic:* now maximize total *height*, not count — so place the **largest** boxes first, each into the leftmost room (by effective height) that can still fit it. Bigger boxes contribute more to the sum, so they get priority for the scarce tall rooms.
 
 ```python
 def maxTotalBoxHeight(boxes: list[int], warehouse: list[int]) -> int:
@@ -299,6 +303,8 @@ def maxTotalBoxHeightDP(boxes: list[int], warehouse: list[int]) -> int:
 
 **Problem:** What if boxes can be pushed from either the left or right side of the warehouse?
 
+*Main logic:* a room is now reachable from the left (prefix-min of ceilings) **or** the right (suffix-min), so its effective height is the *better* of the two. Compute both passes, then greedily fit sorted boxes against the rooms using two pointers converging from both ends.
+
 ```python
 def maxBoxesBothEnds(boxes: list[int], warehouse: list[int]) -> int:
     """
@@ -379,6 +385,8 @@ Light reaches:
 ---
 
 **Solution 1: Ray Casting (Per-Lighthouse)**
+
+*Main logic:* for each lighthouse, **cast a ray** in each of its emit directions, marking cells lit until the ray hits a wall or the grid edge. Union the lit cells across all lighthouses. O(lighthouses × ray length).
 
 ```python
 def simulate_light(grid: list[list[int]]) -> list[list[bool]]:
@@ -714,6 +722,8 @@ Output: 1 <-> 2 <-> 3 <-> 4 <-> 5 (circular)
 
 **Solution 1: Recursive In-Order Traversal**
 
+*Main logic:* an **in-order** traversal visits BST nodes in sorted order, so thread each visited node to its predecessor as you go (`prev.right = node`, `node.left = prev`). Keep the first and last nodes, then close the ring at the end (`head.left = tail`, `tail.right = head`).
+
 ```python
 class Node:
     def __init__(self, val=0, left=None, right=None):
@@ -1040,6 +1050,8 @@ getPeople(2)          // 1 (player 0)
 
 **Solution: Doubly-Linked List Per Room + Player Map**
 
+*Main logic:* keep a **doubly-linked list per room** in FIFO arrival order, plus a `player → node` map. `proceedToNextRoom` unlinks the player from its current room list and appends to the next room's list (O(1)); `getPeople` reads a per-room size counter; `getTop(k)` scans rooms from highest to lowest, taking players in arrival order (higher room, then earlier arrival, ranks first).
+
 ```python
 class ListNode:
     """Node in doubly-linked list for a room."""
@@ -1322,6 +1334,8 @@ With k=2 stops, can use 3 flights
 
 **Solution 1: BFS (Level-by-Level)**
 
+*Main logic:* BFS where **each level = one more flight**, so after `k + 1` levels you stop. Track the cheapest cost seen per city and only relax a neighbor when a cheaper cost arrives — this is Bellman-Ford bounded to `k + 1` edges.
+
 ```python
 from collections import defaultdict, deque
 
@@ -1515,6 +1529,8 @@ Output: 2 -> 3 -> 6 -> 7 -> 1 -> 5 -> 4
 
 **Solution: Two Pointers**
 
+*Main logic:* weave two chains in a single pass — an `odd` pointer and an `even` pointer each advancing by two. Remember the even head, then splice the even chain onto the tail of the odd chain. O(n) time, O(1) space.
+
 ```python
 class ListNode:
     def __init__(self, val=0, next=None):
@@ -1628,6 +1644,8 @@ Explanation: ["JFK","ATL","JFK","SFO","ATL","SFO"] < ["JFK","SFO","ATL","JFK","A
 - When stuck (no outgoing edges), that node must be the end of the path
 
 **Solution 1: Hierholzer's Algorithm (Recursive)**
+
+*Main logic:* this is an **Eulerian path** (use every ticket exactly once). Sort each origin's destinations so DFS explores them lexicographically, and add a node to the result **in post-order** — only once it has no unused outgoing edges — then reverse at the end. Post-order is what makes dead-ends land in the right place.
 
 ```python
 from collections import defaultdict
@@ -1767,6 +1785,8 @@ Explanation:
 ```
 
 **Part 1 Solution: HashMap Count**
+
+*Main logic:* Part 1 is a plain per-user counter. Part 2 is a **sliding window** per user over that user's sorted timestamps: advance a left pointer to keep the window within `t` seconds; if any window ever holds more than `k` actions, flag the user.
 
 ```python
 from collections import defaultdict
