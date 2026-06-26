@@ -303,15 +303,18 @@ def maxTotalBoxHeightDP(boxes: list[int], warehouse: list[int]) -> int:
 
 **Problem:** What if boxes can be pushed from either the left or right side of the warehouse?
 
-*Main logic:* a room is now reachable from the left (prefix-min of ceilings) **or** the right (suffix-min), so its effective height is the *better* of the two. Compute both passes, then greedily fit sorted boxes against the rooms using two pointers converging from both ends.
+*Main logic:* a room is now reachable from the left **or** the right edge, so its effective height is the better of prefix-min (from the left) and suffix-min (from the right). Rather than materialize both passes, sort boxes **descending** and walk two pointers inward from both raw ends: place each box at whichever end's room can hold it. The descending order makes the raw ends behave like the effective heights — a box too tall for the current `left` room is also too tall for every room behind it (they're only ever shorter on the prefix-min), so discarding it is safe; same on the right.
 
 ```python
 def maxBoxesBothEnds(boxes: list[int], warehouse: list[int]) -> int:
     """
     When boxes can enter from both ends, we can place more boxes.
 
-    Key insight: Find the peak (max height room), split into two problems.
-    Or use two pointers from both ends.
+    Sort boxes descending, converge two pointers from both raw ends, and
+    place each box at whichever end still fits it. Processing largest-first
+    means a box rejected at an end is also rejected by every room behind it,
+    so the raw ceilings act as effective (prefix/suffix-min) heights for free
+    — no separate effective-height passes needed.
 
     Time: O(n log n + m)
     Space: O(1)
@@ -325,14 +328,14 @@ def maxBoxesBothEnds(boxes: list[int], warehouse: list[int]) -> int:
         if left > right:
             break
 
-        # Try to place from the side with larger ceiling
+        # Place at whichever end's room can still hold this box
         if warehouse[left] >= box:
             count += 1
             left += 1
         elif warehouse[right] >= box:
             count += 1
             right -= 1
-        # else: box doesn't fit anywhere
+        # else: box fits at neither end -> discard (all remaining are smaller)
 
     return count
 ```
