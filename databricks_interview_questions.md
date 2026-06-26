@@ -563,6 +563,29 @@ class HitCounter:
         return 0 if seconds <= 0 else self.get_load(seconds) / seconds
 ```
 
+**Step-by-step walkthrough**
+
+The core trick is a **prefix sum over distinct timestamps**, so "hits in a window" becomes one subtraction:
+- `timestamps` — the distinct times that got hits, increasing.
+- `prefix_count[i]` — the **cumulative** number of hits with timestamp ≤ `timestamps[i]`.
+
+*`hit(timestamp)`* — a **new** second appends a slot with cumulative `prev + 1`; a **repeated** second just bumps the last cumulative entry, so duplicates collapse into one slot and `timestamps` stays strictly increasing. The cache is cleared because counts changed.
+
+*`get_load(seconds)`* — let `target = current_time - seconds`. Binary-search the **rightmost** index with `timestamps[idx] <= target` (the cutoff); everything at/before it is *outside* the window. Return `total - prefix_count[cutoff]` = hits strictly after the cutoff, i.e. inside `(target, current_time]`. If nothing is ≤ `target`, `cutoff = 0` (whole history counts). Repeated identical queries are served from `cache`.
+
+*Worked example* — hits at `t = 1, 2, 2, 3, 150, 301`:
+```text
+timestamps   = [ 1,  2,  3, 150, 301]
+prefix_count = [ 1,  3,  4,   5,   6]    # t=2 collapsed to one slot (cumulative 3)
+
+get_load(300): target = 301-300 = 1  -> last ts <= 1 is idx 0, cutoff=1 -> 6-1 = 5
+               (the hit at t=1 is exactly 300 old, so excluded)
+get_load(200): target = 301-200 = 101 -> last ts <= 101 is t=3 (idx 2), cutoff=4 -> 6-4 = 2
+get_qps(300):  5 / 300 ≈ 0.0167
+```
+
+**Complexity:** `hit` O(1) amortized; `get_load` O(log n) (O(1) on a cache hit). The half-open boundary comes from `timestamps[mid] <= target` (a hit exactly `seconds` old is excluded — use `< target` for an inclusive window).
+
 **Discussion:**
 - Cache recent `get_load` results for repeated windows
 - Use multi-level buckets for large time ranges with bounded memory
