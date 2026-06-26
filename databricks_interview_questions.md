@@ -41,6 +41,8 @@ def maximal_square(matrix: list[list[str]]) -> int:
 
 **Follow-up: Maximal Rectangle**
 
+**Square vs rectangle (related but different):** the square uses the `min(top, left, top-left) + 1` DP; a rectangle isn't constrained to be square, so that DP doesn't apply — instead reduce each row to a **histogram** and run largest-rectangle-in-histogram with a monotonic stack.
+
 *Main logic:* reduce to "largest rectangle in a histogram" per row. `heights[j]` is the run of consecutive `1`s ending at the current row; the best rectangle resting on that row is the largest histogram rectangle, which a monotonic increasing stack computes in O(n) (each bar is pushed/popped once; when a shorter bar arrives, pop taller bars and measure the rectangle each one bounds).
 
 ```python
@@ -382,6 +384,11 @@ Source: [DataBricks/find_ optimal_path.py](/Users/warren/github/system-design/Da
 Given a grid with start `S`, destination `D`, blocked cells `X`, and transport-mode cells, find the optimal commute. The file contains two variants:
 - choose the best single transport mode
 - allow mixed modes and minimize total time, then cost
+
+**Single-mode vs mixed-mode — same grid, different algorithm (the only thing to remember):**
+- **Single mode:** the mode is fixed, so every step costs the same → edges are uniform-weight → **BFS per mode**, then convert steps to `(time, cost)` and take the best over modes.
+- **Mixed mode:** each step's cost depends on the cell's mode → edges have varying weight → **Dijkstra** with priority key `(time, cost)`.
+- Memory hook: *fixed weight ⇒ BFS; variable weight ⇒ Dijkstra.*
 
 **Answer 1: Best Single Mode**
 
@@ -961,6 +968,16 @@ def remove_intervals_not_include(intervals, index):
     return res
 ```
 
+**Inclusive vs half-open — only 3 lines change.** Write the inclusive version, then for half-open flip exactly these:
+
+| | Inclusive `[s, e]` | Half-open `[s, e)` |
+|---|---|---|
+| element count | `length = e - s + 1` | `length = e - s` |
+| left piece | `[s, remove_point - 1]` | `[s, remove_point]` |
+| right guard | `if remove_point < end` | `if remove_point + 1 < end` |
+
+Everything else — the walk, the right piece `[remove_point + 1, end]`, and the `index -= length` bookkeeping — is identical. **Memory hook:** half-open *loses* the `+1` on length and the left end, but *gains* a `+1` on the right guard.
+
 ---
 
 ## 12. Encode / Decode With Hybrid RLE and Bit-Packing
@@ -1463,6 +1480,17 @@ dp[i] = max(dp[i - 1], nums[i] + dp[i - 2])
 At each house:
 - skip it, keeping the best answer up to `i - 1`
 - rob it, adding its value to the best answer up to `i - 2`
+
+**Variations cheat-sheet — memorize the linear base, then apply one small delta:**
+
+| Variation | What changes vs the linear base | Key line |
+|-----------|---------------------------------|----------|
+| **Linear (base)** | — roll two vars `prev, curr` | `prev, curr = curr, max(curr, prev + num)` |
+| **Circular** | can't take *both* first & last → run the base on two slices | `max(rob_linear(nums[:-1]), rob_linear(nums[1:]))` |
+| **Gap `k`** | robbing `i` skips the next `k` → reach back `k+1` (needs a `dp` array, not 2 vars) | `dp[i] = max(dp[i-1], nums[i] + dp[i-k-1])` |
+| **Binary tree** | "adjacent" = parent/child → DFS returns `(rob, skip)` per node | `rob = val + L.skip + R.skip`; `skip = max(L) + max(R)` |
+
+In an interview: write the 2-variable linear `rob` first, then state the **one** change the variation needs.
 
 ### Best Solution: O(1) Space
 
@@ -2621,6 +2649,14 @@ Important:
 - results should be ordered by:
   1. total revenue ascending
   2. customer id ascending
+
+**The three approaches share the same `insert` / referral logic — they differ only in how `get_lowest_k` is served:**
+
+| Approach | Insert | Query (top-k) | Use when |
+|----------|--------|---------------|----------|
+| Hash map + sort on query | O(1) | O(n log n) | writes dominate |
+| Maintain a `SortedList` | O(log n) (remove + re-insert on referral) | O(log n + k) | reads dominate |
+| Lazy sorting (cache + invalidate) | O(1) | O(n log n) once, then O(k) cached | bursty writes, occasional reads |
 
 ### Core Data Model
 
