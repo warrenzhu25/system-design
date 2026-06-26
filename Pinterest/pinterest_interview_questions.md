@@ -14,6 +14,20 @@
   - [Odd Even Linked List (LC 328)](#odd-even-linked-list-lc-328)
   - [Reconstruct Itinerary (LC 332)](#reconstruct-itinerary-lc-332)
   - [Violation Log Counter](#violation-log-counter)
+- [High-Frequency Coding Problems](#high-frequency-coding-problems)
+  - [ACL / Permission System](#acl--permission-system-high-frequency)
+  - [LC 815 — Bus Routes](#lc-815--bus-routes-high-frequency)
+  - [LC 1055 — Shortest Way to Form String](#lc-1055--shortest-way-to-form-string-high-frequency)
+  - [Pixie-like Random Walk](#pixie-like-random-walk)
+  - [Expression Add Operators — Left-to-Right](#expression-add-operators--left-to-right-simplified-lc-282)
+  - [Insert into Sorted Circular DLL (LC 708)](#insert-into-sorted-circular-doubly-linked-list-lc-708--lc-426-follow-up)
+  - [LC 465 — Optimal Account Balancing](#lc-465--optimal-account-balancing)
+  - [First Word Containing a Prefix](#first-word-containing-a-prefix)
+  - [LC 84 — Largest Rectangle in Histogram](#lc-84--largest-rectangle-in-histogram-monotonic-stack)
+  - [LC 392 — Is Subsequence](#lc-392--is-subsequence-two-pointers)
+  - [Weighted Sampling (softmax → CDF + binary search)](#weighted-sampling-softmax--cdf--binary-search)
+  - [LC 1526 — Minimum Operations to Form a Target Array](#lc-1526--minimum-operations-to-form-a-target-array)
+  - [LC 1723 — Find Minimum Time to Finish All Jobs](#lc-1723--find-minimum-time-to-finish-all-jobs)
 - [System Design Questions](#system-design-questions)
   - [Design Pinterest Home Feed](#design-pinterest-home-feed)
   - [Design Pinterest Search Engine](#design-pinterest-search-engine)
@@ -1894,6 +1908,358 @@ class ViolationDetector:
         # Check violation
         return len(window) > self.k
 ```
+
+---
+
+## High-Frequency Coding Problems
+
+A consolidated list of frequently-asked Pinterest coding problems. Already covered above and not repeated here: **LC 332 Reconstruct Itinerary**, **LC 426 Convert BST to DLL** (its insert follow-up is below), **LC 1564 Put Boxes Into Warehouse** (LC 1580 "II" is the *Boxes from Both Ends* variation), and **Escape Room**.
+
+### ACL / Permission System (high frequency)
+
+**Question:** Implement `grant_access(advertiser, group)`, `check_access(advertiser, group)`, `revoke_access(advertiser, group)` over a **group hierarchy** — granting access to a group implies access to everything nested under it.
+
+*Main logic:* store the group hierarchy as `child → parent` pointers and a per-advertiser set of granted groups. `check_access` walks **up** from the target group through its ancestors; access is granted if any ancestor was granted to that advertiser.
+
+```python
+from collections import defaultdict
+
+class ACL:
+    def __init__(self):
+        self.parent = {}                    # group -> parent group (hierarchy)
+        self.grants = defaultdict(set)      # advertiser -> set of granted groups
+
+    def add_group(self, group, parent=None):
+        self.parent[group] = parent
+
+    def grant_access(self, advertiser, group):
+        self.grants[advertiser].add(group)
+
+    def revoke_access(self, advertiser, group):
+        self.grants[advertiser].discard(group)
+
+    def check_access(self, advertiser, group):
+        granted = self.grants[advertiser]
+        cur = group
+        while cur is not None:              # access via the group or any ancestor
+            if cur in granted:
+                return True
+            cur = self.parent.get(cur)
+        return False
+```
+`check_access` is O(hierarchy depth). If a group can have multiple parents (a DAG), replace the upward walk with a BFS/DFS over ancestors plus a visited set.
+
+### LC 815 — Bus Routes (high frequency)
+
+**Question:** Each bus route is a list of stops a bus cycles through. Return the **fewest buses** to travel from `source` to `target`.
+
+*Main logic:* BFS where the **buses (routes)** are the graph nodes, not stops. From the current stop, board every unvisited route through it; reaching any of that route's stops costs one more bus. Index `stop → routes` so boarding is O(1).
+
+```python
+from collections import defaultdict, deque
+
+def numBusesToDestination(routes, source, target):
+    if source == target:
+        return 0
+    stop_to_routes = defaultdict(set)
+    for i, route in enumerate(routes):
+        for stop in route:
+            stop_to_routes[stop].add(i)
+
+    visited_routes, visited_stops = set(), {source}
+    q = deque([(source, 0)])
+    while q:
+        stop, buses = q.popleft()
+        for r in stop_to_routes[stop]:
+            if r in visited_routes:
+                continue
+            visited_routes.add(r)
+            for nxt in routes[r]:
+                if nxt == target:
+                    return buses + 1
+                if nxt not in visited_stops:
+                    visited_stops.add(nxt)
+                    q.append((nxt, buses + 1))
+    return -1
+```
+
+### LC 1055 — Shortest Way to Form String (high frequency)
+
+**Question:** Minimum number of copies of `source` whose **subsequences** concatenate to `target` (or `-1` if impossible).
+
+*Main logic:* greedy two-pointer — scan `source` once per copy, advancing through `target` on each match. Each copy advances `target` by ≥ 1 char (every target char exists in `source`), so copies ≤ `len(target)`.
+
+```python
+def shortestWay(source, target):
+    source_set = set(source)
+    count, i = 0, 0                       # i = index into target
+    while i < len(target):
+        if target[i] not in source_set:
+            return -1
+        for ch in source:                 # one pass over source = one copy
+            if i < len(target) and ch == target[i]:
+                i += 1
+        count += 1
+    return count
+```
+**Follow-up (many targets):** precompute, for each char, its sorted positions in `source`, then binary-search the next position — same optimization as the LC 392 follow-up below.
+
+### Pixie-like Random Walk
+
+**Question:** Recommend pins from a few query pins over the bipartite **pin ↔ board** graph (Pinterest's Pixie).
+
+*Main logic:* random walk **with restart** from the query pins; the visit counts rank recommendations. Restart probability `alpha` keeps the walk near the query; a "multi-hit booster" (favor pins reached from *several* query pins) and early stopping make it production-fast.
+
+```python
+import random
+from collections import Counter
+
+def pixie_walk(graph, query_pins, num_steps=10000, alpha=0.15, is_pin=lambda n: True):
+    """graph: node -> list of neighbors (bipartite pin<->board). Returns ranked pins."""
+    counts = Counter()
+    for start in query_pins:
+        node = start
+        for _ in range(num_steps):
+            if random.random() < alpha or not graph[node]:
+                node = start              # restart toward the query pin
+                continue
+            node = random.choice(graph[node])
+            if is_pin(node):
+                counts[node] += 1
+    return counts.most_common()
+```
+Talking points: walk length per query proportional to query-pin degree; combine per-query counts with a booster like `(sum of sqrt(count_q))^2` so broadly-reachable pins win.
+
+### Expression Add Operators — Left-to-Right (simplified LC 282)
+
+**Question:** Insert `+ - *` between the digits of a string and count/return expressions equal to `target`, but operators associate **left-to-right with no precedence**: `2+3*2` means `(2+3)*2 = 10`.
+
+*Main logic:* because there's no precedence, each operator applies to the **running value** immediately ("算过就定下来") — so unlike real LC 282 you don't track the previous term. DFS over split points, applying the op to `value` as you go.
+
+```python
+def add_operators_ltr(num, target):
+    res = []
+    def dfs(idx, expr, value):
+        if idx == len(num):
+            if value == target:
+                res.append(expr)
+            return
+        for j in range(idx + 1, len(num) + 1):
+            s = num[idx:j]
+            o = int(s)
+            if idx == 0:
+                dfs(j, s, o)
+            else:
+                dfs(j, expr + "+" + s, value + o)
+                dfs(j, expr + "-" + s, value - o)
+                dfs(j, expr + "*" + s, value * o)   # multiplies the running value, not the last term
+            if num[idx] == "0":            # no leading-zero multi-digit operands
+                break
+    dfs(0, "", 0)
+    return res
+```
+Contrast with real LC 282: there, `*` binds tighter, so you must carry the last multiplicand and undo it (`value - prev + prev * o`). Left-to-right removes that bookkeeping entirely.
+
+### Insert into Sorted Circular Doubly Linked List (LC 708) — LC 426 follow-up
+
+**Question:** Insert a value into a **sorted circular** DLL (the structure produced by Convert-BST-to-DLL above), keeping it sorted.
+
+*Main logic:* walk one full loop looking for a `prev ≤ val ≤ prev.next` slot; also accept the wrap point (max → min boundary). If the list is empty, point the node at itself.
+
+```python
+def insert(head, val):
+    node = Node(val)
+    if not head:                          # empty -> single-element ring
+        node.next = node.prev = node
+        return node
+    prev, cur = head, head.next
+    while True:
+        if prev.val <= val <= cur.val:                       # normal slot
+            break
+        if prev.val > cur.val and (val >= prev.val or val <= cur.val):
+            break                          # wrap point (between max and min)
+        prev, cur = cur, cur.next
+        if prev is head:                  # full loop -> insert before head
+            break
+    prev.next = node; node.prev = prev
+    node.next = cur; cur.prev = node
+    return head
+```
+
+### LC 465 — Optimal Account Balancing
+
+**Question:** Given debt transactions, the minimum number of transactions to settle everyone to zero.
+
+*Main logic:* only the **net balance** per person matters. Drop zero balances, then backtrack: settle the first nonzero debt against every opposite-sign debt, recursing — classic NP-hard subset backtracking, small `n`.
+
+```python
+from collections import defaultdict
+
+def minTransfers(transactions):
+    bal = defaultdict(int)
+    for a, b, amt in transactions:
+        bal[a] -= amt
+        bal[b] += amt
+    debts = [v for v in bal.values() if v != 0]
+
+    def dfs(i):
+        while i < len(debts) and debts[i] == 0:
+            i += 1
+        if i == len(debts):
+            return 0
+        best = float("inf")
+        for j in range(i + 1, len(debts)):
+            if debts[j] * debts[i] < 0:    # opposite signs can cancel
+                debts[j] += debts[i]
+                best = min(best, 1 + dfs(i + 1))
+                debts[j] -= debts[i]
+        return best
+    return dfs(0)
+```
+
+### First Word Containing a Prefix
+
+**Question:** Given a word list and a prefix, return the index of the **first** word that starts with the prefix. E.g. `['a','apple','appz','b']`, prefix `'ap'` → `1`.
+
+*Main logic:* `str.startswith` is the clean answer; the interview "trick" is comparing char-by-char with `zip_longest(prefix, word, fillvalue='#')` so a word *shorter* than the prefix correctly fails (the `#` never matches).
+
+```python
+from itertools import zip_longest
+
+def has_prefix(word, prefix):
+    return all(wc == pc for pc, wc in zip_longest(prefix, word, fillvalue="#") if pc != "#")
+
+def first_with_prefix(words, prefix):
+    for i, w in enumerate(words):
+        if w.startswith(prefix):          # or: has_prefix(w, prefix)
+            return i
+    return -1
+```
+**For many prefix queries:** build a trie of the words (each node storing the smallest word-index in its subtree) → each prefix lookup is O(prefix length).
+
+### LC 84 — Largest Rectangle in Histogram (monotonic stack)
+
+**Question:** Largest rectangle area in a bar-height histogram.
+
+*Main logic:* keep an **increasing monotonic stack** of bar indices. When a shorter bar arrives, pop taller bars; each popped bar is the rectangle's height and the width spans from the new bar back to the previous stacked bar. A trailing sentinel `0` flushes the stack.
+
+```python
+def largestRectangleArea(heights):
+    stack = []                            # indices with increasing heights
+    best = 0
+    for i, h in enumerate(heights + [0]): # sentinel flushes everything
+        while stack and heights[stack[-1]] > h:
+            height = heights[stack.pop()]
+            width = i if not stack else i - stack[-1] - 1
+            best = max(best, height * width)
+        stack.append(i)
+    return best
+```
+
+### LC 392 — Is Subsequence (two pointers)
+
+**Question:** Is `s` a subsequence of `t`?
+
+*Main logic:* one pointer over `s`, advance it on each match while scanning `t`; `s` is a subsequence iff the pointer reaches the end.
+
+```python
+def isSubsequence(s, t):
+    i = 0
+    for c in t:
+        if i < len(s) and s[i] == c:
+            i += 1
+    return i == len(s)
+```
+**Follow-up (many `s` against one big `t`):** precompute each char's sorted positions in `t`; for each char of `s`, binary-search the next position strictly after the last — O(|s| log |t|) per query (same idea as LC 1055's follow-up).
+
+```python
+import bisect
+from collections import defaultdict
+
+def make_matcher(t):
+    pos = defaultdict(list)
+    for i, c in enumerate(t):
+        pos[c].append(i)
+    def is_subseq(s):
+        prev = -1
+        for c in s:
+            lst = pos.get(c)
+            if not lst:
+                return False
+            j = bisect.bisect_right(lst, prev)   # next position after prev
+            if j == len(lst):
+                return False
+            prev = lst[j]
+        return True
+    return is_subseq
+```
+
+### Weighted Sampling (softmax → CDF + binary search)
+
+**Question:** Sample an index from logits in proportion to their softmax probabilities.
+
+*Main logic:* softmax (with the max-subtraction trick for numerical stability) → build the **CDF** once → draw `u ~ Uniform(0,1)` and **binary-search** the first CDF bucket ≥ `u`. O(n) to build, O(log n) per sample (reuse the CDF for many draws).
+
+```python
+import math, bisect, random
+
+def build_sampler(logits):
+    m = max(logits)
+    exps = [math.exp(x - m) for x in logits]   # subtract max for stability
+    total = sum(exps)
+    cdf, acc = [], 0.0
+    for e in exps:
+        acc += e / total
+        cdf.append(acc)
+    def sample():
+        return bisect.bisect_left(cdf, random.random())   # index ∝ softmax(logits)
+    return sample
+```
+
+### LC 1526 — Minimum Operations to Form a Target Array
+
+**Question:** Starting from an all-zero array, each operation adds 1 to a contiguous subarray. Minimum operations to reach `target`.
+
+*Main logic:* think in **differences**. You "pay" `target[0]`, then for each step only the *increase* over the previous element needs new operations (a decrease is free — those subarrays simply end here).
+
+```python
+def minNumberOperations(target):
+    ops = target[0]
+    for i in range(1, len(target)):
+        if target[i] > target[i - 1]:
+            ops += target[i] - target[i - 1]
+    return ops
+```
+**LC 3229 (array → target with +1/-1 on subarrays)** generalizes this to the difference array `d[i] = target[i] - arr[i]`: the answer is `|d[0]|` plus, for each `i`, the increase in `|d[i]|` whenever consecutive diffs share the same sign (and the full `|d[i]|` when the sign flips).
+
+### LC 1723 — Find Minimum Time to Finish All Jobs
+
+**Question:** Assign all jobs to `k` workers minimizing the **maximum** worker load.
+
+*Main logic:* backtracking that places each job on some worker, pruning by (a) not exceeding the best answer so far and (b) skipping workers with a duplicate current load (symmetry). Sorting jobs descending prunes much earlier.
+
+```python
+def minimumTimeRequired(jobs, k):
+    jobs.sort(reverse=True)
+    loads = [0] * k
+    best = [sum(jobs)]
+    def dfs(i):
+        if i == len(jobs):
+            best[0] = min(best[0], max(loads))
+            return
+        seen = set()
+        for w in range(k):
+            if loads[w] in seen:           # symmetry prune: identical workers
+                continue
+            seen.add(loads[w])
+            if loads[w] + jobs[i] < best[0]:   # bound prune
+                loads[w] += jobs[i]
+                dfs(i + 1)
+                loads[w] -= jobs[i]
+    dfs(0)
+    return best[0]
+```
+Alternative: binary-search the answer `T` and greedily/backtrack-check feasibility (can all jobs fit in `k` workers each ≤ `T`).
 
 ---
 
