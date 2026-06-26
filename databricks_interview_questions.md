@@ -143,7 +143,13 @@ class LazyArray:
 Source: [DataBricks/snap_shot_iterator.py](/Users/warren/github/system-design/DataBricks/snap_shot_iterator.py)
 
 **Question:**
-Design a set supporting `add`, `remove`, `contains`, and `getIterator()`, where each iterator is a snapshot of the set at the moment it is created.
+Implement a set (or key-value structure) with **snapshot reads**: mutations (`add`/`remove` or `put`/`delete`) retain version history by snapshot id, and an `iterator()` returns a **consistent point-in-time view** frozen at creation — later mutations are invisible to an already-created iterator.
+
+**Clarify:**
+- **`contains` is real-time** (current state), but the **iterator is a snapshot**.
+- **Iteration order:** default to **insertion order** (some variants are pure-set / order-irrelevant — confirm).
+- **Many iterators** can be live at once at different positions; up to ~10⁵ ops.
+- **Delete semantics:** tombstone vs physical removal (see MVCC below).
 
 **Answer:**
 Track each element with a start version and end version. A snapshot iterator stores the current version and only yields elements alive in that version.
@@ -209,6 +215,102 @@ class SnapshotSet:
 - `add` / `remove` / `contains`: `O(1)`
 - Iterator creation: `O(1)`
 - Full iteration: `O(total tracked elements)`
+
+### Storage layouts
+
+| Layout | Memory | Concurrent iterators | Notes |
+|--------|--------|----------------------|-------|
+| Full copy per iterator | O(n) each | independent | Simplest; expensive at 10⁵ ops |
+| Pending buffer | O(changes) | one active | Buffer mutations during a single live iteration |
+| **Versioned entries** (`added_version`, `removed_version`) | O(versions) | **many** | An iterator at version `V` sees items with `added <= V and (removed is null or removed > V)` — the set approach above |
+| Persistent / HAMT | O(log n) per write | many | Structural sharing: a write copies only the path to the changed node; old snapshots stay valid |
+
+### MVCC versioned map (`put` / `delete` / `snapshot` / `get_at` / `iter_at`)
+
+*Main logic:* keep a **per-key list of `[version, value]`** sorted by version, and append a `TOMBSTONE` version on delete instead of removing the key. A read at snapshot `sid` binary-searches the per-key list for the newest version `<= sid`; a tombstone there means "deleted as of `sid`". `iter_at` filters every key through `get_at` and yields the live ones in insertion order — supporting many concurrent snapshots without copying.
+
+```python
+TOMBSTONE = object()
+
+class VersionedMap:
+    def __init__(self):
+        self.versions = {}      # key -> list of [version, value | TOMBSTONE], ascending
+        self.order = {}         # key -> insertion sequence (for insertion-ordered iteration)
+        self.clock = 0
+        self.seq = 0
+
+    def _next(self) -> int:
+        self.clock += 1
+        return self.clock
+
+    def put(self, key, value):
+        if key not in self.versions:
+            self.versions[key] = []
+            self.order[key] = self.seq
+            self.seq += 1
+        self.versions[key].append([self._next(), value])
+
+    def delete(self, key):
+        if key in self.versions:               # tombstone, don't physically remove
+            self.versions[key].append([self._next(), TOMBSTONE])
+
+    def snapshot(self) -> int:
+        return self.clock                      # current version id = a snapshot
+
+    def get_at(self, key, sid):
+        """Value of key as of snapshot sid, or None if absent/deleted then."""
+        vlist = self.versions.get(key)
+        if not vlist:
+            return None
+        lo, hi, idx = 0, len(vlist) - 1, -1
+        while lo <= hi:                        # rightmost version with v <= sid
+            mid = (lo + hi) // 2
+            if vlist[mid][0] <= sid:
+                idx, lo = mid, mid + 1
+            else:
+                hi = mid - 1
+        if idx == -1:
+            return None                        # key didn't exist yet at sid
+        val = vlist[idx][1]
+        return None if val is TOMBSTONE else val
+
+    def iter_at(self, sid):
+        """Consistent snapshot view, in insertion order."""
+        for key in sorted(self.versions, key=lambda k: self.order[k]):
+            val = self.get_at(key, sid)
+            if val is not None:
+                yield (key, val)
+```
+
+### Tombstones & garbage collection
+
+Deletes are stored as a `(version, TOMBSTONE)` entry, not removed — so `get_at` can still distinguish "deleted at a snapshot newer than the target" from "still live". A version is **reclaimable once the oldest live snapshot has advanced past it** (the same retention rule as LSM compaction / Postgres `VACUUM`): per key, keep the newest version `<= oldest_live_sid` as the baseline plus everything newer; a key whose baseline is a lone tombstone is fully dead and can be dropped.
+
+```python
+def compact(self, oldest_live_sid):            # a method on VersionedMap
+    for key in list(self.versions):
+        vlist = self.versions[key]
+        keep_from = 0
+        for i, (v, _) in enumerate(vlist):
+            if v <= oldest_live_sid:
+                keep_from = i                  # baseline visible to the oldest live snapshot
+        survivors = vlist[keep_from:]
+        if len(survivors) == 1 and survivors[0][1] is TOMBSTONE:
+            del self.versions[key]             # nothing live references it anymore
+            del self.order[key]
+        else:
+            self.versions[key] = survivors
+```
+
+For very many concurrent snapshots without copying, a **persistent / structurally-shared tree (HAMT)** copies only the path to a changed node and shares the rest between versions, so reads of old snapshots stay valid in O(log n) space per write.
+
+### Tests to prepare
+
+- Delete then `get_at` an older snapshot (still visible) vs a newer one (tombstoned → `None`).
+- Repeated updates to a key before taking a snapshot.
+- Empty snapshot; iteration order = insertion order.
+- Iteration unaffected by mutations made after the iterator/snapshot was created.
+- Multiple live snapshots at different versions; `compact` only reclaims after the oldest advances.
 
 ---
 
