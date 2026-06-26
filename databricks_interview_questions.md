@@ -941,56 +941,66 @@ casting the RLE `number` to `int`, so `decode` returns a consistent list of ints
 Source: [DataBricks/fibonacci_tree.py](/Users/warren/github/system-design/DataBricks/fibonacci_tree.py)
 
 **Question:**
-Find the path between two nodes in an implicit Fibonacci tree. The file also includes the standard binary-tree `getDirections` solution as a reference pattern.
+Given a Fibonacci tree of order `k` and two **preorder** node labels `a` and `b` (1-based), return the labels along the simple path from `a` to `b` — **without building the tree** (it is exponentially large).
 
-**Answer:**
-The Fibonacci tree version computes subtree sizes recursively and uses them to determine whether a target lies in the left or right subtree.
+**Definition (clarify the base case first):**
+- `T(0)` is empty (0 nodes); `T(1)` is a single node. For `k ≥ 2`, `T(k)` = a root + left subtree `T(k-1)` + right subtree `T(k-2)`.
+- `size(k) = 1 + size(k-1) + size(k-2)` → `size(1..5) = 1, 2, 4, 7, 12`; closed form `size(k) = F(k+2) - 1`.
+- *Minority variant:* some define both `T(1)` and `T(2)` as single nodes (`size(2) = 1`), shifting the recursion by one — **confirm with the interviewer** before coding.
+- `k` can be large (`k ≤ 45` → `T(45) ≈ 2.97B` nodes; some report up to 60), so building the tree is out — aim for **O(k) time and space**.
 
-*Main logic:* the implicit tree's nodes are laid out in a fixed index order, so subtree **sizes** (a Fibonacci-like recurrence) tell you whether a target index lies in the left or right subtree. Build the root→source and root→destination paths, strip their common prefix (the part above the LCA), then emit `U`s to climb from source up to the LCA followed by the destination's suffix.
+**Main logic:**
+1. Precompute `size[0..k]` with 64-bit ints. In **preorder**, a subtree of order `o` rooted at label `r` lays out as: root `= r`, left subtree `T(o-1)` over `[r+1, r+size(o-1)]`, right subtree `T(o-2)` over `[r+1+size(o-1), r+size(o)-1]`.
+2. `label_to_path` walks *down* from the root: append `r`, then descend left or right by which range the target falls in — no node objects, O(k) deep.
+3. Build root→`a` and root→`b` label paths, drop the common prefix (everything above the **LCA**), then return `a → … → LCA` (the reverse of `a`'s tail) followed by `LCA-child → … → b`.
 
 ```python
-class Solution:
-    def findPath(self, order: int, source: int, dest: int) -> str:
-        cache = {}
+def fib_sizes(k):
+    size = [0] * (max(k, 1) + 1)
+    if k >= 1:
+        size[1] = 1
+    for i in range(2, k + 1):
+        size[i] = 1 + size[i - 1] + size[i - 2]
+    return size
 
-        def get_cache(n):
-            if n < 0:
-                return 0
-            if n <= 1:
-                return 1
-            if n in cache:
-                return cache[n]
-            cache[n] = 1 + get_cache(n - 1) + get_cache(n - 2)
-            return cache[n]
 
-        def find_path(n, root, target):
-            if root == target:
-                return ""
+def label_to_path(k, label, size):
+    """Preorder labels from the root down to `label` (1-based). O(k)."""
+    path, r, order = [], 1, k
+    while True:
+        path.append(r)
+        if r == label:
+            return path
+        left = size[order - 1]
+        if r + 1 <= label <= r + left:        # target in left subtree T(order-1)
+            r, order = r + 1, order - 1
+        else:                                  # target in right subtree T(order-2)
+            r, order = r + 1 + left, order - 2
 
-            left_root = root + 1
-            left_size = get_cache(n - 2)
 
-            if left_root <= target < left_root + left_size:
-                return "L" + find_path(n - 2, left_root, target)
-            else:
-                right_root = left_root + left_size
-                return "R" + find_path(n - 1, right_root, target)
-
-        source_path = find_path(order, 0, source)
-        dest_path = find_path(order, 0, dest)
-
-        i = 0
-        while i < min(len(source_path), len(dest_path)) and source_path[i] == dest_path[i]:
-            i += 1
-
-        return "U" * (len(source_path) - i) + dest_path[i:]
+def path_in_fib_tree(k, a, b):
+    size = fib_sizes(k)
+    pa = label_to_path(k, a, size)
+    pb = label_to_path(k, b, size)
+    i = 0
+    while i < min(len(pa), len(pb)) and pa[i] == pb[i]:
+        i += 1                                 # pa[i-1] is the LCA
+    return pa[i - 1:][::-1] + pb[i:]           # a..LCA  +  LCA-child..b
 ```
 
-**Idea:**
-- compute the root-to-source path
-- compute the root-to-destination path
-- strip their common prefix
-- move up with `U`, then follow destination suffix
+**Example** (`k = 4`, labels `1..7`): `path_in_fib_tree(4, 4, 7)` → `[4, 3, 2, 1, 6, 7]` — up to the root `1`, then down into the right subtree.
+
+**Follow-ups — other traversal orders / k-ary:**
+
+| Labeling | Root label | Left range | Right range |
+|----------|-----------|------------|-------------|
+| Preorder | `r` | `[r+1, r+size(o-1)]` | `[r+1+size(o-1), r+size(o)-1]` |
+| Inorder | `r + size(o-1)` | below the root | above the root |
+| Postorder | `r + size(o) - 1` (last) | starts at `r` | follows the left block |
+
+- **Level-order (BFS) labeling has no clean range formula** — subtrees interleave across levels, so the math shortcut breaks; fall back to simulating the tree level by level.
+- **k-ary** keeps the trick: test which of the `k` child size-segments the target lands in.
+- A `getDirections`-style variant returns `"L"`/`"R"`/`"U"` moves instead of labels — same path math, emitting the turn taken at each step plus `U` for each level climbed to the LCA.
 
 ---
 
