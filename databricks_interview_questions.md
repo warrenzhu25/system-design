@@ -39,6 +39,15 @@ def maximal_square(matrix: list[list[str]]) -> int:
     return max_side * max_side
 ```
 
+**Walkthrough** — `matrix = [["1","0","1"], ["1","1","1"], ["0","1","1"]]`:
+```text
+input         dp
+1 0 1   ->    1 0 1
+1 1 1   ->    1 1 1
+0 1 1   ->    0 1 2      dp[2][2] = min(1, 1, 1) + 1 = 2
+```
+The largest all-`1` square is the bottom-right 2×2 block, so `max_side = 2` and area `= 4`.
+
 **Follow-up: Maximal Rectangle**
 
 **Square vs rectangle (related but different):** the square uses the `min(top, left, top-left) + 1` DP; a rectangle isn't constrained to be square, so that DP doesn't apply — instead reduce each row to a **histogram** and run largest-rectangle-in-histogram with a monotonic stack.
@@ -134,6 +143,9 @@ class LazyArray:
         return -1
 ```
 
+**Walkthrough** — `LazyArray([1,2,3]).map(x→x+1).map(x→x*2).indexOf(8)`:
+`map` does no work — it just records the op chain `x → (x+1) → (x*2)`. `indexOf` replays it per element: `1→4`, `2→6`, `3→8` → match at **index 2** (each transformed value is cached on the way).
+
 **Complexity:**
 - `map(fn)`: `O(1)`
 - `indexOf(target)`: `O(n * k)` where `k` is number of deferred transforms
@@ -212,6 +224,17 @@ class SnapshotSet:
             self.index += 1
             return value
 ```
+
+**Walkthrough** — `add(1); add(2);` create iterator `it1`; then `remove(1);` create `it2`:
+```text
+op         version   tracker (value, start, end)
+add(1)  -> v=1       [1, 0, inf]
+add(2)  -> v=2       [1, 0, inf], [2, 1, inf]
+it1 captures version 2 -> yields items with start < 2 <= end -> {1, 2}
+remove(1) -> v=3     [1, 0, 2],   [2, 1, inf]
+it2 captures version 3 -> [1,0,2]: 3<=2 false (excluded); [2,1,inf] -> {2}
+```
+`it1` still yields `{1, 2}` — it froze its version, so the later `remove` is invisible to it.
 
 **Complexity:**
 - `add` / `remove` / `contains`: `O(1)`
@@ -371,6 +394,9 @@ class TicTacToe:
         return 0
 ```
 
+**Walkthrough** — `3×3`, `k=3`; player 1 plays `(0,0), (0,1), (0,2)`:
+on the third move the horizontal axis `(0, ±1)` walks right from `(0,2)` (nothing), then left through `(0,1), (0,0)` → `count = 1 + 2 = 3 ≥ k` → **player 1 wins**. Only the four axes through the *new* cell are checked, so each move is O(k).
+
 **Complexity:**
 - Worst-case per move: `O(k)` average interview answer, up to line length in a dense board
 
@@ -493,6 +519,8 @@ def find_optimal_commute(grid, costs, times):
 leaving. The start cell costs 0, and the destination cell's own mode is never
 charged. If you instead want to charge for the cell you enter, compute
 `step_time`/`step_cost` from `grid[nr][nc]` inside the neighbor loop.
+
+**Walkthrough** — single mode: if mode `1` reaches `D` in 6 steps and mode `2` in 4 steps, BFS gives step counts `{1: 6, 2: 4}`; multiply each by that mode's per-step `(time, cost)` and keep the lexicographically smallest `(time, cost)`. Mixed mode instead lets Dijkstra switch modes cell by cell, and the first time `D` is popped off the heap it carries the optimal `(time, cost)`.
 
 ---
 
@@ -666,6 +694,9 @@ class IpFirewall:
         return best_action
 ```
 
+**Walkthrough** — rules `[ALLOW 1.2.3.0/24 (idx 0), DENY 1.2.3.4 (idx 1)]`, query `1.2.3.4`:
+walking the IP's bits hits the `/24` node (idx 0, ALLOW) at depth 24, then the `/32` node (idx 1, DENY) at depth 32. Best = **lowest index = 0 → ALLOW**: the broader earlier rule wins (first-match-by-order). List the DENY first, or switch to longest-prefix, to block the specific IP.
+
 **Complexity:**
 - Insert: `O(32)`
 - Query: `O(32)`
@@ -780,6 +811,15 @@ class Gateway:
         return res
 ```
 
+**Walkthrough** — `failureThreshold = 2`; primary fails on requests 0–1 then recovers, secondary always healthy:
+```text
+req0: primary fails  -> secondary ok  -> "Primary -> Secondary"   (fail_count = 1)
+req1: primary fails  -> secondary ok  -> "Primary -> Secondary"   (fail_count = 2 -> OPEN)
+req2: primary OPEN   -> secondary ok  -> "Secondary"              (skip_count = 1)
+req3: primary OPEN   -> secondary ok  -> "Secondary"              (skip_count = 2 -> closes)
+```
+The label reflects what actually **succeeded**, not just what was attempted.
+
 ---
 
 ## 9. Bottleneck Nodes in a DAG
@@ -826,6 +866,15 @@ class Solution:
 
         return res if processed == n else []
 ```
+
+**Walkthrough** — `n = 4`, edges `0→1, 1→2, 0→3`:
+```text
+layer         queue   size  recorded?
+start         [0]     1     yes -> 0
+after 0       [1, 3]  2     no
+after 1, 3    [2]     1     yes -> 2
+```
+Result `[0, 2]`. Note `2` is **not** a true dominator (the `0→3` path skips it) — this finds topological *layers of size 1*, per the problem's definition.
 
 **Complexity:**
 - Time: `O(n + e)`
@@ -920,6 +969,9 @@ class RevenueSystem:
         return res
 ```
 
+**Walkthrough** — `add(100)→id0; add(50)→id1; addByReferral(30, id0)→id2`:
+the referral bumps id0's revenue `100 → 130` (remove `(-100, 0)`, insert `(-130, 0)`) and adds id2 with 30. Ranking by `(-revenue, id)` is `[(-130, 0), (-50, 1), (-30, 2)]`, so `getTopKCustomer(2, 0) → [0, 1]` and `getRelations(0) → [[2]]`.
+
 ---
 
 ## 11. Delete Index From Interval List
@@ -961,6 +1013,9 @@ def remove_intervals_include(intervals, index):
 
     return res
 ```
+
+**Walkthrough** — inclusive `[[1,3],[5,8]]` (flattened indices `1,2,3,5,6,7,8`), remove logical index `4`:
+`[1,3]` has length 3 ≤ 4 → skip it (`index = 4 - 3 = 1`). In `[5,8]`, `remove_point = 5 + 1 = 6`; emit `[5,5]` (left) and `[7,8]` (right). Result `[[1,3],[5,5],[7,8]]` — the value `6` (the 5th flattened element) is removed.
 
 **Answer: Half-Open Intervals**
 
@@ -1070,6 +1125,9 @@ class Solution:
                     res.append(int(n))
         return res
 ```
+
+**Walkthrough** — `encode([5]*8 + [1,2,3])`:
+the run of eight `5`s is ≥ 8 → `RLE[5, 8]`; then `1,2,3` are short runs → packed as `BP[1, 2, 3]`. Result `["RLE[5, 8]", "BP[1, 2, 3]"]`, which `decode` expands back to the original list.
 
 **Note:**
 The string parsing mirrors the source file. The one change from the original is
@@ -1189,6 +1247,9 @@ class TimeMap:
 
         return self.key_time_map[key][idx][1] if idx != -1 else ""
 ```
+
+**Walkthrough** — `set(k, "a", 1); set(k, "b", 3)`:
+`get(k, 2)` binary-searches the rightmost timestamp ≤ 2 → `[1, "a"]` → `"a"`. `get(k, 3)` → `"b"`. `get(k, 0)` → `""` (before the first write).
 
 **Complexity:**
 - `set`: `O(1)` amortized
@@ -1528,6 +1589,17 @@ def rob(nums: list[int]) -> int:
 
     return curr
 ```
+
+**Walkthrough** — `rob([2,7,9,3,1])`:
+```text
+num   prev  curr = max(curr, prev + num)
+2     0     2
+7     2     7
+9     7     11     (rob 2 and 9)
+3     11    11
+1     11    12     (rob 2, 9, and 1)
+```
+Answer `12`.
 
 **Complexity:**
 - Time: `O(n)`
@@ -2680,6 +2752,9 @@ Important:
 | Hash map + sort on query | O(1) | O(n log n) | writes dominate |
 | Maintain a `SortedList` | O(log n) (remove + re-insert on referral) | O(log n + k) | reads dominate |
 | Lazy sorting (cache + invalidate) | O(1) | O(n log n) once, then O(k) cached | bursty writes, occasional reads |
+
+**Walkthrough** — `insert(100)→0; insert(50, referrer=0)→1`:
+id1 is added with personal revenue 50, and id0's total gains 50 → `total(0) = 150, total(1) = 50`. `get_lowest_k_by_total_revenue(2, 0)` orders by `(total, id)` ascending → `[1, 0]`. (Only **direct** referrals count, so a grandchild would not raise id0's total in the base version.)
 
 ### Core Data Model
 
