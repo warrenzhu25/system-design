@@ -1,5 +1,29 @@
 # Pinterest Interview Questions
 
+## Table of Contents
+
+- [Interview Format](#interview-format)
+- [Coding Questions](#coding-questions)
+  - [Put Boxes Into the Warehouse (LC 1564)](#put-boxes-into-the-warehouse-lc-1564)
+    - [Follow-up: Maximum Total Box Height](#follow-up-maximum-total-box-height)
+    - [Variation: Boxes from Both Ends](#variation-boxes-from-both-ends)
+  - [Lighthouse Light Propagation (Pinterest Custom)](#lighthouse-light-propagation-pinterest-custom)
+  - [Convert BST to Sorted Doubly Linked List (LC 426)](#convert-bst-to-sorted-doubly-linked-list-lc-426)
+  - [Escape Room / Room-by-Room Race (Pinterest Custom)](#escape-room--room-by-room-race-pinterest-custom)
+  - [Cheapest Flights Within K Stops (LC 787)](#cheapest-flights-within-k-stops-lc-787)
+  - [Odd Even Linked List (LC 328)](#odd-even-linked-list-lc-328)
+  - [Reconstruct Itinerary (LC 332)](#reconstruct-itinerary-lc-332)
+  - [Violation Log Counter](#violation-log-counter)
+- [System Design Questions](#system-design-questions)
+  - [Design Pinterest Home Feed](#design-pinterest-home-feed)
+  - [Design Pinterest Search Engine](#design-pinterest-search-engine)
+  - [Design Personalized Pin Recommendation Chatbot](#design-personalized-pin-recommendation-chatbot)
+  - [Design Pinterest Notifications](#design-pinterest-notifications)
+- [Behavioral Questions](#behavioral-questions)
+- [Tips for Pinterest Interviews](#tips-for-pinterest-interviews)
+
+---
+
 ## Interview Format
 
 - **Phone Screening**: 1 hour, coding focused (LeetCode style)
