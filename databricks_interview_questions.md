@@ -3827,3 +3827,171 @@ def min_partition_after_delete(a: str, b: str, d: int):
 - Empty target `b = ""` → `[]` (zero partitions).
 - `b` fully equal to a substring of `a` → single range.
 - Deletion at the **beginning / middle / end** of `b`, and deleting the only occurrence-breaking character.
+
+---
+
+## 33. KV Store With Rolling QPS
+
+**Problem:** Implement an in-memory key-value store (`put` / `get` / sometimes `delete`) that *also* reports the average put/get load or QPS over a rolling time window (e.g. the last 5 minutes), tracked **separately** for puts and gets.
+
+**Clarify first** (screens often give no starter signature):
+- **Which metric?** `averagePut()` / `averageGet()` (ops-per-sec over a fixed window) vs `qps(op, window)` (arbitrary window). They need different structures.
+- **Window:** fixed (e.g. 300 s) or configurable (1 s … ~1e9 s)? The window is relative to the **latest** timestamp seen — a hit exactly `seconds` old (at `latest - seconds`) is **excluded**, i.e. the window is the half-open interval `(latest - seconds, latest]`.
+- **Time source:** is a timestamp passed in, or read from a clock? (Affects testability — see below.)
+
+This is the §6 Hit Counter wrapped in a KV store with put/get separation; the new emphasis is the **bucket-aggregation progression** and **scaling**.
+
+### Rolling counter — dynamic buckets (the usual target)
+
+*Main logic:* keep one `[second, count]` bucket per active second in a deque (oldest at the left) plus a running `total`. Each `hit`/`load` first **evicts** buckets that have aged past the window (`second <= now - window`), subtracting them from `total`; a new hit either bumps the current second's bucket or appends a new one. Exact, O(1) amortized, and memory bounded by the number of distinct active seconds (≤ `window`).
+
+```python
+from collections import deque
+
+class RollingCounter:
+    """Exact hit count over the last `window` seconds. O(1) amortized."""
+    def __init__(self, window: int, clock):
+        self.window = window
+        self.clock = clock                 # callable -> current second (int)
+        self.buckets = deque()             # [second, count], oldest at left
+        self.total = 0
+
+    def _evict(self, now: int):
+        cutoff = now - self.window         # window is (cutoff, now]
+        while self.buckets and self.buckets[0][0] <= cutoff:
+            self.total -= self.buckets.popleft()[1]
+
+    def hit(self, n: int = 1):
+        now = self.clock()
+        self._evict(now)
+        if self.buckets and self.buckets[-1][0] == now:
+            self.buckets[-1][1] += n       # same second -> merge
+        else:
+            self.buckets.append([now, n])
+        self.total += n
+
+    def load(self) -> int:
+        self._evict(self.clock())
+        return self.total                  # O(1) read via the running total
+
+    def qps(self) -> float:
+        return self.load() / self.window
+```
+
+### KV store using per-op counters
+
+*Main logic:* the store is a plain dict; `put` and `get` each bump their own `RollingCounter`, so load/QPS is reported separately per operation. The clock is **injected** (not read directly) so tests can advance time deterministically.
+
+```python
+import time
+
+class KVStore:
+    def __init__(self, window: int = 300, clock=lambda: int(time.time())):
+        self.data = {}
+        self.clock = clock                         # inject a fake clock in tests
+        self._put = RollingCounter(window, clock)
+        self._get = RollingCounter(window, clock)
+
+    def put(self, key, value):
+        self.data[key] = value
+        self._put.hit()
+
+    def get(self, key):
+        self._get.hit()
+        return self.data.get(key)
+
+    def delete(self, key):
+        self.data.pop(key, None)
+
+    def average_put(self) -> float:    # puts/sec over the window
+        return self._put.qps()
+
+    def average_get(self) -> float:
+        return self._get.qps()
+```
+
+> **Testability follow-up:** a common ask is to drop the explicit timestamp from `put`/`hit` while keeping tests deterministic. Reading the real clock makes tests flaky; the intended answer is exactly the **injected clock** above — pass `clock=lambda: fake.now` and advance `fake.now` manually in tests.
+
+### Variable-window queries (`get_load(seconds)`)
+
+*Main logic:* a fixed-window counter can't answer arbitrary windows. Keep distinct timestamps with a **prefix-sum** of hit counts; `get_load(seconds)` binary-searches the cutoff (`latest - seconds`) and returns `total - prefix[cutoff]`. (Same structure as [§6 Hit Counter](#6-hit-counter-with-variable-window-queries).)
+
+```python
+import bisect
+
+class HitCounter:
+    """Variable window (latest - seconds, latest]; timestamps non-decreasing."""
+    def __init__(self):
+        self.ts = []            # distinct, non-decreasing seconds
+        self.prefix = []        # prefix[i] = hits with timestamp <= ts[i]
+        self.latest = 0
+
+    def hit(self, timestamp: int):
+        self.latest = max(self.latest, timestamp)
+        prev = self.prefix[-1] if self.prefix else 0
+        if self.ts and self.ts[-1] == timestamp:
+            self.prefix[-1] += 1            # duplicate timestamp -> bump
+        else:
+            self.ts.append(timestamp)
+            self.prefix.append(prev + 1)
+
+    def get_load(self, seconds: int) -> int:
+        if not self.ts:
+            return 0
+        cutoff = self.latest - seconds                       # exclude hits at/before cutoff
+        i = bisect.bisect_right(self.ts, cutoff) - 1         # last index with ts <= cutoff
+        return self.prefix[-1] - (self.prefix[i] if i >= 0 else 0)
+
+    def get_qps(self, seconds: int) -> float:
+        return self.get_load(seconds) / seconds if seconds > 0 else 0.0
+```
+
+**Examples** (`hits at t = 1, 2, 2, 3, 150, 301`):
+```
+get_load(300) -> 5    # window (1, 301]; the hit at t=1 is exactly 300 old -> excluded
+get_load(200) -> 2    # window (101, 301]; only t=150 and t=301 qualify
+get_qps(300)  -> 5/300 ≈ 0.0167
+```
+
+### Scaling the window: seconds → weeks
+
+For windows from 1 s to weeks, one bucket per second is too many. Use **multi-level buckets** at coarser granularities and route each query to the finest level that still covers it:
+
+| Level | Granularity × count | Covers |
+|-------|---------------------|--------|
+| Fine | 1 s × 300 | 5 minutes |
+| Mid | 30 min × 48 | 24 hours |
+| Coarse | 12 h × 14 | 1 week |
+
+A `hit` increments the matching bucket at every level; a query reads the finest level whose total span ≥ the requested window. Trades exactness at coarse levels for bounded memory.
+
+### Implementation progression (what interviewers push toward)
+
+| Approach | Update | Query | Memory | Notes |
+|----------|--------|-------|--------|-------|
+| Queue of timestamps | O(1) | O(window) to evict | O(events) | Simplest; often rejected as unscalable |
+| Prefix-sum + binary search | O(1) | O(log n) | O(distinct seconds) | Exact, arbitrary window (§6) |
+| Fixed circular buckets | O(1) | O(window) sweep | O(window) | `t % window` indexing; **stale-bucket reuse is the classic bug** |
+| **Dynamic buckets + running total** | O(1) amortized | **O(1)** | O(active seconds) | The usual target; shown above |
+| Multi-level buckets | O(levels) | O(1) | O(sum of counts) | Seconds → weeks |
+
+### Rate-limiting cousins (name them by trade-off)
+
+- **Sliding-window counter** over fixed buckets — O(1) amortized, bounded memory, slight bucket-edge approximation.
+- **Token / leaky bucket** — the admission-control cousin; smooth rate limiting, but doesn't report exact QPS.
+- **EWMA (exponentially decayed counter)** — O(1) memory per key, but no hard window boundary.
+
+### Distributed scaling
+
+- **Central aggregator** — simple, but a single point of failure / bottleneck.
+- **Kafka + stream processor (Flink)** — scalable windowed aggregation; the production shape for Databricks-scale fan-out is bucketed counters periodically flushed to a metrics store.
+- **Tree aggregation** — partial counts combined up a hierarchy to cut network fan-in.
+- If queries vastly outnumber hits, cache the last `load()` result and invalidate on the next hit.
+
+### Tests to prepare
+
+- Boundary timestamp (hit exactly `seconds` old → excluded).
+- Empty window (no hits) → 0.
+- Multiple operations in the same second (merge into one bucket).
+- Changing window size; put vs get separation (independent counters).
+- Manual-clock test: advance the injected clock and assert load/QPS without sleeping.
