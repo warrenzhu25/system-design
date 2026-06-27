@@ -340,6 +340,44 @@ def maxBoxesBothEnds(boxes: list[int], warehouse: list[int]) -> int:
     return count
 ```
 
+**Why the raw ends act like effective heights:**
+
+In the original (left-only) problem, a box must clear *every* room from the entrance to its slot, so the binding constraint at room `i` is the prefix-min `min(warehouse[0..i])`, not `warehouse[i]` alone. Here a box can enter from either side, so its constraint is `min(prefix-min[i], suffix-min[i])` — whichever approach is shorter.
+
+The descending-sort trick lets us skip building those min-arrays:
+
+- The `left` pointer only moves rightward, and we always try the **largest** remaining box first. If `warehouse[left] < box`, that box (and every later, smaller box) can never be placed *at or before* `left` from the left side — so we never need to revisit those rooms. Effectively, `warehouse[left]` already represents "the tightest ceiling encountered entering from the left so far."
+- The `right` pointer is symmetric for the suffix side.
+
+So the two raw pointers, walking inward, reproduce the prefix-min / suffix-min behavior implicitly — without ever materializing the effective-height arrays.
+
+**Worked example:**
+```
+warehouse = [3, 1, 3]   boxes = [3, 3, 1]
+
+Effective heights (for intuition):
+  prefix-min (from left):  [3, 1, 1]
+  suffix-min (from right): [1, 1, 3]
+  reachable = max of the two: [3, 1, 3]   <- rooms 0 and 2 can hold a 3
+
+Sort boxes descending: [3, 3, 1]
+left = 0, right = 2, count = 0
+
+box = 3:  warehouse[left=0] = 3 >= 3  -> place from left.  count=1, left=1
+box = 3:  warehouse[left=1] = 1 <  3  -> try right.
+          warehouse[right=2] = 3 >= 3 -> place from right. count=2, right=1
+box = 1:  left=1, right=1 (still valid). warehouse[1] = 1 >= 1 -> place. count=3, left=2
+
+Result: 3   (one 3 from each end into rooms 0 and 2, the 1 into room 1)
+```
+
+Notice the middle room (raw ceiling 1) is never a blocker for the two 3-boxes: each entered from an end whose path stayed tall, exactly what the prefix/suffix-min intuition predicts.
+
+**Edge cases:**
+- `left > right` mid-loop — every room is taken; stop early (the `break`).
+- A box larger than both current ends is silently dropped; since boxes are sorted descending, no later box could fit there either.
+- Single room: both pointers start equal; one box may be placed if it fits, then `left > right` halts the rest.
+
 ---
 
 ### Lighthouse Light Propagation (Pinterest Custom)
@@ -1972,6 +2010,26 @@ class ACL:
 ```
 `check_access` is O(hierarchy depth). If a group can have multiple parents (a DAG), replace the upward walk with a BFS/DFS over ancestors plus a visited set.
 
+**Walkthrough:**
+```
+Hierarchy (child -> parent):
+  campaign_A -> brand_X -> org_root
+  campaign_B -> brand_Y -> org_root
+
+grant_access("alice", "brand_X")
+check_access("alice", "campaign_A"):
+  cur=campaign_A  granted? no  -> up
+  cur=brand_X     granted? YES -> True     (inherited from an ancestor)
+check_access("alice", "campaign_B"):
+  campaign_B -> brand_Y -> org_root -> None,  never granted -> False
+revoke_access("alice", "brand_X"); check_access("alice","campaign_A") -> False
+```
+
+**Edge cases & gotchas:**
+- Granting a leaf grants only that node; granting a high ancestor cascades to its whole subtree — that asymmetry is the entire point of the design.
+- `revoke` removes only an *explicit* grant; it cannot subtract access that still flows from a granted ancestor.
+- A cycle in the parent map would loop forever — assume a tree (or a DAG, where the visited set also guards against cycles).
+
 ### LC 815 — Bus Routes (high frequency)
 
 **Question:** Each bus route is a list of stops a bus cycles through. Return the **fewest buses** to travel from `source` to `target`.
@@ -2006,6 +2064,24 @@ def numBusesToDestination(routes, source, target):
     return -1
 ```
 
+**Walkthrough:**
+```
+routes = [[1,2,7],[3,6,7]], source = 1, target = 6
+stop_to_routes: 1->{0}, 2->{0}, 7->{0,1}, 3->{1}, 6->{1}
+
+BFS from stop 1 (buses=0):
+  board route 0 (stops 1,2,7): none is 6; enqueue 2,7 at buses=1
+  pop 2 (buses=1): route 0 already visited -> nothing
+  pop 7 (buses=1): board route 1 (stops 3,6,7): 6 == target -> return 2
+```
+Two buses: route 0 from stop 1 to the shared stop 7, then route 1 to stop 6.
+
+**Edge cases & gotchas:**
+- `source == target` returns 0 before any BFS runs.
+- Mark **routes** visited, not just stops — re-boarding a fully-explored route is the classic cause of TLE.
+- The level counter measures *buses*, so increment when you board a new route, not when you step to a stop.
+- Unreachable target returns -1.
+
 ### LC 1055 — Shortest Way to Form String (high frequency)
 
 **Question:** Minimum number of copies of `source` whose **subsequences** concatenate to `target` (or `-1` if impossible).
@@ -2026,6 +2102,22 @@ def shortestWay(source, target):
     return count
 ```
 **Follow-up (many targets):** precompute, for each char, its sorted positions in `source`, then binary-search the next position — same optimization as the LC 392 follow-up below.
+
+**Walkthrough:**
+```
+source = "abc", target = "abcbc"
+
+copy 1: scan a,b,c -> a(i:0->1), b(i:1->2), c(i:2->3);  i=3, count=1
+copy 2: scan a,b,c -> a != target[3]='b' skip,
+                      b matches (i:3->4), c matches (i:4->5);  i=5, count=2
+i == len(target) -> answer 2
+```
+If `target` held a char missing from `source` (e.g. `"abx"`), the `not in source_set` check returns -1 immediately.
+
+**Edge cases & gotchas:**
+- Any target char absent from `source` ⇒ impossible (-1); check it up front.
+- Worst case is `len(target)` copies — each copy may advance `target` by only one char, which also bounds the loop.
+- Empty `target` ⇒ 0 copies.
 
 ### Pixie-like Random Walk
 
@@ -2052,6 +2144,22 @@ def pixie_walk(graph, query_pins, num_steps=10000, alpha=0.15, is_pin=lambda n: 
     return counts.most_common()
 ```
 Talking points: walk length per query proportional to query-pin degree; combine per-query counts with a booster like `(sum of sqrt(count_q))^2` so broadly-reachable pins win.
+
+**Walkthrough (intuition):**
+```
+query pin P0 sits on boards B1, B2.
+A walk: P0 -> B1 -> P5 -> B1 -> P3 -> (restart) -> P0 -> B2 -> P5 -> ...
+Pins sharing boards with P0 (like P5) get revisited -> high counts -> top recs.
+
+With two query pins P0 and P9, a pin reachable from BOTH (a "multi-hit")
+is boosted above one reachable from only one query, even at similar raw count.
+```
+
+**Edge cases & gotchas:**
+- Dangling node (no neighbors) ⇒ force a restart, otherwise the walk gets stuck.
+- `alpha` trades locality vs. discovery: higher = stays near the query (more personalized), lower = explores farther.
+- Count only *pins*, never boards — boards are just the bipartite bridge between pins.
+- It is a sampling method: results are approximate and vary run-to-run; more steps = more stable ranking.
 
 ### Expression Add Operators — Left-to-Right (simplified LC 282)
 
@@ -2083,6 +2191,23 @@ def add_operators_ltr(num, target):
 ```
 Contrast with real LC 282: there, `*` binds tighter, so you must carry the last multiplicand and undo it (`value - prev + prev * o`). Left-to-right removes that bookkeeping entirely.
 
+**Walkthrough:**
+```
+num = "232", target = 10
+
+split "2" | "3" | "2":  value: 2 -> (2+3)=5 -> (5*2)=10  ✓  expr "2+3*2"
+                              2 -> (2+3)=5 -> (5-2)=3
+                              2 -> (2*3)=6 -> (6+2)=8 ...
+
+"2+3*2" is read LEFT-TO-RIGHT as (2+3)*2 = 10, NOT 2+(3*2)=8.
+```
+Real LC 282 would evaluate `2+3*2` as `2+6=8`; here each operator simply transforms the running `value`.
+
+**Edge cases & gotchas:**
+- Leading zeros: `if num[idx]=="0": break` permits the single digit `0` but forbids multi-digit operands like `0X`.
+- The first operand (`idx == 0`) takes no operator — seed `value` with it directly.
+- Don't conflate this with real LC 282's `*`-precedence "undo the last term" trick — the whole simplification is that no previous-term tracking is needed.
+
 ### Insert into Sorted Circular Doubly Linked List (LC 708) — LC 426 follow-up
 
 **Question:** Insert a value into a **sorted circular** DLL (the structure produced by Convert-BST-to-DLL above), keeping it sorted.
@@ -2108,6 +2233,22 @@ def insert(head, val):
     node.next = cur; cur.prev = node
     return head
 ```
+
+**Walkthrough:**
+```
+Ring: 1 <-> 3 <-> 5 <-> (back to 1)
+
+insert(4): prev=1,cur=3 -> 1<=4<=3? no -> advance
+           prev=3,cur=5 -> 3<=4<=5? YES -> splice -> 1<->3<->4<->5
+insert(6): no normal slot; at prev=5,cur=1 wrap point (5>1 and 6>=5)
+           -> insert after max -> 1<->3<->5<->6
+insert(0): wrap point (5>1 and 0<=1) -> insert before min -> 0<->1<->3<->5
+```
+
+**Edge cases & gotchas:**
+- Empty list: point the node at itself (`node.next = node.prev = node`).
+- All-equal values (e.g. every node is 2): no `prev <= val <= cur` ever fires — the full-loop guard `prev is head` breaks out and inserts anywhere, which is still valid.
+- The wrap-point test handles values *larger than the max* or *smaller than the min*; both belong at the max→min seam.
 
 ### LC 465 — Optimal Account Balancing
 
@@ -2140,6 +2281,25 @@ def minTransfers(transactions):
     return dfs(0)
 ```
 
+**Walkthrough:**
+```
+transactions = [[0,1,10],[2,0,5]]
+balances: person0: -10+5 = -5,  person1: +10,  person2: -5
+debts (nonzero) = [-5, +10, -5]
+
+dfs settles debts[0] = -5 against each opposite-sign debt:
+  pair with +10 -> +10 becomes +5; recurse on [0, +5, -5]
+     settle +5 against -5 -> both zero; recurse -> 0 more transfers
+     => 1 + 1 = 2 transfers
+minimum = 2
+```
+
+**Edge cases & gotchas:**
+- Drop zero balances first — they're settled already and only add branching.
+- It's the *net* balance per person that matters, not the raw transaction list (multiple debts collapse to one number).
+- NP-hard in general, but the number of distinct debtors is tiny in interviews; the `debts[j]*debts[i] < 0` opposite-sign filter prunes hard.
+- A greedy "biggest creditor pays biggest debtor" is **not** always optimal — that's exactly why we backtrack.
+
 ### First Word Containing a Prefix
 
 **Question:** Given a word list and a prefix, return the index of the **first** word that starts with the prefix. E.g. `['a','apple','appz','b']`, prefix `'ap'` → `1`.
@@ -2160,6 +2320,22 @@ def first_with_prefix(words, prefix):
 ```
 **For many prefix queries:** build a trie of the words (each node storing the smallest word-index in its subtree) → each prefix lookup is O(prefix length).
 
+**Walkthrough:**
+```
+words = ['a','apple','appz','b'], prefix = 'ap'
+  i=0 'a'      startswith 'ap'? no  (word shorter than prefix)
+  i=1 'apple'  startswith 'ap'? YES -> return 1
+
+has_prefix('a','ap') via zip_longest(fillvalue='#'):
+  ('a','a') ok; ('p','#') -> 'p' != '#' -> fails  (shorter word correctly rejected)
+```
+
+**Edge cases & gotchas:**
+- A word *shorter* than the prefix must fail — a naive zip without a fill value stops early and wrongly passes; `zip_longest` with a sentinel fixes it.
+- Empty prefix matches the first word (index 0).
+- No match ⇒ -1.
+- For repeated queries, a trie storing the min word-index per node beats re-scanning the list each time.
+
 ### LC 84 — Largest Rectangle in Histogram (monotonic stack)
 
 **Question:** Largest rectangle area in a bar-height histogram.
@@ -2178,6 +2354,27 @@ def largestRectangleArea(heights):
         stack.append(i)
     return best
 ```
+
+**Walkthrough:**
+```
+heights = [2,1,5,6,2,3]  (+ trailing sentinel 0)
+
+push 0(h2)
+i=1 h=1 < 2: pop idx0 -> h2, width=i=1 -> area 2; push 1(h1)
+push 2(h5), push 3(h6)
+i=4 h=2: pop idx3(h6) width=4-2-1=1 -> 6
+         pop idx2(h5) width=4-1-1=2 -> 10   <- best
+         push 4(h2)
+push 5(h3)
+i=6 h=0 (sentinel): pop everything -> nothing beats 10
+answer = 10  (bars of height 5,6 spanning width 2)
+```
+
+**Edge cases & gotchas:**
+- The trailing `0` sentinel guarantees the stack fully flushes; without it, a strictly increasing histogram never pops.
+- Width formula: `i` when the stack empties (rectangle reaches the left edge), else `i - stack[-1] - 1`.
+- Popping with `>` (not `>=`) leaves equal-height bars stacked — still correct, because the later equal bar computes the full combined width.
+- Empty input / single bar are handled naturally.
 
 ### LC 392 — Is Subsequence (two pointers)
 
@@ -2217,6 +2414,23 @@ def make_matcher(t):
     return is_subseq
 ```
 
+**Walkthrough:**
+```
+s = "ace", t = "abcde"
+  expect 'a': t='a' match -> i=1
+  expect 'c': t='b' no, t='c' match -> i=2
+  expect 'e': t='d' no, t='e' match -> i=3 == len(s) -> True
+
+Follow-up matcher on the same t:
+  pos = {a:[0], b:[1], c:[2], d:[3], e:[4]}
+  is_subseq("ace"): a -> 0; c -> first pos > 0 = 2; e -> first pos > 2 = 4 -> True
+```
+
+**Edge cases & gotchas:**
+- Empty `s` is trivially a subsequence (the pointer is already at the end).
+- The follow-up wins when testing many short `s` against one large fixed `t`: O(|s| log|t|) per query after an O(|t|) preprocess, versus an O(|t|) scan each time.
+- `bisect_right(lst, prev)` (strictly *after* `prev`) is required — `bisect_left` could reuse the same position twice for repeated characters.
+
 ### Weighted Sampling (softmax → CDF + binary search)
 
 **Question:** Sample an index from logits in proportion to their softmax probabilities.
@@ -2239,6 +2453,26 @@ def build_sampler(logits):
     return sample
 ```
 
+**Walkthrough:**
+```
+logits = [1.0, 2.0, 3.0]
+shift by max=3:  exps = [e^-2, e^-1, e^0] = [0.135, 0.368, 1.0], total = 1.503
+probs ≈ [0.090, 0.245, 0.665]
+cdf   ≈ [0.090, 0.335, 1.000]
+
+sample(): draw u in [0,1)
+  u=0.05 -> bisect_left -> index 0
+  u=0.20 -> index 1
+  u=0.50 -> index 2
+fraction of u landing in each bucket == that bucket's probability.
+```
+
+**Edge cases & gotchas:**
+- Subtract `max(logits)` before `exp` — without it, large logits overflow `math.exp`.
+- Build the CDF once and reuse `sample()` for many draws (O(log n) each); rebuilding it per draw is the common inefficiency.
+- Floating-point: the last CDF entry should be ~1.0, and since `random()` < 1 you can't index past the end.
+- `bisect_left` vs `bisect_right` both work here — landing exactly on a CDF boundary has probability zero.
+
 ### LC 1526 — Minimum Operations to Form a Target Array
 
 **Question:** Starting from an all-zero array, each operation adds 1 to a contiguous subarray. Minimum operations to reach `target`.
@@ -2254,6 +2488,22 @@ def minNumberOperations(target):
     return ops
 ```
 **LC 3229 (array → target with +1/-1 on subarrays)** generalizes this to the difference array `d[i] = target[i] - arr[i]`: the answer is `|d[0]|` plus, for each `i`, the increase in `|d[i]|` whenever consecutive diffs share the same sign (and the full `|d[i]|` when the sign flips).
+
+**Walkthrough:**
+```
+target = [3,1,1,2]
+  ops = target[0] = 3            (lay 3 increments over the whole prefix)
+  i=1: 1 < 3 -> no new ops       (some subarrays just end here)
+  i=2: 1 == 1 -> no new ops
+  i=3: 2 > 1 -> += (2-1) = 1
+  total = 4
+```
+Only *rises* above the previous height need fresh increment-subarrays; *falls* are free — you simply stop extending some subarrays.
+
+**Edge cases & gotchas:**
+- Equivalent to `target[0]` plus the sum of positive consecutive differences.
+- Single element ⇒ `target[0]`.
+- The LC 3229 generalization keys off the difference array `d = target - arr` and the *sign* of consecutive diffs (see note above).
 
 ### LC 1723 — Find Minimum Time to Finish All Jobs
 
@@ -2283,6 +2533,24 @@ def minimumTimeRequired(jobs, k):
     return best[0]
 ```
 Alternative: binary-search the answer `T` and greedily/backtrack-check feasibility (can all jobs fit in `k` workers each ≤ `T`).
+
+**Walkthrough:**
+```
+jobs = [3,2,3], k = 2   (sorted desc -> [3,3,2])
+
+place 3 on w0: loads [3,0]
+  place 3 on w1: loads [3,3]
+    place 2 on w0: [5,3] -> max 5
+    place 2 on w1: [3,5] -> max 5   (symmetric; seen-set skips the identical worker)
+best max load = 5
+```
+The `seen` set skips workers with identical current load (placing the job on either yields the same subtree), and the `loads[w] + jobs[i] < best` bound prunes branches that already exceed the incumbent.
+
+**Edge cases & gotchas:**
+- Sort jobs **descending** first — large jobs trigger the bound prune early, drastically shrinking the search.
+- `k >= len(jobs)` ⇒ answer is `max(jobs)` (each job gets its own worker).
+- The symmetry prune (skip equal-load workers) is what makes this exponential search tractable.
+- Alternative framing: binary-search the answer `T`, feasibility-check by backtracking — preferable when loads are large but `k` is small.
 
 ---
 
