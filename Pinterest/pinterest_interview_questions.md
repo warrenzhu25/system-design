@@ -3,6 +3,7 @@
 ## Table of Contents
 
 - [Interview Format](#interview-format)
+- [Quick-Recall Cheat Sheet](#quick-recall-cheat-sheet)
 - [Coding Questions](#coding-questions)
   - [Put Boxes Into the Warehouse (LC 1564)](#put-boxes-into-the-warehouse-lc-1564)
     - [Follow-up: Maximum Total Box Height](#follow-up-maximum-total-box-height)
@@ -42,6 +43,45 @@
 
 - **Phone Screening**: 1 hour, coding focused (LeetCode style)
 - **Onsite**: Multiple rounds including coding, system design, and behavioral
+
+---
+
+## Quick-Recall Cheat Sheet
+
+One-glance revision table: the **pattern** is what to recognize; the **recipe** is the few steps to recall under pressure. Skim this right before the interview; the full intuition + worked example for each is in the sections below.
+
+**Coding Questions**
+
+| Problem | Pattern | Recall in one line |
+|---------|---------|--------------------|
+| Put Boxes Into Warehouse (LC 1564) | Greedy + prefix-min | Effective height = prefix-min of ceilings; sort boxes **asc**, fill from the **rightmost** fitting room. |
+| Max Total Box Height (follow-up) | Greedy | Same effective heights, but place the **largest** boxes first to maximize the summed height. |
+| Boxes from Both Ends | Two pointers | Sort boxes **desc**; converge pointers from both raw ends, place each at whichever end still fits. |
+| Lighthouse Light Propagation | Ray cast / BFS | Per lighthouse, cast a ray each direction until wall/edge; union lit cells. Use BFS over `(cell, dir)` if mirrors. |
+| BST → Sorted DLL (LC 426) | In-order threading | In-order traversal links `prev ↔ node`; close the ring (`head.left = tail`) at the end. |
+| Escape Room / Room Race | DLL-per-bucket + map | One FIFO doubly-linked list per room + `player → node` map; `getTop` scans rooms high→low. |
+| Cheapest Flights ≤ K Stops (LC 787) | Bellman-Ford | Relax all edges `k+1` times using a **temp copy** of prices (or stop-aware Dijkstra). |
+| Odd-Even Linked List (LC 328) | Two pointers | `odd`/`even` pointers step by 2; save `even_head`; splice even chain after the odd tail. |
+| Reconstruct Itinerary (LC 332) | Eulerian path (Hierholzer) | DFS popping sorted edges, append node **post-order**, then **reverse** the result. |
+| Violation Log Counter | Sliding window | Per-user sorted timestamps; window of `t` seconds, flag if count `> k` (two-pointer or bisect). |
+
+**High-Frequency Problems**
+
+| Problem | Pattern | Recall in one line |
+|---------|---------|--------------------|
+| ACL / Permission System | Tree walk **up** | `child → parent` map + per-advertiser grant set; `check_access` walks up ancestors for any grant. |
+| Bus Routes (LC 815) | BFS, **routes** are nodes | `stop → routes` index; BFS boards unvisited routes (+1 bus per level); mark **routes** visited, not stops. |
+| Shortest Way to Form String (LC 1055) | Greedy two-pointer | One pass over `source` per copy, advancing `target`; `-1` if any target char ∉ source. |
+| Pixie-like Random Walk | Random walk **with restart** | Walk from query pins, `alpha`-restart; visit counts = relevance; boost multi-query hits. |
+| Expression Add Operators LTR | DFS, **running value** | Split digits, apply `+ - *` to the running value (no precedence ⇒ no prev-term bookkeeping). |
+| Insert Circular Sorted DLL (LC 708) | One loop, two valid slots | Insert at normal slot `prev ≤ val ≤ cur` **or** the max→min wrap seam; self-loop if empty. |
+| Optimal Account Balancing (LC 465) | Net balances + backtrack | Collapse to net balances, drop zeros; backtrack settling the first debt vs each opposite-sign debt. |
+| First Word with Prefix | Scan / trie | `word.startswith(prefix)` scan; trie with min word-index per node for many queries. |
+| Largest Rectangle (LC 84) | Monotonic stack | Increasing index stack; pop on a shorter bar → `height × width` (back to prev); trailing sentinel `0`. |
+| Is Subsequence (LC 392) | Two pointers | Advance `s` pointer on match while scanning `t`; many queries ⇒ `char → positions` + binary search. |
+| Weighted Sampling | softmax → CDF + bisect | softmax (subtract max) → build CDF **once** → `bisect` a uniform `u` per draw. |
+| Min Ops to Form Array (LC 1526) | Difference array | Answer = `target[0]` + sum of **positive** consecutive differences. |
+| Min Time to Finish Jobs (LC 1723) | Backtrack + pruning | Assign jobs→workers; **bound** prune + skip equal-load workers; sort jobs **desc** first. |
 
 ---
 
@@ -1980,7 +2020,22 @@ A consolidated list of frequently-asked Pinterest coding problems. Already cover
 
 **Question:** Implement `grant_access(advertiser, group)`, `check_access(advertiser, group)`, `revoke_access(advertiser, group)` over a **group hierarchy** — granting access to a group implies access to everything nested under it.
 
-*Main logic:* store the group hierarchy as `child → parent` pointers and a per-advertiser set of granted groups. `check_access` walks **up** from the target group through its ancestors; access is granted if any ancestor was granted to that advertiser.
+**Example:**
+```
+Groups nest like folders:   org_root > brand_X > campaign_A
+grant_access("alice", "brand_X")     # alice gets brand_X and everything under it
+check_access("alice", "campaign_A")  -> True   (campaign_A is inside brand_X)
+check_access("alice", "brand_X")     -> True   (the granted node itself)
+check_access("alice", "org_root")    -> False  (org_root is ABOVE the grant, not under it)
+revoke_access("alice", "brand_X")
+check_access("alice", "campaign_A")  -> False  (grant removed)
+```
+
+**Intuition — push the work to read time, walk *up* not *down*:**
+
+The cascade rule ("access to a group implies access to all descendants") tempts you to expand a grant downward — when alice gets `brand_X`, mark `brand_X` and every descendant as granted. But the tree can be huge and changes over time (new campaigns appear under `brand_X` later), so eager expansion is expensive and goes stale.
+
+The trick is to invert it. Store the hierarchy as simple `child → parent` pointers and store each grant as just the single node it was made on. Then `check_access(advertiser, group)` walks **upward** from `group` through its ancestors: if the advertiser was granted *any* ancestor (or the node itself), access is allowed. "Granted an ancestor" is exactly equivalent to "the target is in that ancestor's subtree" — so the upward walk reproduces the cascade without ever materializing it. Cost is O(tree depth) per check, and grants/revokes stay O(1).
 
 ```python
 from collections import defaultdict
@@ -2032,9 +2087,29 @@ revoke_access("alice", "brand_X"); check_access("alice","campaign_A") -> False
 
 ### LC 815 — Bus Routes (high frequency)
 
-**Question:** Each bus route is a list of stops a bus cycles through. Return the **fewest buses** to travel from `source` to `target`.
+**Question:** You're given `routes`, where `routes[i]` is the list of stops that bus *i* repeatedly cycles through. You start at `source` and want to reach `target`. Return the **fewest number of buses** you must ride (or `-1` if impossible). Note you may board/exit a bus at any stop on its route.
 
-*Main logic:* BFS where the **buses (routes)** are the graph nodes, not stops. From the current stop, board every unvisited route through it; reaching any of that route's stops costs one more bus. Index `stop → routes` so boarding is O(1).
+**Example:**
+```
+routes = [[1,2,7], [3,6,7]], source = 1, target = 6
+Answer: 2
+  - Ride bus 0 from stop 1 to stop 7 (1 bus so far).
+  - Stop 7 is shared by bus 0 and bus 1, so transfer to bus 1.
+  - Ride bus 1 from stop 7 to stop 6 (2 buses total).
+```
+
+**The key modeling decision — what is a "node"?**
+
+The naive instinct is to make *stops* the graph nodes and connect adjacent stops. That works but is wasteful: a single route with 1000 stops creates ~1000 edges, and "fewest buses" doesn't map cleanly to "fewest stop-to-stop hops."
+
+The cleaner model: treat each **bus route as a node**. Two routes are connected if they share at least one stop (you can transfer between them there). The answer "fewest buses" then becomes "fewest route-nodes on a path" — a shortest-path-in-an-unweighted-graph problem, which is exactly **BFS**.
+
+We don't even build the route-to-route graph explicitly. Instead we BFS outward from `source`:
+- We keep a `stop → set of routes passing through it` index so that, standing at any stop, we instantly know every bus we could board.
+- Each BFS "level" = riding one more bus. From the current stop, we board every not-yet-taken route through it; every stop on those routes is now reachable with `buses + 1`.
+- The first time we touch `target`, the current level count is the answer (BFS visits nearer levels first, so it's minimal).
+
+The crucial detail: mark **routes** as visited, not just stops. Once you've ridden a bus, re-boarding it can never help — you've already reached all its stops. Forgetting this re-explores entire routes and blows up the runtime.
 
 ```python
 from collections import defaultdict, deque
@@ -2084,9 +2159,26 @@ Two buses: route 0 from stop 1 to the shared stop 7, then route 1 to stop 6.
 
 ### LC 1055 — Shortest Way to Form String (high frequency)
 
-**Question:** Minimum number of copies of `source` whose **subsequences** concatenate to `target` (or `-1` if impossible).
+**Question:** Given strings `source` and `target`, you want to build `target` by concatenating **subsequences of `source`**. (A subsequence keeps order but may skip characters — e.g. `"ac"` is a subsequence of `"abc"`.) Return the **minimum number of copies of `source`** whose subsequences, glued together, equal `target`. Return `-1` if it's impossible.
 
-*Main logic:* greedy two-pointer — scan `source` once per copy, advancing through `target` on each match. Each copy advances `target` by ≥ 1 char (every target char exists in `source`), so copies ≤ `len(target)`.
+**Example:**
+```
+source = "abc", target = "abcbc"
+Answer: 2
+  - From copy 1 of "abc", take the subsequence "abc"  -> covers target[0:3] = "abc"
+  - From copy 2 of "abc", take the subsequence "bc"   -> covers target[3:5] = "bc"
+  Concatenated: "abc" + "bc" = "abcbc" = target, using 2 copies.
+
+source = "abc", target = "abx" -> -1   ('x' never appears in source)
+```
+
+**Intuition — why a simple greedy is optimal:**
+
+Think of laying `target` down left to right, consuming one fresh copy of `source` at a time. Within a single copy you scan `source` once; every time the current `source` char matches the next unmatched `target` char, you "consume" that target char and advance. When you reach the end of `source`, you've extracted the *longest possible* prefix of the remaining target that this one copy can cover — so you start a new copy and continue.
+
+Why is "grab as much as you can per copy" optimal? Because matching greedily never hurts: taking the earliest possible match for each target character leaves the *most* of `source` available for later characters. There's no scenario where deliberately skipping a valid match lets you finish in fewer copies. So greedy = minimal copies.
+
+Feasibility and the bound both fall out naturally: if any `target` character doesn't appear in `source` at all, it can never be matched ⇒ return `-1`. Otherwise every copy advances `target` by at least one character, so you need at most `len(target)` copies.
 
 ```python
 def shortestWay(source, target):
@@ -2121,9 +2213,23 @@ If `target` held a char missing from `source` (e.g. `"abx"`), the `not in source
 
 ### Pixie-like Random Walk
 
-**Question:** Recommend pins from a few query pins over the bipartite **pin ↔ board** graph (Pinterest's Pixie).
+**Question:** Given a few "query" pins a user just engaged with, recommend related pins. The data is a **bipartite graph**: pins connect to the boards they're saved on, and boards connect to the pins saved on them (pin → board → pin → …). This is the core of Pinterest's *Pixie* recommender.
 
-*Main logic:* random walk **with restart** from the query pins; the visit counts rank recommendations. Restart probability `alpha` keeps the walk near the query; a "multi-hit booster" (favor pins reached from *several* query pins) and early stopping make it production-fast.
+**Example:**
+```
+Pins P0,P5 are both saved on board B1; P5,P3 are both on board B2.
+Query = [P0].
+A walk P0 -> B1 -> P5 -> B2 -> P3 discovers P5 and P3 as related to P0,
+with P5 (one hop away via a shared board) visited most -> ranked highest.
+```
+
+**Intuition — "related" = "frequently reachable by a short random walk":**
+
+How do you define which pins are related to the query pins, using only the graph? A clean answer: pins you keep landing on when you wander randomly *starting from the query*. Pins that share many boards with the query (or share boards with pins that do) get visited far more often than unrelated pins, so **visit frequency becomes the relevance score**.
+
+Two refinements make the raw walk practical:
+- **Restart probability `alpha`:** at each step, with probability `alpha` teleport back to the query pin. Without this the walk drifts arbitrarily far and starts recommending globally-popular-but-irrelevant pins; restarting tethers the distribution to the neighborhood of the query (this is "random walk *with restart*", aka personalized PageRank).
+- **Multi-hit boosting:** when there are several query pins, a candidate reached from *several* of them is a stronger signal than one reached from a single query. Combining per-query counts with a booster like `(Σ √count_q)²` rewards pins that are broadly reachable across the whole query set rather than spiking on one.
 
 ```python
 import random
@@ -2163,9 +2269,20 @@ is boosted above one reachable from only one query, even at similar raw count.
 
 ### Expression Add Operators — Left-to-Right (simplified LC 282)
 
-**Question:** Insert `+ - *` between the digits of a string and count/return expressions equal to `target`, but operators associate **left-to-right with no precedence**: `2+3*2` means `(2+3)*2 = 10`.
+**Question:** Given a string of digits, insert `+ - *` (or nothing) between digits so the resulting expression equals `target`. Return all such expressions. The twist vs. normal math: operators associate **strictly left-to-right with no precedence**, so `2+3*2` is read as `(2+3)*2 = 10`, **not** `2+(3*2)=8`.
 
-*Main logic:* because there's no precedence, each operator applies to the **running value** immediately ("算过就定下来") — so unlike real LC 282 you don't track the previous term. DFS over split points, applying the op to `value` as you go.
+**Example:**
+```
+num = "232", target = 10
+One valid expression: "2+3*2"  ->  ((2+3)*2) = 10
+  (digits may also be grouped: "23"|"2" gives operands 23 and 2)
+```
+
+**Intuition — no precedence means "no memory" backtracking:**
+
+You explore every way to (a) split the digit string into operands and (b) put an operator before each operand after the first. That's a standard DFS: at index `idx`, try every prefix `num[idx:j]` as the next operand, and for each, recurse having applied `+`, `-`, or `*`.
+
+The thing that makes this *easier* than real LC 282 is the left-to-right rule. Because there's no precedence, an operator acts on the **running value immediately** — once you compute it, it's locked in. So multiplication is just `value * operand`, same shape as `value + operand`. You carry only a single number (`value`) down the recursion. (In real LC 282, `*` binds tighter than `+`, so `2+3*2` needs the `3*2` evaluated *before* the `+`; you must remember the last operand and undo it: `value - prev + prev*o`. The left-to-right variant deletes that whole complication.)
 
 ```python
 def add_operators_ltr(num, target):
@@ -2210,9 +2327,24 @@ Real LC 282 would evaluate `2+3*2` as `2+6=8`; here each operator simply transfo
 
 ### Insert into Sorted Circular Doubly Linked List (LC 708) — LC 426 follow-up
 
-**Question:** Insert a value into a **sorted circular** DLL (the structure produced by Convert-BST-to-DLL above), keeping it sorted.
+**Question:** Insert a value into a **sorted circular** doubly-linked list (the structure produced by Convert-BST-to-DLL above) so it stays sorted, and return a pointer to the list. You may be given a pointer to *any* node, not necessarily the smallest.
 
-*Main logic:* walk one full loop looking for a `prev ≤ val ≤ prev.next` slot; also accept the wrap point (max → min boundary). If the list is empty, point the node at itself.
+**Example:**
+```
+Ring (ascending, wraps around):  3 <-> 5 <-> 1 <-> (back to 3)
+insert(4):  goes between 3 and 5      -> 3 <-> 4 <-> 5 <-> 1
+insert(0):  smaller than the min (1)  -> inserts at the 5->1 seam, before 1
+insert(6):  larger than the max (5)   -> inserts at the same seam, after 5
+```
+
+**Intuition — one loop, two kinds of valid slots:**
+
+Because the list is circular and sorted, walk pointer pairs `(prev, cur)` once around the ring looking for where `val` fits. There are two situations where `(prev, cur)` is a legal insertion gap:
+
+1. **Normal slot:** `prev.val <= val <= cur.val` — `val` sits between two ascending neighbors.
+2. **The wrap seam:** the one place where the ring "rolls over" from its maximum back to its minimum (`prev.val > cur.val`). Any value `>= max` or `<= min` belongs here — that's where a new global-max or global-min is spliced in.
+
+If you complete a full loop without matching either (which happens when *all values are equal*), just insert anywhere — the list stays valid. The empty-list case is special: a lone node points to itself to form a one-element ring.
 
 ```python
 def insert(head, val):
@@ -2252,9 +2384,23 @@ insert(0): wrap point (5>1 and 0<=1) -> insert before min -> 0<->1<->3<->5
 
 ### LC 465 — Optimal Account Balancing
 
-**Question:** Given debt transactions, the minimum number of transactions to settle everyone to zero.
+**Question:** You're given a list of transactions `[lender, borrower, amount]`. Return the **minimum number of transactions** needed to settle all debts so everyone's balance is zero. People can pay anyone, not only their original counterparty.
 
-*Main logic:* only the **net balance** per person matters. Drop zero balances, then backtrack: settle the first nonzero debt against every opposite-sign debt, recursing — classic NP-hard subset backtracking, small `n`.
+**Example:**
+```
+transactions = [[0,1,10], [2,0,5]]
+  person0: paid 10 to p1, received 5 from p2  -> net -5
+  person1: received 10                        -> net +10
+  person2: paid 5                             -> net -5
+Net balances: {0: -5, 1: +10, 2: -5}
+Answer: 2   (p0 pays p1 5, then p2 pays p1 5 — two transfers settle everyone)
+```
+
+**Intuition — forget the transactions, settle the net balances:**
+
+First insight: the original transaction list is a red herring. All that matters is each person's **net balance** (sum owed minus sum owed to them). Two people who exchanged ten payments are equivalent to their single net figure. So collapse everyone to one number and drop the zeros (already settled) — you're left with a multiset of positive (creditors) and negative (debtors) balances that sums to zero.
+
+Second insight: now it's "settle this multiset in the fewest transfers." Each transfer moves money from one person to another and zeroes out *at least one* of them. To minimize transfers you want each one to cancel as much as possible — ideally a debt exactly offsetting a credit. There's no simple greedy that's always optimal (greedily matching biggest-vs-biggest can miss a better grouping), so you **backtrack**: take the first unsettled balance and try cancelling it against every opposite-sign balance, recursing on the rest, and keep the minimum. This is NP-hard in general, but the number of distinct non-zero people is small in practice, and the opposite-sign filter prunes hard.
 
 ```python
 from collections import defaultdict
@@ -2302,9 +2448,20 @@ minimum = 2
 
 ### First Word Containing a Prefix
 
-**Question:** Given a word list and a prefix, return the index of the **first** word that starts with the prefix. E.g. `['a','apple','appz','b']`, prefix `'ap'` → `1`.
+**Question:** Given a list of words and a prefix string, return the index of the **first** word that starts with that prefix, or `-1` if none does.
 
-*Main logic:* `str.startswith` is the clean answer; the interview "trick" is comparing char-by-char with `zip_longest(prefix, word, fillvalue='#')` so a word *shorter* than the prefix correctly fails (the `#` never matches).
+**Example:**
+```
+words = ['a', 'apple', 'appz', 'b'], prefix = 'ap'
+  'a'      -> too short to start with 'ap'        -> no
+  'apple'  -> starts with 'ap'                     -> YES, return index 1
+```
+
+**Intuition — the real point is "does a word start with a prefix?":**
+
+For a single query this is almost trivial: scan the list and return the first index where `word.startswith(prefix)`. The reason it shows up in interviews is the implementation detail they want you to get right: a word **shorter than the prefix** must fail. If you compare character by character with a plain `zip(prefix, word)`, the loop stops at the shorter string and you'd wrongly conclude `'a'` matches prefix `'ap'` (you only compared the `'a'`). The fix is `zip_longest(prefix, word, fillvalue='#')`: the prefix's extra characters now pair against a sentinel `'#'` that the word can never equal, so the shorter word correctly fails. (`str.startswith` already handles this, which is why it's the clean answer — the manual version is just to show you understand the edge.)
+
+The follow-up that makes it interesting: **many prefix queries** against the same word list. Then build a **trie** of the words, each node caching the smallest word-index in its subtree; each query walks the prefix (O(prefix length)) and reads off the cached index instead of re-scanning the whole list.
 
 ```python
 from itertools import zip_longest
@@ -2338,9 +2495,25 @@ has_prefix('a','ap') via zip_longest(fillvalue='#'):
 
 ### LC 84 — Largest Rectangle in Histogram (monotonic stack)
 
-**Question:** Largest rectangle area in a bar-height histogram.
+**Question:** Given `heights`, where `heights[i]` is the height of the *i*-th bar in a histogram (each bar 1 unit wide), find the area of the **largest rectangle** that fits entirely under the bars.
 
-*Main logic:* keep an **increasing monotonic stack** of bar indices. When a shorter bar arrives, pop taller bars; each popped bar is the rectangle's height and the width spans from the new bar back to the previous stacked bar. A trailing sentinel `0` flushes the stack.
+**Example:**
+```
+heights = [2,1,5,6,2,3]
+            _
+        _  | |
+       | | | | _
+       | | | || |
+ _     | | | || |
+| |_   | | | || |
+Largest rectangle = bars 5 and 6 (indices 2,3) at height 5 over width 2 = 10.
+```
+
+**Intuition — every bar is the height of *some* rectangle; how wide can it go?**
+
+For each bar, imagine the widest rectangle that uses that bar as its *limiting (shortest) height*. It can extend left and right until it hits a bar shorter than itself. The answer is the max over all bars of `height × that width`. The challenge is computing, for every bar, "how far left/right until something shorter" efficiently.
+
+A **monotonic increasing stack** does it in one pass. We push bar indices while heights keep rising. The moment a bar `h` arrives that's *shorter* than the top of the stack, that top bar can't extend any further right — `h` is its right wall. So we pop it and finalize its rectangle: its height is the popped bar's height, and its width spans from the current index back to the bar now under it on the stack (the nearest shorter bar to the left). We keep popping while the stack top is taller than `h`. A trailing sentinel of height `0` at the end forces every remaining bar to be popped and measured. Each index is pushed and popped once → O(n).
 
 ```python
 def largestRectangleArea(heights):
@@ -2378,9 +2551,19 @@ answer = 10  (bars of height 5,6 spanning width 2)
 
 ### LC 392 — Is Subsequence (two pointers)
 
-**Question:** Is `s` a subsequence of `t`?
+**Question:** Return whether `s` is a **subsequence** of `t` — i.e. whether you can delete some (possibly zero) characters from `t`, without reordering, and get `s`.
 
-*Main logic:* one pointer over `s`, advance it on each match while scanning `t`; `s` is a subsequence iff the pointer reaches the end.
+**Example:**
+```
+s = "ace", t = "abcde" -> True   ("a_c_e" — keep a, c, e in order)
+s = "aec", t = "abcde" -> False  (e appears after c in t, so "aec" can't be formed)
+```
+
+**Intuition — greedily match left to right:**
+
+Keep a pointer into `s` and scan `t` once. Every time the current `t` character equals the character `s` is waiting for, advance the `s` pointer. `s` is a subsequence exactly when that pointer reaches the end of `s`. Greedy works because matching the *earliest* available occurrence of each `s` character is never worse — it leaves the most of `t` for the remaining characters. O(|t|) time, O(1) space.
+
+The **follow-up** is where it gets interesting and matches a real Pinterest-scale concern: you have **many** strings `s₁, s₂, …` to test against one large fixed `t`. Re-scanning all of `t` per query is wasteful. Instead preprocess `t` once into `char → sorted list of positions`. For each character of `s`, binary-search the *next* position strictly after the one you last used — O(|s| log |t|) per query (same trick as the LC 1055 follow-up).
 
 ```python
 def isSubsequence(s, t):
@@ -2433,9 +2616,22 @@ Follow-up matcher on the same t:
 
 ### Weighted Sampling (softmax → CDF + binary search)
 
-**Question:** Sample an index from logits in proportion to their softmax probabilities.
+**Question:** Given a list of `logits` (raw model scores), sample an index so that index `i` is chosen with probability `softmax(logits)[i]` — i.e. proportional to `exp(logit_i)`. Support drawing many samples efficiently.
 
-*Main logic:* softmax (with the max-subtraction trick for numerical stability) → build the **CDF** once → draw `u ~ Uniform(0,1)` and **binary-search** the first CDF bucket ≥ `u`. O(n) to build, O(log n) per sample (reuse the CDF for many draws).
+**Example:**
+```
+logits = [1.0, 2.0, 3.0]
+softmax  ≈ [0.09, 0.245, 0.665]   (index 2 is most likely, ~66% of draws)
+Over many calls, sample() returns 0/1/2 in roughly 9% / 24% / 66% of cases.
+```
+
+**Intuition — turn probabilities into a number line, then binary-search:**
+
+Picture the probabilities laid end to end on `[0, 1)`: index 0 owns `[0, 0.09)`, index 1 owns `[0.09, 0.335)`, index 2 owns `[0.335, 1.0)`. The width of each segment *is* its probability. So if you draw a uniform `u ∈ [0, 1)` and find which segment it lands in, you've sampled with exactly the right probabilities. Those segment boundaries are the **cumulative distribution (CDF)** — a sorted array — so "which segment" is a **binary search** for the first CDF entry `≥ u`.
+
+Two details interviewers look for:
+- **Numerical stability:** subtract `max(logits)` before exponentiating. `exp` of a large logit overflows; subtracting the max shifts everything to `≤ 0` (so `exp ≤ 1`) without changing the softmax ratios.
+- **Build once, sample many:** the CDF costs O(n) to build but then each draw is O(log n). Rebuilding it on every sample is the classic inefficiency.
 
 ```python
 import math, bisect, random
@@ -2475,9 +2671,21 @@ fraction of u landing in each bucket == that bucket's probability.
 
 ### LC 1526 — Minimum Operations to Form a Target Array
 
-**Question:** Starting from an all-zero array, each operation adds 1 to a contiguous subarray. Minimum operations to reach `target`.
+**Question:** You start with an all-zero array. Each operation picks a contiguous subarray and adds 1 to every element of it. Return the **minimum number of operations** to turn the zero array into `target`.
 
-*Main logic:* think in **differences**. You "pay" `target[0]`, then for each step only the *increase* over the previous element needs new operations (a decrease is free — those subarrays simply end here).
+**Example:**
+```
+target = [3,1,1,2]
+Answer: 4
+  e.g. +1 over [0..3] three?  No — think of it as horizontal layers:
+  height profile  3,1,1,2  needs 4 "stripe" operations total.
+```
+
+**Intuition — count only the *rises* (think in differences):**
+
+Visualize `target` as a bar chart and each operation as painting a horizontal stripe over a contiguous run. To build up bar `i`, you only need *new* stripes when it's **taller than its left neighbor** — if it's the same height or shorter, the stripes covering the taller neighbor already extend into it (you just stop some of them, which is free).
+
+So the answer is `target[0]` (the stripes needed to raise the first bar from zero) plus, for every later position, `max(0, target[i] - target[i-1])` — the extra height you have to add beyond what's already flowing in from the left. Equivalently: `target[0]` + the sum of all positive consecutive differences. O(n), no DP needed.
 
 ```python
 def minNumberOperations(target):
@@ -2507,9 +2715,23 @@ Only *rises* above the previous height need fresh increment-subarrays; *falls* a
 
 ### LC 1723 — Find Minimum Time to Finish All Jobs
 
-**Question:** Assign all jobs to `k` workers minimizing the **maximum** worker load.
+**Question:** You have `jobs` (each `jobs[i]` is a processing time) and `k` workers. Assign **every** job to exactly one worker. A worker's "load" is the sum of its jobs' times. Minimize the **maximum** load across all workers (the time when the last worker finishes).
 
-*Main logic:* backtracking that places each job on some worker, pruning by (a) not exceeding the best answer so far and (b) skipping workers with a duplicate current load (symmetry). Sorting jobs descending prunes much earlier.
+**Example:**
+```
+jobs = [3,2,3], k = 2
+Best assignment: {3,2} and {3} -> loads 5 and 3 -> max = 5
+(Any split here gives max 5; answer = 5.)
+```
+
+**Intuition — try every assignment, but prune hard:**
+
+There's no clean greedy (assigning each job to the currently-least-loaded worker can be suboptimal), so you **backtrack**: place job `i` on some worker, recurse on job `i+1`, undo. Naively that's `kⁿ`, so two prunes make it tractable:
+
+- **Bound prune:** track the best (smallest max-load) found so far. If putting a job on a worker would push that worker's load to `≥ best`, this branch can't improve the answer — skip it.
+- **Symmetry prune:** if two workers currently have the *same* load, placing the job on either produces an identical subtree. Use a per-step `seen` set of loads so you try each distinct load only once.
+
+Finally, **sort jobs descending** first: placing big jobs early makes loads exceed `best` sooner, so the bound prune fires much earlier. (Alternative framing some prefer: binary-search the answer `T`, then feasibility-check "can all jobs fit in `k` bins each ≤ `T`?" by backtracking — better when job times are large but `k` is small.)
 
 ```python
 def minimumTimeRequired(jobs, k):
