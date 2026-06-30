@@ -178,6 +178,49 @@ Sources                       Processing                Store / retrieval
 - Generic embeddings are sufficient (Spark terminology is standard); revisit
   fine-tuning only if retrieval quality is poor.
 
+### 5.1 Knowledge freshness & updates
+
+Stale knowledge is actively dangerous here — a runbook saying "bump
+`spark.yarn.executor.memoryOverhead`" is *wrong* after Spark renamed the key.
+Two distinct problems, handled separately:
+
+**Source-freshness (index matches source) — use CocoIndex.** Don't hand-build
+the ingestion pipeline. **CocoIndex** (Apache 2.0, incremental indexing engine)
+reprocesses only changed data, gives sub-second source→index freshness, dedups,
+safely deletes obsolete versions, and ships connectors for S3 / Google Drive /
+Postgres / Kafka / local FS (→ postmortems, Confluence/Notion exports, git docs).
+It can also target Neo4j/FalkorDB if we build the entity/dependency graph. This
+replaces the §2-style hand-built incremental indexer.
+
+**Don't index live state.** RAG is for *durable knowledge*, not *current state*.
+Release status, cluster config, and live metrics are fetched live via tools
+(`ChangeToolset` / `DataprocToolset`), never embedded — freshness-free by
+construction. Drawing this line solves half the problem.
+
+**Correctness-freshness (knowledge is still right) — our layer on top.**
+CocoIndex keeps the index matching the source, but a runbook that's outdated yet
+*unedited* in the source gets faithfully re-indexed — wrong, sub-second. The read
+side and the feedback loop catch that:
+
+- **Version-aware retrieval.** Tag every chunk with the platform version it
+  applies to (Spark 3.3 vs 3.5, Dataproc image). At query time, pull the failing
+  cluster's *actual* version live and filter/boost by it — stops Spark 3.3 advice
+  reaching a 3.5 cluster (the most common stale-knowledge failure on an upgrading
+  platform). CocoIndex carries the tag; the boost is our retrieval code.
+- **Decay ranking.** Rank = semantic similarity × recency/validation factor, so
+  recently-validated runbooks outrank stale ones on a near-tie (§6).
+- **Validation-on-use.** When a retrieved runbook yields a *confirmed-correct*
+  RCA (§8 feedback), bump its `last_validated_at`; knowledge proven by use stays
+  fresh, unused knowledge decays and surfaces for review. A runbook that yields
+  *wrong* RCAs is demoted even if recent.
+- **Supersede, don't delete.** Corrections mark the old runbook
+  `superseded_by → new`; retrieval returns only the current version. Contradictions
+  (cosine sim + opposite remediation) flag for human resolution.
+
+Net: **CocoIndex owns source→index sync; we own version-aware retrieval, decay
+ranking, validation-on-use, and conflict resolution** — the oncall-specific
+intelligence on the read side.
+
 ---
 
 ## 6. Case → runbook (closing the loop)
@@ -385,6 +428,8 @@ monitors.
   iteration cap (runaway detector), subagent fan-out.
 - Quality: live correctness rate and false-attribution rate (from §8 feedback),
   RAG retrieval hit rate.
+- Knowledge freshness (§5.1): per-source CocoIndex sync lag, and **% of retrieved
+  chunks that are stale / superseded / version-mismatched** (the freshness KPI).
 
 **Meta-monitoring — alert on the agent itself.** It's now a production dependency:
 page on agent error-rate spikes, latency-SLO breaches, runaway loops (iteration
