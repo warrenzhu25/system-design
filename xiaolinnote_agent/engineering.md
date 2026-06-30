@@ -1,0 +1,1899 @@
+# 工程实践
+
+> Archived from https://xiaolinnote.com/agent/ (engineering). Personal study copy.
+
+
+## Harness Engineering 是什么？AI Agent 越用越聪明的秘密
+
+> Source: https://xiaolinnote.com/agent/engineering/harness-engineering.html
+
+大家好，我是小林。
+
+不知道你最近是不是和我一样有这种感觉：AI 圈造新词的速度是真的快。
+
+Prompt Engineering 这个词大家还没整明白呢，Context Engineering 又火了一年，资料还在到处转。
+
+最近圈子里又冒出来一个新词，叫「**Harness Engineering**」，翻译过来叫「驾驭工程」。
+
+三天一概念，五天一炸裂，一周一个新名词。
+
+甚至现在每次 AI 圈新诞生一个很火的概念，面试就大概率会被问到，就比如有林友跟我反馈面试就被问到了「**Harness 工程**」
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776087176683-e6b96c74-f9e0-4a76-a628-6f543585cb83.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+你是不是已经麻了？
+
+但麻归麻，我还是去把这个新词的来龙去脉认认真真扒了一遍。
+
+扒完之后我发现，这次还真不是又一个换皮的概念，它确实是在解决一个之前那两个词都解决不了的问题。
+
+所以今天这篇文章，我想把这三个词一次性给你讲透，主要回答三个问题：
+
+- Harness Engineering 到底是个啥？
+- 它跟 Prompt Engineering、Context Engineering 是什么关系？
+- OpenAI 和 Anthropic 实现 Harness 遇到了什么难点？
+
+文章会有点长，但我尽量讲得通俗一点，你泡杯茶慢慢看。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/image-20260613210511117.png" tabindex="0" loading="lazy" />
+</figure>
+
+### 这个新词到底从哪儿冒出来的？
+
+在开讲之前，我想先带你去「追个源」。
+
+因为我发现很多人在跟风聊 Harness Engineering 的时候，压根没搞清楚这个词最早是谁提出来的。等你知道了它是谁先喊出来的，你就会明白为啥它这次真的能火，而不是又一个换皮概念。
+
+Harness Engineering 这个词最早被正式叫响，是在 2026 年 2 月 5 号一篇博客里。作者叫 Mitchell Hashimoto。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776065806124-22e2c757-351a-4dbb-8778-a36af5b45d31.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+标题叫《My AI Adoption Journey》，中文大概是「我接纳 AI 的历程」。讲的就是他作为一个老派工程师，是怎么一步一步从「不信 AI」到「每天让 Agent 替我干活」的心路历程。
+
+他把整个过程拆成了 6 个 Step，前面几步都挺反直觉的，我挑几个有意思的给你讲讲。
+
+第一步，直接扔掉对话框。他说一上来别用 ChatGPT 那种聊天界面，要用就用能自主执行任务的 Agent。为啥？因为聊天界面会给你一种「我在和 AI 讨论」的幻觉，但实际上你啥也没干，Agent 才是真正让 AI 动起来的形态。只有把 Agent 放开让它自己执行，你才能真正感知到它的能力边界在哪儿。
+
+第二步更狠，他强迫自己用 Agent 去重做一部分自己早就已经手写过的代码。听起来是不是有点傻？明明自己两下就能写完的活，非要等 Agent 慢慢磨。他原话说这个过程「painful」，折磨人。但目的很明确：只有你亲自用 AI 去重做你已经熟得不能再熟的任务，你才能精准校准「它到底哪里行、哪里不行」。
+
+然后到了第五步，他给自己这套做法起了个名字，就叫 Engineer the Harness，打磨这套马具。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776065858145-d246c3c5-6702-41fc-a29b-16ad20b12f8b.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+他给的定义特别简洁，我把原话翻译过来：
+
+每次当你发现 Agent 犯了一个错误，就花点时间去工程化一个解决方案，让它永远不会再犯同样的错误。
+
+你品品这个思路。绝大多数人遇到 Agent 犯错是怎么办的？骂两句，手动改掉，祈祷下次它别再犯。
+
+但 Mitchell 不是这么干的，他每次 Agent 犯错，都会停下来问自己：我能不能把这个错误永久性地修到环境里，让它下次在结构上就不可能再犯？
+
+可能是给 <a href="http://AGENTS.md" target="_blank" rel="noopener noreferrer">AGENTS.md</a> 加一条规则，可能是加一个 linter，可能是补一个自动化测试，也可能是搞一个 Git Hook。反正关键是：这个修补必须沉淀到环境里，而不是留在人脑子里。
+
+这套做法的威力在于它是「复利」的。
+
+每一次 Agent 犯错，环境就会变强一点；环境变强一点，Agent 下一次就更少犯错；犯错变少，你改进的速度就更快。时间一长，你的 Harness 会越来越坚固，Agent 在你这个项目里会越跑越稳。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776066189480-9e2c02d4-abdb-4a92-aecb-4fc68b42eba8.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+博客发出来一周后，OpenAI 紧接着也发布了一篇官方博客，标题就叫《Harness engineering: leveraging Codex in an agent-first world》。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776065945432-58244ca8-d9b7-4d5a-9bdc-3f11f1c15c1c.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+这篇博客讲的是他们内部一个从 3 人起步的小团队，从一个空仓库出发，用 5 个月时间，靠 Agent 写出了 100 万行代码、合并了 1500 个 PR，全程没人手动写过一行代码。
+
+这篇博客一出，Harness Engineering 这个概念直接被推上了 AI 圈的风口浪尖。所以你能看明白这个词的路径了吧：
+
+一个基础设施圈的老法师先喊出来 → OpenAI 几天后发文背书 → 一周内整个 AI 圈开始刷屏。
+
+这种出身决定了它不会像很多 AI 新词一样「炒一波就凉」，它更像是一个在真实工程土壤里长出来的东西。
+
+好，交代完来源，咱们进入正题。
+
+### 从提示词到 Harness
+
+要真正讲清楚 Harness Engineering 在解决啥问题，咱们不能一上来就讲它。因为它不是凭空冒出来的新概念，而是 AI 工程这几年一步一步「被逼出来」的结果。
+
+你去复盘一下过去两年 AI 圈的变化就会发现一件特别有意思的事：AI 工程的重心，其实已经悄悄换过三次了。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776066308212-34da4f03-3652-4447-9609-172f3afc4068.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+一开始大家在聊的是 Prompt Engineering，提示词工程。那个时候所有人都相信一件事：模型不是不会，只是你没把话讲明白，只要提示词写得够好，啥都能搞定。
+
+后来大家发现事情不对劲。Agent 火起来之后，模型要做的事情越来越复杂，光「把话讲清楚」根本不够，它还得「知道」该用什么信息才行。于是 Context Engineering，上下文工程，接棒成为 AI 工程圈的新主角。
+
+但这事到这儿还没完。当大家把上下文管得越来越精细之后，又发现了一个更扎心的问题：信息都给对了，模型在长链路任务里还是会跑偏。
+
+提示词没毛病、上下文也没毛病，可它就是做不稳。正是在这个背景下，Mitchell Hashimoto 的那篇博客和 OpenAI 的那个百万行代码实验几乎同时出现，Harness Engineering 就这么被推到了台前。
+
+你有没有感觉出这条脉络？这三个阶段不是谁取代谁，而是每一步都在上一步撞到天花板之后，继续往前啃出来的：
+
+- Prompt Engineering 解决的是：怎么让模型「听懂」你想干啥
+- Context Engineering 解决的是：怎么让模型「知道」该用什么信息
+- Harness Engineering 解决的是：怎么让模型在真实执行里「持续做对」一连串的事
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776066576145-0ecbdb76-7972-480f-b704-ad8d880db443.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+听起来三句话好像差不多对吧？但你一定要相信我，这三件事的难度和工作量，是层层放大的。
+
+把一句话讲明白难吗？不难。把一整套信息在合适的时机送给模型就开始有点门槛了。而要搭出一整套能让模型「持续稳定交付」的运行环境，那完全是另一个量级的工程活。
+
+这也顺便解释了一个很多人感到困惑的现象：同样是用 Claude 或者 GPT 这几个大模型，为啥有的团队做出来的 Agent 又稳又能打，到别人手里却一跑就跑偏？
+
+差的往往不是模型，而是**围绕模型搭起来的那套东西，到底有没有做到位**。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776066415647-74305642-23d8-44b2-af00-cc2358cf4c56.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+所以接下来，我就按照「从提示词到 Harness」这条路径，带你一个阶段一个阶段往下走。
+
+- 先看看 Prompt Engineering 当年解决了啥问题、又撞上了啥天花板；
+- 然后看看 Context Engineering 是怎么接棒的、又在哪儿遇到了新的瓶颈；
+- 最后再来讲 Harness Engineering 到底是怎么在这两个天花板之上，又往前顶了一大截。
+
+走完这条路，你对 Harness 到底是个啥，心里就会有一个非常清晰的底。
+
+#### 第一阶段：Prompt Engineering，先让模型「听懂」你
+
+要讲清楚 Prompt Engineering，得先聊一个更基础的问题：大模型到底在干啥？
+
+你平时用 ChatGPT 也好，用 Claude 也好，看到的都是一个对话框，输入一句话，下面给你输出一段话。但如果把这层外壳扒掉，里面其实就一个东西：一个特别大的参数文件，存在硬盘上，加载到显卡的内存里。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776066677324-15ddd05e-f951-4648-a249-dd65fa7f3585.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+这个文件本身啥也不是。给它配一个 HTTP 接口，它就成了所谓的「大模型 API 服务」。给这个 API 套一个聊天界面，它就成了 ChatGPT；套一个代码编辑器，它就成了 Cursor、Trae 这种 AI IDE。
+
+那这个参数文件本身是怎么工作的呢？说白了就一件事：根据你输入的内容，预测下一个字最有可能是啥。
+
+注意我说的是「预测」，不是「思考」，这个区别很重要。它本质上是在猜你想要什么，然后把它觉得最可能的字一个一个往外吐。你给它的输入越模糊，它猜的范围就越大；你给它的输入越具体，它猜的范围就越收敛。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776066879420-d6ac518e-487c-4734-8552-f74bcbdd777e.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+知道了这个原理，你就能理解为啥同一个问题，换个说法效果能差十倍。
+
+举个例子。你丢一段代码给大模型，说「加个排序」。它会怎么回？大概率是给你回一段排序的代码片段，告诉你「就这么写」。但你拿到这段代码一看，傻眼了：它没说放在哪儿，也没说要不要改其他函数，更没把完整的代码给你。
+
+那如果你换一种说法呢？「这是我的完整代码，请帮我加上对 users 列表按年龄从大到小的排序，注意保留原有的所有逻辑，最后输出完整代码」。这次它给的结果一下就靠谱多了。
+
+为啥？因为大模型本质上是一个对上下文极度敏感的概率生成器。
+
+什么叫敏感？就是你给它什么样的输入，它就会沿着那个方向生成。
+
+你给它一个角色身份，比如「你是一个资深 Java 工程师」，它就会偏向用 Java 工程师的思路回答；你给它几个示例，比如「按照下面这个例子的格式来」，它就会沿着那个范式补全；你强调什么样的约束，比如「不要修改我已有的代码」，它就会把这个约束当成重点。
+
+你会发现，写提示词的本质，根本不是在「命令」模型，而是在塑造它的概率空间。你给它的每一句话，都在悄悄地把它的输出往某个方向推。
+
+正因为这种敏感性，大家慢慢摸索出了一套「提示词配方」。一个稍微正式一点的提示词，一般会包含这么几个部分：
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776067247821-7b5bfa65-9e8f-4499-b7b1-3f03593afbe0.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+```
+- 角色设定：你是谁？比如「你是一个有十年经验的后端工程师」
+- 背景信息：当前在干啥？比如「我正在用 Go 写一个订单系统」
+- 参考资料：相关的文档、历史对话、代码片段
+- 明确任务：具体要你干啥
+- 约束条件：哪些不能做，比如「不要修改其他文件」
+- 输出格式：希望以什么形式返回，JSON、Markdown 还是表格
+```
+
+把这些东西按一定的结构组装起来，就是一份比较完整的提示词。这种有意识地去设计和调整提示词、让模型稳定输出你想要的内容的技术活，就叫 Prompt Engineering，提示词工程。
+
+它解决的核心问题，其实就一个：模型不是不会，而是你没把问题说明白。
+
+提示词工程在大模型刚火起来的那一两年，作用是非常大的。因为那个时候大家做的事情都很简单：聊天、写文案、翻译、问答。这种任务的特点是「短链路」，一句问一句答就完事了，提示词写好了基本就搞定。
+
+但很快，大家想做的事情变复杂了，提示词工程就开始撑不住了。
+
+举个例子。你让大模型帮你「分析一下我们公司去年的财报」，它再聪明，没看过你的财报，它能分析啥？你让它「按照公司内部的代码规范帮我写一个新功能」，它没看过你们的规范，它怎么知道该怎么写？你让它「在我们已有的几十个 API 之间做一些调用组合」，它根本不知道你有哪些 API。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776068391647-ba54093d-7359-4319-a948-bfd501d85ac3.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+这个时候你就会发现一个很尴尬的事实：提示词写得再漂亮，也替代不了「事实」本身。
+
+提示词擅长的，是把任务表达清楚、把约束讲明白，激发模型已有的能力。但它不擅长「凭空补出模型不知道的知识」，也不擅长「管理一大堆动态变化的信息」，更不擅长「在长链路任务里维持稳定的状态」。
+
+说白了，提示词工程解决的是「表达」的问题，不是「信息」的问题。
+
+于是第二阶段就来了：Context Engineering。
+
+#### 第二阶段：Context Engineering，让模型「知道」该用什么信息
+
+为什么 Context Engineering 会突然火起来？因为大家做的产品形态变了。
+
+之前大家做的是聊天机器人，问一句答一句，链路短、状态少。
+
+但后来 Agent 火了，模型不再只是「回答问题」，而是要进到真实环境里去「干活」。它要多轮对话，要调用工具，要写代码，要查数据库，要在多个步骤之间传递中间结果，还要根据外部反馈不断修正自己的计划。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776068560240-5ac4fccb-167e-4ad2-8c0e-00059083d0c9.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+这个时候问题就完全变了。系统面对的已经不是「这一次回答对不对」，而是「整条链路能不能跑通」。
+
+举个例子。如果你不是简单地问一句「帮我总结这篇文章」，而是让大模型做一个更真实的任务，比如：「帮我分析这份需求文档，找出潜在风险，结合我们之前几次评审的意见，给出改进建议，最后生成一份发给产品经理的反馈稿」。
+
+你会发现，光靠一句提示词，根本完成不了这个任务。模型至少需要拿到：
+
+```
+- 当前的需求文档
+- 历史的评审记录
+- 公司的相关规范
+- 当前任务的具体目标
+- 之前已经分析出来的中间结论
+- 收件人是谁、希望用什么语气
+```
+
+这些东西全部加起来，才叫一个完整的「任务环境」。
+
+正是基于这个观察，才慢慢形成了一个新的概念：Context（上下文）。
+
+什么叫上下文？我用一句最直白的话解释：
+
+每一次发给大模型的所有信息加在一起，就叫上下文。
+
+而我们之前聊的提示词，只是上下文里很小的一部分。一个完整的上下文还包括：用户输入、历史对话、检索到的资料、工具返回的结果、当前的任务状态、中间产物、系统规则、安全约束等等等等。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776068927807-a66bed48-c129-43d7-95c8-808e4d176b98.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+理解了这一层，你就能理解 Context Engineering 是在干啥了。它的核心思想就一句话：
+
+模型未必知道，所以系统必须在合适的时机，把正确的信息送进去。
+
+你可能会想：那我把所有相关的资料一股脑全塞进去不就完事了吗？
+
+这里就有一个让人头疼的现实：大模型一次能处理的上下文是有上限的。这个上限叫「上下文窗口」。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776069111967-392c2ddd-dba8-42cb-aff8-a1977f4104ae.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+你可以把它想象成大模型的「短期记忆容量」。再聪明的模型，一次也只能记住这么多东西。
+
+更要命的是，就算窗口够大，大模型的注意力也不是均匀分布的。研究发现，当上下文塞得太满的时候，模型会出现一种叫「上下文腐化」的现象：它开始记不住前面的内容，开始前后矛盾，开始忽略你最初定下的规则。
+
+我自己感觉这个特别像一个被信息淹没的人：你给他太多东西要看，他反而抓不住重点。
+
+那怎么办？这就是 Context Engineering 要解决的核心问题：怎么在上下文窗口有限的前提下，把最相关的信息，以最合理的方式，送给模型。
+
+实践下来，它基本上可以拆成三个步骤：
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776069438025-c6eaa14d-4fa3-4473-9503-2b903d234de8.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+- 第一步，**召回**。说白了就是「找信息」。从一大堆资料里找出跟当前任务最相关的那部分。这里面就涉及到大家熟悉的 RAG 技术：把你的所有文档切成小块，转成向量存起来，每次有问题进来，先去向量数据库里搜出最相关的几块。
+- 第二步，**压缩**。找到的信息可能还是太多，那就压缩。怎么压？常见的做法是先让模型对每一段做个摘要，然后只把摘要送进最终的上下文。或者，对历史对话，把太老的对话压缩成一句话总结，只保留最近几轮的原文。
+- 第三步，**组装**。压完之后还要按一定的顺序、一定的格式组装起来。为啥顺序很重要？因为大模型对「靠后的信息」更敏感。所以重要的指令、当前的任务，往往要放在靠后的位置。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776069596148-679989c8-254d-4443-ad10-227b42242a27.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+不同的 AI 工具，这三步的实现各不相同。这就是为啥同样是用 Claude 模型，你用 Claude Code、Cursor、Trae 这些不同的 AI IDE，效果会差挺多。模型是同一个，但每家的上下文工程策略不一样，所以最后的体验也不一样。
+
+讲到这儿，我想专门聊一下 Anthropic 最近搞的 **Agent Skills**，因为它特别能体现「上下文工程不是塞得越多越好」这个理念。
+
+很多人做 Agent 的时候，会犯这么一个错误：把所有可能用到的工具说明、所有 SOP、所有参考资料，一上来就一股脑塞进上下文。理论上，模型知道得越多越好，对吧？
+
+但实际上效果往往更糟糕。
+
+为啥？还是那句话：上下文窗口是稀缺资源，信息一多注意力就会被稀释。模型看到的东西一多，反而抓不住当前任务真正需要的那部分。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776069694598-db92eda4-1af4-4e5a-a531-79bf11a14adb.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+Agent Skills 提出的思路叫「**渐进式披露**」：一开始只给模型看每个能力的「目录」，告诉它「我有这些工具、这些 SOP、这些参考」。
+
+等模型真的判断「我现在需要用某个工具」的时候，再把那个工具的详细说明、参数定义、使用示例动态加载进来。
+
+这个思路其实非常重要，它告诉我们：上下文优化的本质不是「给得更多」，而是「按需给、分层给、在正确的时机给」。
+
+讲到这儿，Context Engineering 的核心思想基本就讲完了。它在 Prompt Engineering 的基础上又往前走了一大步：从「把任务讲清楚」升级到了「把信息送对」。
+
+但你以为这就是终点了吗？
+
+不是。
+
+#### 第三阶段：Harness Engineering，让模型「做对」一连串的事
+
+后来大家又发现了一个更麻烦的问题。
+
+你把提示词写得再漂亮，把上下文管理得再完美，模型在「单步」上的表现确实越来越好了。但只要任务的链路一长，模型就还是会出问题。
+
+什么问题？比如：
+
+- 计划做得很好，但执行的时候突然跑偏了
+
+- 调用工具调对了，但理解错了工具返回的结果
+
+- 在一个很长的任务链里，已经悄悄偏离初衷了，但系统完全没察觉
+
+- 跑着跑着突然忘了自己最初要干啥
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776069924593-e0c18f62-1e77-430e-a3b4-941b77e085fd.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+你仔细品品这个问题。提示词工程优化的是「意图的表达」，上下文工程优化的是「信息的供给」，但这两个其实都还停留在「输入侧」。
+
+而当模型真正开始「连续行动」的时候，会出现一个全新的问题：谁来监督它？谁来约束它？谁来在它跑偏的时候把它拉回来？
+
+这就是第三阶段要解决的事情。
+
+**Harness** 这个英文词，直译过来叫「马具」，或者说「缰绳」。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776070020691-7675c625-fb16-4d85-8b13-64856be30ccb.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+为啥用这么一个词来命名一个 AI 工程概念？想象一下你骑马的场景：马本身有强大的力量，能跑能跳能驮东西，但如果没有缰绳和马具，这股力量就是失控的。马可能往悬崖上跑，可能甩你下来，可能跑去吃草不回来了。马具的作用，就是让这股力量为你所用。
+
+放在 AI 系统里，这个比喻就特别贴切了。**当模型从「回答问题」走向「执行任务」，系统就不能只负责喂信息，还要能「驾驭」整个执行过程。这就是 Harness Engineering 的出发点**。
+
+如果说前两代工程关注的是「怎么让模型更会想」，那 Harness 关注的就是「怎么让模型不跑偏、跑得稳、出了错还能爬起来」。
+
+讲到这儿，我用一个特别通俗的例子，把这三个阶段的区别一次性给你讲清楚。
+
+假设你是一个销售经理，要派一个刚入职的新人去做一次很重要的客户拜访。
+
+你会做哪些事情呢？
+
+第一件事，把任务讲清楚。你会告诉他：「见到客户先寒暄，然后介绍方案，再问需求，最后确认下一步」。这就是 Prompt Engineering，重点是把话说明白，不让新人懵。
+
+第二件事，把资料准备齐全。光把流程讲清楚不够，新人还得知道：客户是谁？之前聊过啥？产品报价多少？竞品啥情况？这次会议的目标是啥？这些资料你都得给他。这就是 Context Engineering，重点是把信息供给到位。
+
+第三件事呢？如果这是一个特别重要的客户，你光把流程讲清楚、资料给齐了，你心里还是不踏实对吧？你还会做更多的事情：
+
+- 让他带一份 checklist 去，每个关键节点都要打勾
+
+- 让他在关键节点实时给你汇报
+
+- 让他录音，回来你要复盘
+
+- 如果发现他拜访过程中跑偏了，马上电话纠正
+
+- 拜访完成后，要按照明确的标准去验收成果
+
+这一整套东西，就是 Harness。它的重点已经不是「把话讲清楚」「把资料给齐」了，而是「有没有一整套机制能持续观测、持续纠正、最终验收」。
+
+是不是一下就清楚了？
+
+关于 Harness 的边界，圈子里流传着一个特别简洁的等式：
+
+Agent = Model + Harness
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776070193737-2c4cf3ec-baff-41e1-a4c7-63345f1bd7d5.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+翻译成人话：在一个 AI Agent 系统里面，除了模型本身之外，几乎所有决定它能不能稳定交付的东西，都属于 Harness。
+
+所以你也可以反过来推：
+
+Harness = Agent − Model
+
+这个公式我特别喜欢，因为它一下就把 Harness 的边界划清楚了。
+
+讲到这儿你可能会问：那是不是 Harness Engineering 出来了，前面那两个就过时了？
+
+不是的。这三者根本不是替代关系，而是包含关系。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776070304473-2e6643f9-5d7b-4e76-9c81-1f1ef174ef4f.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+- Prompt 是对「指令」的工程化
+
+- Context 是对「输入环境」的工程化
+
+- Harness 是对「整个运行系统」的工程化
+
+它们的边界一层比一层大。Prompt 是 Context 的一部分，Context 是 Harness 的一部分。当你做 Harness 的时候，里面一定包含 Context 工程，Context 工程里又一定包含 Prompt 工程。
+
+所以 Harness Engineering 不是来取代谁的，它是站在更大的系统视角上，把前面这两个都包进去了。
+
+好，到这里 Harness Engineering 是啥、和前面两个啥关系，就基本讲完了。但只懂概念肯定不够，下一章我要把它拆开，看看一个成熟的 Harness 到底包含哪些东西。
+
+### Harness 拆开看，里面到底装了些啥？
+
+如果你去看 OpenAI、Anthropic、LangChain 这些做 Agent 的顶级团队，会发现一件挺有意思的事：他们的产品形态不一样、技术栈不一样、服务对象也不一样，**但你把他们的 Harness 掀开看内部结构，里面的组件居然惊人地相似**。
+
+这不是巧合。而是因为「让一个 Agent 在真实世界里稳定工作」这个命题，天然就会推着所有人往同一个方向收敛。一个成熟的 Harness 大致可以拆成六块核心组件，我把它们叫做六层，每一层都在解决「驾驭」这件事的一个独立维度。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776070595938-1a571d50-6434-4e50-99e4-bb1da82904f2.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+这六层看起来有点多，但其实可以按「它在干啥」分成三组：
+
+- **输入侧**（让模型看到正确的东西）：上下文精细化管理 + 记忆与状态管理
+
+- **动作侧**（让模型做出正确的事）：工具系统 + 任务执行编排
+
+- **校验侧**（让模型知道做没做对 + 出错能爬起来）：评估观测 + 约束恢复
+
+你发现没有？这三组其实对应了一个工程师在真实环境里干活的三个必要条件：**看得准 → 做得对 → 错了能兜底**。任何一个成熟的 Harness，你去拆一拆，都能找到这三组六层的影子。
+
+在真正展开六层之前，我想先把每一层对应的那个「要解决的核心问题」用一张表提前摆到你面前。这张表你可以当成整章的路线图，后面每读完一层，回头瞄一眼，就知道自己读到哪儿、哪些还没读：
+
+| 层           | 这一层在解决的一句话问题       |
+|--------------|--------------------------------|
+| 上下文精细化 | 模型**这一轮**该看到什么？     |
+| 工具系统     | 模型**用什么**动手？           |
+| 执行编排     | 模型**下一步**该干啥？         |
+| 记忆与状态   | 模型**跨轮**该记住什么？       |
+| 评估与观测   | 模型**做得好不好**有没有尺子？ |
+| 约束与恢复   | 模型**出错了**能不能爬起来？   |
+
+你看这六个问题，它们根本不是什么技术理论的包装，而是一个真实工程师在真实环境里做事情的时候，本能会问自己的那六件事。这也是为啥 OpenAI、Anthropic、LangChain 这些完全不同的团队，最后都不约而同地收敛到差不多的结构上。**这六层不是谁凭空发明的，是从现实里长出来的**。
+
+为了让这六层不至于变成抽象的概念堆，我决定挑一个贯穿整章的具体例子。后面每讲一层，我都会回到这个例子里给你一个具体画面。例子是这样的:
+
+🔧 假设你要做一个 Agent，任务是：**每天定时帮你扫一遍 GitHub 上你关注的仓库的新 PR，从里面挑出值得你特别关注的那几个，对每一个生成一段简短的摘要和点评，最后把结果发到你的 Slack**。
+
+好，带着这个 PR Review Agent，我们一层一层往下看。
+
+#### 第一层，上下文的精细化管理
+
+先说输入侧的第一件事：**模型每次被调用的时候，到底该看到什么**？
+
+这里有个特别关键的修饰词，「每次被调用的时候」。我专门强调它是因为这一层很容易和第四层（记忆与状态）搞混。简单区分一下：
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776070946961-03aae307-8d3e-4a4b-8323-cd70a66422c1.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+- **第一层（上下文的精细化）管的是「空间」**：这一轮发给模型的那一坨上下文，长啥样、装了些啥、怎么排布
+
+- **第四层（记忆与状态）管的是「时间」**：上一轮发生过的事情，怎么流动到下一轮
+
+你可以把它想成一台相机：第一层是「取景框」，第四层是「胶卷」。两件事都重要，但看的方向完全不同。
+
+回到我们的 PR Review Agent。它每处理一个 PR 的时候，到底该看到什么？最粗暴的做法是把整个 PR 的 diff 全扔给它，这恰恰是最容易犯的错。它真正需要的其实是一组**精挑细选的信息**：
+
+- PR 的标题和描述
+
+- diff 里真正被改动的那几个文件
+
+- 这些文件在仓库里对应的模块说明
+
+- 作者最近几次提交的风格偏好
+
+- 仓库的 code review 惯例
+
+**你塞给它越多无关信息，它的注意力就越散**。这个现象 Anthropic 在他们的博客里专门命名了，叫「context rot」（上下文腐化）。他们给的解法是「just-in-time retrieval」，也就是让 Agent 边干活边按需抓信息，而不是一上来就把所有可能有用的东西一股脑塞进去。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776070986089-ac7fa2b3-a1de-4549-8d28-6ba88f0b76e1.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+所以这一层的核心工作可以浓缩成三件事：
+
+- 第一，**把角色和目标钉死**。模型得知道自己是一个「PR 审查助手」，当前任务是「挑出值得关注的 PR 并生成摘要」，成功标准是「我挑出来的真的都是该被关注的」。大部分 Agent 跑偏，根源就是这一步没说清楚。
+- 第二，**动态筛选而不是一次塞满**。只把当前这个 PR 相关的那几块信息拉进来，其余的留在文件系统里，等需要了再取。
+- 第三，**结构化组织**。固定规则（code review 惯例）放一处，动态证据（当前 PR 的内容）放一处，中间结论（我对这个 PR 的初步打分）放一处，三者要分开。否则模型会「自我污染」，也就是用前面错的中间结论去影响后面的判断。
+
+#### 第二层，工具系统的可控调用
+
+聊完「看到什么」，再聊「能做什么」。
+
+没有工具的大模型本质上还是一个文本预测器。它能告诉你一个 PR 应该怎么审，但它没法**真的去 GitHub 上读那个 PR**；它能写出一段 Slack 消息的文本，但它没法**真的把这段消息发到你的频道**。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776071140455-08783445-bed7-42c5-9e06-2efe50301b1b.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+接上工具之后，PR Review Agent 才真正活过来。但工具不是接得越多越好。OpenAI 在做 Codex 早期踩过这个坑：他们一开始给 Agent 接了一堆工具，想着「选择多总是好的」，结果 Agent 频繁用错工具、用错时机。后来砍掉一大半，效果反而上去了。
+
+所以这一层你要回答三个问题：
+
+**给它哪些工具？**  
+对 PR Review Agent 来说，至少需要四件：
+
+- `gh` 命令行工具：拉 PR 列表、看 diff
+
+- 读文件工具：看仓库里的相关代码
+
+- 代码搜索工具：查某个函数在哪儿被用到
+
+- Slack 发送工具：把结果发出去
+
+别的工具，比如「重跑 CI」「直接给 PR 打标签」，除非真的必要，先别加。
+
+**什么时候用哪个工具？**  
+该查的时候要查，不该查的时候别瞎查。比如 Agent 判断「这个 PR 改的函数是不是核心逻辑」的时候应该去代码搜索，而不是凭感觉猜。反过来，明明 diff 已经在上下文里了，再去重新拉一次 PR 纯属浪费。
+
+**工具结果怎么喂回模型？**  
+这条最容易被忽略。比如 Agent 调用代码搜索，拿到 30 条匹配。你是不是要把 30 条原文原样塞回去？不是。你要先做一层提炼，比如只留核心模块的那几条，再喂回去。否则这 30 条原文一进来，上下文又被污染了。
+
+你最近听得很多的 **MCP（Model Context Protocol）**，本质上就是在做工具层的标准化，让任何工具都能用同一种方式接到任何 Agent 上，大家不用再各自重复造轮子。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776071263582-f1ffc8fe-f37f-48fe-bcd4-812cfeb91a3b.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+#### 第三层，任务执行的全局编排
+
+工具接上了，模型就能动手了。但能动手不等于能做成事。
+
+这里我直接把一句你需要记住的话摆出来：**Agent 的本质，说白了就是一个 for 循环**。思考一步 → 行动一步 → 观察结果 → 再思考下一步。这个循环结构有个很经典的名字叫 **ReAct**（Reasoning + Acting）。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776071434368-28346fac-11e1-483a-9df1-d2ec3c2581c7.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+听起来很朴素对吧？但魔鬼就藏在这个循环里。
+
+Agent 经常翻车的场景是：**每一步它都会做，但把所有步骤串起来之后就不会了**。它会拉 PR 列表，会读 diff，会写摘要，但它不知道应该先拉全列表再逐个分析，还是应该边拉边评，最后交付给你经常就是一堆半成品。
+
+这就是第三层的职责：**给模型一条明确的工作轨道**。
+
+回到 PR Review Agent。它的工作轨道应该是这样：
+
+```
+1. 拉取仓库当前所有开放的 PR 列表
+2. 对每一个 PR：
+   a. 读 diff 和描述
+   b. 判断涉及的是核心模块还是边缘模块
+   c. 核心模块的 PR 做深度分析
+   d. 给出一个重要性打分（1-5）
+3. 按重要性排序，选前 3 个
+4. 为每一个生成摘要和点评
+5. 汇总发到 Slack
+6. 检查发送是否成功，失败则重试
+```
+
+有了这条轨道，Agent 就知道「我现在在哪一步，下一步该干啥」。它不会再瞎跑。
+
+除了 ReAct 之外，还有几个业界常见的编排模式你可以记一下名字：**Plan-and-Execute**（先规划完整计划再执行，适合长链路任务）、**Reflexion**（每次失败都让 Agent 反思一下再重试）、**Tree of Thoughts**（同时探索多条思路再选最好的）。不同场景会用不同的编排策略。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776071659343-f2921e9b-fd39-4f3c-83af-2414e0cfb26d.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+#### 第四层，记忆与状态的分层管理
+
+现在聊时间侧：Agent 怎么在「跨轮」之间保持连贯？
+
+没有状态管理的 Agent，每一轮调用之间都是失忆的。你的 PR Review Agent 今天跑了一遍，明天再跑的时候完全不记得「这个 PR 昨天已经审过了」，于是又审一遍再发一次消息，Slack 频道很快就会变成重复消息的坟场。
+
+这就是为啥 Harness 必须管状态。
+
+这里要回扣我们开头讲的 Mitchell Hashimoto 和 Anthropic 的一个核心洞察：**Agent 的状态不应该放在上下文窗口里，而应该外化到文件系统**。
+
+Anthropic 在《Effective harnesses for long-running agents》里给出的具体做法是让 Agent 维护一个 `claude-progress.txt` 日志、一个 `init.sh` 启动脚本、加上完整的 git history，作为「长期记忆介质」。下一轮换一个全新的、干净的上下文窗口接手时，从这些文件里一读，立刻就知道「现在到哪一步了」。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776072006122-7141789b-1efe-49df-be3c-a9f146394efc.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+放到 PR Review Agent 上，你可以做同样的事。它需要管的状态至少有三类，**必须分层存**：
+
+- **任务状态**：今天已经处理到哪个 PR 了？还剩几个？每个的打分是多少？这类信息写在一个 `today-progress.json` 里，当天任务跑完就归档
+
+- **会话中间结果**：当前这一轮里 Agent 对某个 PR 做出的初步判断。这类信息随会话结束就可以丢，不用持久化
+
+- **长期记忆和用户偏好**：你喜欢关注什么类型的 PR？你特别看重哪些模块？这类信息写在常驻的 `user-preferences.md` 里，每次调用都注入
+
+你发现没有？这三类记忆的生命周期完全不同：任务状态活到任务结束，会话中间结果活到当轮结束，长期记忆跨所有任务存在。混在一起就乱了，**分清楚才能用好**。
+
+顺便说一句，Claude Code、Cursor、Trae 这些 AI IDE 里的规则文件（<a href="http://CLAUDE.md" target="_blank" rel="noopener noreferrer">CLAUDE.md</a> / .cursorrules），就是「长期记忆」这一类的典型实现。
+
+每次调用都自动注入，Agent 永远「记得」项目的核心约束。这一层我们在后面的落地章节还会具体动手写。
+
+#### 第五层，独立的评估与观测体系
+
+这一层是**最容易被跳过、但跳过之后就进退两难**的一层。
+
+先看一个真实场景。我见过太多团队，做出一个 Agent 之后高高兴兴上线，结果跑了两周才发现：这玩意儿的实际成功率只有 50%。
+
+不是它不出结果，而是它每次都出结果，但一半时候是错的。问题在于这两周里没人发现，因为根本没有机制能告诉团队「它这次到底做得对不对」。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776072121344-e49b464f-d299-47a5-9951-a06406e7bd84.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+这就是没有第五层的下场。
+
+那第五层到底要做什么？我把它拆成两件事：一件是**有个尺子**，另一件是**能看到每一次的量**。
+
+**尺子：Eval 集（这一层真正的核心）**
+
+Eval 集（evaluation set）是做 Agent 开发的业界标准做法，也是这一层的灵魂。
+
+简单说就是：**你手写一批典型任务，每一个都标注好「正确答案长啥样」**，然后每次你对 Harness 做了任何改动（比如改了 <a href="http://CLAUDE.md" target="_blank" rel="noopener noreferrer">CLAUDE.md</a>、加了一个新工具、调整了编排流程），都让 Agent 把这批任务再跑一遍，对比成功率。
+
+对 PR Review Agent 来说，一个最小可用的 Eval 集可能是这样：
+
+- 从过去三个月挑 20 个真实 PR
+
+- 每一个都标注「是不是重要」「摘要应该怎么写」
+
+- 每次改完 Agent 就跑一遍这 20 个，看它挑对了几个、写对了几个
+
+没有这个 Eval 集，你对 Agent 好不好的判断永远停留在「我感觉这次变好了」的玄学阶段。
+
+**LangChain 把他们的 Terminal Bench 成绩从 52.8 推到 66.5 分、直接从榜单 30 开外冲到前 5，靠的就是基于 Eval 集做 trace 回放和迭代**。
+
+Anthropic 和 OpenAI 内部同样有大量的 Eval 基础设施。这不是锦上添花的可选项，是工程级 Agent 的必需品。
+
+**量：Trace + 日志 + 指标**
+
+有了尺子还不够，你还得看到 Agent 每一次的**真实足迹**，也就是它每一步做了什么决策、调了哪个工具、拿到什么返回、花了多少 token。
+
+这就是 LangSmith、Langfuse 这类 trace 系统存在的意义。能看到 trace，你才能定位失败那一步发生了什么，才能往 Harness 里补上对应的修复。
+
+这一层做到位之后，你对 Agent 的调试就从「猜」变成了「看」。
+
+#### 第六层，约束校验与失败恢复机制
+
+最后一层。在真实环境里，**失败不是例外，是常态**。
+
+你的 PR Review Agent 真跑起来之后，一定会遇到各种奇形怪状的失败：GitHub API 限流、某个 PR 的 diff 太大把上下文冲爆、Slack webhook 过期、Agent 误判了一个无关 PR 然后疯狂读代码把 token 耗光一半预算……如果没有恢复机制，每次失败都是从头再来。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776072377559-5810252a-d77a-4552-a3a9-301139af5c27.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+这一层要做三件事：
+
+**约束：定义「什么事 Agent 不能做」**
+
+对 PR Review Agent 来说，约束可以包括：「一次最多分析 20 个 PR」「不能对已 closed 的 PR 再评论」「不能直接修改 PR 本身」「token 用量超过 10 万就立刻停下」。这些约束最好**硬编码到代码或 linter 规则里**，而不是写在提示词里靠 Agent 自己遵守。OpenAI 在 Codex 项目里把资深工程师的经验固化成他们叫做「Golden Principles」的机制（我们在下一章会专门展开讲），就是这种思路的极致版。
+
+**校验：在每一步输出前后都做自动检查**
+
+比如 Agent 给出摘要后先跑一道格式校验（是不是 Markdown？几个段落都在？），发送到 Slack 前先检查频道名是不是在白名单里。**校验不是审美品味，是硬规则**。
+
+**恢复：失败之后有预案**
+
+GitHub 限流 → 等一段时间后重试；Slack 发送失败 → 先落到本地队列，下次重试；token 快耗光 → 立即停下并保存进度，下一轮继续。**每一种典型失败都应该有一条明确的恢复路径**，而不是一股脑全挂掉。
+
+这三件事加起来，才能让 Agent 从「能跑」升级到「能在生产环境跑」。
+
+------------------------------------------------------------------------
+
+讲到这儿，六层就全部展开完了。现在你可以再回去翻一眼章节开头那张「六问对应表」，把每一层和它对应的那个问题在心里重新对一遍。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776070595938-1a571d50-6434-4e50-99e4-bb1da82904f2-20260613210223616.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+这一轮你对这六个问题的理解，应该和一开始看的时候完全不一样了，那些问题背后的门道你都见过了。
+
+还记得开头那一章我们讲过 Mitchell Hashimoto 的「复利效应」吗？他说 Harness 的核心是「每次 Agent 犯错，都把修复沉到环境里」。那个修复到底沉到哪儿？**答案就是这六层的其中某一层**：
+
+- 你发现 Agent 总是漏掉某个上下文信息 → 去改第一层
+
+- 你发现它总是用错工具 → 去改第二层
+
+- 你发现它步骤乱 → 去改第三层
+
+- 你发现它跨天记不住进度 → 去改第四层
+
+- 你发现你没法判断它做得好不好 → 去搭第五层
+
+- 你发现它一失败就崩溃 → 去强化第六层
+
+所以这六层不是一张「必须一次搭完」的任务清单。**它是一张路标，告诉你下一次 Agent 犯错时，你的修复应该落到哪里**。
+
+随着时间推移，这六层的每一层都会被你一点一点填充、加固、打磨，你的 Harness 就是这样一寸一寸长大的。
+
+------------------------------------------------------------------------
+
+讲到这儿，Harness 装了些啥你心里应该有谱了。
+
+但你肯定还有疑问：这些东西听起来都对，但大厂真的是这么做的吗？具体是怎么落地的？
+
+下一章我就来讲这个：抓 5 个真实的工程难题，看看大厂是怎么解的。
+
+### Harness 有什么难点？
+
+讲完六层能力的骨架，你可能会觉得这套东西好像挺有体系的。但真要动手做，各大公司都会告诉你一个共同的感受：**概念清晰是一回事，落地是另一回事**。
+
+下面我挑 5 个大厂在真实项目里踩过的、特别典型的坑给你看看。
+
+你会发现 Harness 真正的难度根本不在蓝图，而在这些具体的细节里。每个难题我都会用同一种结构来讲：先看现象是啥，再看大厂是怎么反常识地解的，最后提炼出一条你可以直接记住的原则。
+
+#### 难题一，Agent 跑久了为啥会越走越偏？
+
+这是几乎所有做长链路 Agent 的团队都会遇到的问题。
+
+现象是这样的：一开始 Agent 表现挺好，目标清晰，步骤明确。但跑着跑着，你会发现它开始「忘」。它忘了最初定的目标，忘了之前已经做过的决定，开始重复劳动，开始偏离主线。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776072754750-bff70e70-5a4b-4a4e-95ba-5e6c76135bc2.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+更诡异的是，Cognition（就是做 Devin 那家公司）在用 Claude Sonnet 4.5 重做 Devin 的时候，观察到一个特别有意思的现象，他们把它叫做「**上下文焦虑**」（Context Anxiety）。
+
+什么意思呢？就是模型自己好像也能感觉到「我快撑不住了」。当它觉得上下文窗口快用完的时候，模型不仅开始丢细节，还会出现一种奇怪的行为：它开始着急地想收尾。它会突然简化方案、跳过验证步骤、急匆匆地宣布「任务完成」。
+
+更神奇的是，研究发现模型对自己「还剩多少上下文」的估计非常不准，经常以为自己快没空间了，其实还剩一大半。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776073011838-76664ada-96e7-4fd8-bb71-1e1e1084337f.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+你品品这个现象，是不是特别像一个被任务压垮的人？
+
+很多团队遇到这个问题，第一反应是做「上下文压缩」（Context Compaction）：把前面的历史压成摘要，腾出空间继续跑。
+
+这个思路对不对？对，但 Anthropic 在另一篇《Harness design for long-running application development》博客里挑明了一个更扎心的观察：**光压缩根本不够**。
+
+他们确认了 Sonnet 4.5 确实存在前面说的那种「上下文焦虑」倾向，一旦这种状态上来了，只压缩历史、不把整个上下文窗口彻底换掉，那种「已经累了」的负担感模型还是带着，Agent 还是会在长链路任务里慢慢失焦。
+
+真正解开这个结的关键动作，Anthropic 把这个做法叫做 **Context Reset**：直接把旧的上下文窗口整个丢掉，换一个干净的接手。
+
+那 Context Reset 具体怎么落地？
+
+Anthropic 在他们的另一篇《Effective harnesses for long-running agents》博客里给出了一套具体做法：**让 Agent 跨多轮接力跑，状态全部外化到文件系统**。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776073327524-adb29655-f0f5-47fe-922c-ab00c5942c18.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+具体怎么做？整个系统其实**只有一个 Agent**，系统提示词、工具集、整套 harness 全都一样。
+
+真正在变的只是每一轮的初始 user prompt：
+
+- **第一轮**用一个专门的「初始化」prompt，让 Agent 把环境信息、项目状态、约束条件整理好，写到一份 `claude-progress.txt` 日志、一份 `init.sh` 启动脚本、一个初始 git commit 里；
+- **后续每一轮**用一个专门的「增量推进」prompt，让它做一点进展，然后把新状态再写回这几份文件。
+
+关键就在这里：**每一轮开始的时候，Agent 都面对一个完全干净的上下文窗口**，它根本不记得上一轮的对话历史，它靠的完全是读取文件系统里这几份「交接文档」来恢复「我现在在哪一步」。
+
+Anthropic 在博客里为了好讲，把这两种 prompt 启动的 Agent 分别叫 initializer agent 和 coding agent，但他们也在脚注里专门澄清了：**这其实是同一个 Agent，只是首轮和后续轮次用了不同的 user prompt 启动而已**。真正被「换掉」的不是 Agent，是上下文窗口。
+
+你品品这个架构。它的关键不在「压缩上下文」，而在**把状态外化到文件系统**。文件系统变成了真正的长期记忆，上下文窗口本身只负责处理当前这一轮，处理完就可以整个丢掉，而整个任务的进度完全不丢。
+
+这特别像我们在工程里遇到内存泄漏的时候是怎么做的。你不会拼命去优化内存，你会直接重启进程，把状态从磁盘恢复出来。Agent 的长期运行，用的是同一套思路。
+
+**原则一：重启胜过修补，状态沉到文件里，Agent 随时可以在一个干净的上下文窗口里接力继续**。
+
+#### 难题二，让 Agent 自己给自己打分，为啥总偏乐观？
+
+这是另一个特别隐蔽的问题。
+
+很多人做 Agent 的时候是这样的：让 Agent 干活，干完之后再让它自己评估「做得怎么样」。看起来挺合理对吧？让它有一个自我反思的环节。
+
+但实际效果呢？Agent 永远觉得自己干得不错。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776073460829-6d1c584e-e4b3-4f47-98c1-72d5e3ef231f.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+特别是在那些没有标准答案的任务上，比如「设计一个用户界面」「写一篇有说服力的文案」「评估这段代码的可读性」，自评的偏差会特别明显。它会自动忽略自己做得不好的部分，然后给自己打一个还不错的分。
+
+为啥会这样？想想咱们人就理解了。让一个人自己给自己打绩效，他会公平吗？很难。
+
+Anthropic 后来想明白了一件事：让干活的和验收的，必须是不同的人。
+
+所以他们在另一篇《Harness design for long-running application development》里搞出了一个三角分工：
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776073845850-c414e8e2-9cb8-4f85-8842-bd8cc7876468.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+- **Planner（规划者）**：负责把模糊的需求扩展成完整的规格说明
+
+- **Generator（生成者）**：负责一步一步去实现
+
+- **Evaluator（验收者）**：负责像 QA 一样真实地测试
+
+更关键的是，Evaluator 不是简单地看一眼代码就完事，它必须真的去操作页面、看具体的交互、检查实际的运行结果。这就保证了它的验收是有「真实环境」托底的，而不是抽象地 review。
+
+只要这三个角色足够独立，系统就能形成一个真正有效的循环：规划 → 生成 → 验收 → 修复 → 再验收。这才是闭环。不要让一个 Agent 既当运动员又当裁判，也别让它既是厨师又是食客。
+
+**原则二：生产和验收必须分离，而且验收方必须能摸到真实世界**。
+
+#### 难题三，Agent 总是失败，工程师到底该干啥？
+
+这个难题比前两个都更深，因为它动的不是解法，是**工程师自己的角色定位**。
+
+先说现象。当 Agent 反复失败的时候，一般人遇到的本能反应只有两个：要么再调调提示词，要么换个更强的模型。
+
+但 OpenAI 在做 Codex 项目的时候，实践告诉他们：**工程师本能反应的这两招，其实都是错的方向**。
+
+他们干了一件在传统程序员看来非常离谱的事：在 Codex 那个百万行代码的项目里，**人类工程师几乎不写一行代码，全部由 Agent 来写**。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776074935995-df106b99-f59f-43b3-a6e4-f244605192dc.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+那人类工程师到底在干啥？从他们这套实践里，你能看到工程师的工作重心其实都压在了三件事上面：
+
+1.  **把产品目标拆解成 Agent 能力边界内的小任务**，确保每一件事都是 Agent 接得住的
+
+2.  **当 Agent 反复失败时，不是去催它「再努力一点」，而是去看它「环境里缺了什么能力」，然后把那个能力补进环境里**
+
+3.  **建立反馈链路，让 Agent 真正能看到自己工作的结果**，而不是两眼一抹黑地瞎跑
+
+你看出第二条的意思了吗？这其实是一次思维方式的根本转变。
+
+以前遇到 Agent 写代码有 bug，传统做法是加一句提示词「请仔细检查代码不要有 bug」，然后祈祷模型这次听话。
+
+而 Codex 团队的做法是：**给 Agent 接上 lint、单测、运行环境，让它自己写完自己跑，看见 bug 自己改**。同样一个问题，前者是在求模型发挥，后者是在改造环境，彻底决定了 Agent 下次会不会再犯。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776074079332-e965439a-b89c-4c3d-9576-5240dc440343.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+所以你看，在 Codex 这种 Agent 主导的工程体系里，工程师的价值不再是「我一天能写多少行代码」，而是「我能为 Agent 设计多好的一套运行环境」。这才是未来程序员真正的技术含量所在。
+
+**原则三：Agent 反复失败的时候，别问模型能不能更努力，要问环境还缺什么**。
+
+#### 难题四，规范文件越写越长，为啥 Agent 反而更糊涂？
+
+这个是 OpenAI 自己亲自踩过的坑，说出来挺打脸的。
+
+OpenAI 早期做 Codex 的时候，搞了一个特别大的 <a href="http://AGENTS.md" target="_blank" rel="noopener noreferrer">AGENTS.md</a> 文件，把所有的规范、所有的约定、所有的最佳实践全部塞进去。他们当时的想法是：把规则写得越全越好，Agent 就越不会出错。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776075029568-13d755ae-5106-43c5-8f32-40b33da971f4.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+结果呢？Agent 更糊涂了。
+
+为啥？因为上下文窗口是稀缺资源。这个文件被当作系统提示词每次都注入进去，当它变得越来越长的时候，模型的注意力被严重稀释。它看到的东西太多，反而抓不住当前任务真正需要的那部分。
+
+这其实就是我们前面讲过的「上下文腐化」在规则文件这个场景的具体表现。
+
+OpenAI 后来怎么改的？他们把 <a href="http://AGENTS.md" target="_blank" rel="noopener noreferrer">AGENTS.md</a> 从一本「百科全书」改成了一个「目录页」：
+
+- **主文件只保留 100 行左右的核心索引**。你没看错，OpenAI 原文博客里特地写明了这个数字：整个 <a href="http://AGENTS.md" target="_blank" rel="noopener noreferrer">AGENTS.md</a> 控制在大约 100 行，它不告诉 Agent 每条细节规则，只告诉 Agent「你想看什么，去哪儿看」
+
+- 详细的内容拆到具体的子文档里：架构文档一份、设计原则一份、产品规格一份、执行计划一份、质量评分一份，每份都有清晰的主题
+
+- Agent 平时只看目录，只有真的需要某一部分的时候，才钻进对应的子文档
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776077018342-5663ed9a-9f17-4b80-9ea1-9a93ff886a1c.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+这套做法其实就是我们前面讲的**渐进式披露**（Progressive Disclosure）。
+
+我特别喜欢这个思路，因为它和我们做软件设计里的「按需加载」「懒加载」一脉相承：上下文优化的本质，不是「给得越多越好」，而是「该给的时候给，不该给的时候藏起来」。
+
+这一点其实和我们前面讲的 Agent Skills 是同一回事，前后呼应上了。如果你现在在写 <a href="http://CLAUDE.md" target="_blank" rel="noopener noreferrer">CLAUDE.md</a> 或者 Cursor Rules 这种文件，强烈建议你回头看看自己写的有没有「百科全书化」。如果有，赶紧拆。
+
+**原则四：规则文件宁缺毋滥，给模型看的东西少即是多**。
+
+#### 难题五，Agent 写的代码越堆越烂，技术债怎么还？
+
+前面四个难题都还算比较抽象，这一个特别具体、特别接地气，是 OpenAI 团队在《Harness engineering》博客里亲口承认的一个「我们一开始做错了」的故事。
+
+先说现象。当 Agent 负责写绝大多数代码之后，会发生一件很自然但也很糟糕的事：**Agent 会疯狂模仿仓库里已有的代码模式**。
+
+好的模式会被复制，坏的模式也会被复制。一旦早期某段代码写歪了，Agent 会把那个歪的写法当成「惯例」，越堆越多，越堆越歪，最后整个代码库开始「腐烂」。这个现象 OpenAI 团队给它起了一个很扎心的名字，叫 **AI slop**，AI 代码泔水。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776077952749-26e2c3d3-48eb-4cdb-9f90-2ce6145f19ed.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+OpenAI 团队一开始是怎么解决这个问题的？用最朴素的办法：**靠人工清理**。
+
+他们每周拿出整个周五（也就是一周 20% 的时间）让人类工程师去手工打扫 AI slop。你想想这个画面：一群 OpenAI 的高级工程师每周五不干别的，专门给 Agent 擦屁股。
+
+然后呢？**这个方案失败了**。原因很直接：Agent 产出代码的速度太快，人类工程师清理的速度根本跟不上，周五清一天，周一一早又堆满了新的。这是一个典型的「人力怎么都追不上机器」的尴尬局面。
+
+那 OpenAI 最后是怎么改的？他们用一个非常 Harness 的思路解决了这个问题。做法分两步：
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776077184668-87e9a406-337d-4d53-affb-3255b1752895.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+- **第一步，把人类工程师关于"什么是好代码"的经验，写成一套「Golden Principles」（黄金原则）沉进仓库**。比如「优先用共享工具包而不是手写 helper」「不要瞎猜数据格式，必须校验边界或用带类型的 SDK」，这些都是有经验的工程师脑子里的隐性知识，以前只存在 code review 的讨论里，现在被显式地写成了规则。
+- **第二步，让一批后台 Agent 按固定节奏自动跑**。这些 Agent 定期去扫描仓库，对比 Golden Principles，找出偏离的地方，然后自动开修复 PR。大部分修复 PR 可以在 1 分钟内被人类审完，直接 auto merge。
+
+你品品这个做法。它其实把「还技术债」这件事从**一周一次的人工集中清扫**，变成了**每天持续进行的自动偿还**。OpenAI 原文里有一句话我特别喜欢：
+
+技术债就像一笔高利息贷款，几乎永远应该每天小额还一点点，而不是攒着等某一天集中还。
+
+这太准确了。你想想我们平时写代码是不是也这样？谁都知道技术债要清，但总是说「等这个季度忙完了统一重构」，结果永远也没有「不忙的季度」，技术债越滚越大。Agent 帮人类解决这个老毛病的办法，居然是把经验固化成规则，然后用 Agent 自己去对付 Agent。
+
+**原则五：技术债不是攒一堆集中还，而是每天让后台 Agent 自动偿还一点**。
+
+#### 顺便提一个反直觉的发现：Agent 用「老技术」反而更稳
+
+讲完五个难题，我想再顺手补一个 OpenAI 博客里特别反直觉的小观察，虽然它不算难题，但值得你记住。
+
+很多人做 AI 编程的时候有一个想当然的认知：AI 是最前沿的东西，那当然应该配上最前沿的技术栈，什么新框架都给 Agent 上一套。但 OpenAI 在实践中发现，**事情正好反过来**：
+
+Agent 对那些被人类称为「boring」的老技术反而掌握得最好。
+
+为啥？OpenAI 原文给了三个原因：**组合性好、API 稳定、训练数据里出现得多**。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776078107343-4771f24d-9443-4149-93fd-032dce798847.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+你想想这个逻辑就通了：AI 训练数据里，一个出现了十几二十年的老库，相关的代码示例、StackOverflow 问答、博客文章多如牛毛，AI 对它的各种用法了如指掌。而一个昨天才出的新框架，AI 只看过零星几篇文档，很容易张冠李戴。
+
+所以 OpenAI 在 Codex 项目里，甚至会**主动选择那些看起来很土的、甚至业界已经有点嫌弃的技术栈**，就因为 Agent 能把它们用得更稳。
+
+有一个特别极端的例子：有时候他们宁愿让 Agent 自己实现一个小工具函数，也不去引入一个流行的 npm 包，因为自己写的代码 Agent 能 100% 理解和控制，而第三方包里藏着 Agent 看不懂的黑盒行为。
+
+这个发现给你的实际启发是：**如果你要做一个让 Agent 跑得稳的项目，在选技术栈的时候，不要一味追新**。越老、文档越齐全、在开源社区里沉淀了越久的技术，Agent 反而越容易帮你做对。
+
+------------------------------------------------------------------------
+
+好，五个难题 + 一个反直觉发现，这一章就讲完了。
+
+你可能已经感觉到一件事：**这些难题的解法全都有一个共同点，它们都不是在调模型，而是在设计模型外面的那一整套环境**。这就是 Harness Engineering 的灵魂所在。
+
+我也帮你把这五条原则打包成一个小口诀，带着它进入下一章：
+
+**重启胜过修补，生产验收分家，与其催模型不如改环境，规则宁缺毋滥，技术债天天还**。
+
+这五条原则贯穿了大厂所有的实践，也回答了「Harness 真正难在哪」。
+
+### 写在最后
+
+写到这儿，我想给你把整篇文章的思路再梳理一遍。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776078351887-9d4631e9-2c5f-4669-a1d4-922a8254da47.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+AI 工程的重心，过去两年换过三次：
+
+- Prompt Engineering 解决的是「怎么把任务讲清楚」。它的核心是塑造模型的概率空间，让模型「听懂」你想干啥。
+
+- Context Engineering 解决的是「怎么把信息送对」。它的核心是动态管理大模型的上下文，让模型「知道」该用什么信息。
+
+- Harness Engineering 解决的是「怎么让模型在真实执行中持续做对」。它的核心是设计一整套包裹模型的运行环境，让模型「做对」一连串的事。
+
+这三个东西不是替代关系，而是层层包含的关系。
+
+Prompt 是 Context 的一部分，Context 是 Harness 的一部分。
+
+当任务还是简单的单轮对话的时候，Prompt 就够用；当任务开始需要外部知识的时候，Context 就关键了；但当模型真正进入「长链路、可执行、低容错」的真实场景，Harness 几乎是不可避免的。
+
+到了今天这个阶段，整个 AI 圈也越来越清楚一件事：
+
+AI 落地的核心挑战，正在从「让模型看起来更聪明」，转向「让模型在真实世界里稳定地工作」。
+
+模型决定了一个 Agent 的天花板，但 Harness 决定了它能不能落地、能不能稳定交付、能不能真正跑在生产环境里。这就是为啥同样的模型，在不同的产品里效果差距会这么大。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/1776079105770-eb411cb5-e6f7-4c7c-846d-ceeb23555ac1.png" tabindex="0" loading="lazy" alt="img" />
+<figcaption aria-hidden="true">img</figcaption>
+</figure>
+
+如果你最近也在做 Agent 相关的事情，我特别建议你：别再把所有精力都花在调模型、调提示词上了。
+
+回过头来看看你的 Harness 长啥样，看看你有没有规则文件、有没有校验闭环、有没有任务编排、有没有评估机制、有没有失败恢复。这些东西，每一项都能让你的 Agent 上一个台阶。
+
+顺便说一个值得你深思的趋势。如果你真的把 Harness 这件事认真做几个月，你会发现一个很微妙的变化：你花在「亲手写代码」上的时间越来越少，花在「写规则、写流程、设计环境」上的时间越来越多。
+
+OpenAI Codex 团队那几个工程师能撬动百万行代码，靠的就不是键盘敲得快，而是把 Agent 的运行环境设计到位。
+
+写代码这件事本身会越来越多地交给 Agent，但设计一个能让 Agent 高质量产出的环境，这件事在很长一段时间里都得是人来做。这可能就是未来程序员真正的主战场。
+
+最后，再用开头那个在圈子里被广泛引用的等式给你收个尾：
+
+Agent = Model + Harness
+
+你的 Agent 想变得更好，要么换更强的模型，要么写更好的 Harness。在模型迭代速度逐渐放缓的今天，Harness 这部分的提升空间，可能比你想象的大得多。
+
+这就是今天想跟你分享的全部内容。
+
+我们下篇文章见。
+
+------------------------------------------------------------------------
+
+参考资料
+
+- **Mitchell Hashimoto**，《My AI Adoption Journey》, <a href="https://mitchellh.com/writing/my-ai-adoption-journey" target="_blank" rel="noopener noreferrer">https://mitchellh.com/writing/my-ai-adoption-journey</a>
+
+- **OpenAI**，《Harness engineering: leveraging Codex in an agent-first world, <a href="https://openai.com/index/harness-engineering/" target="_blank" rel="noopener noreferrer">https://openai.com/index/harness-engineering/</a>
+
+- **Anthropic**，《Effective harnesses for long-running agents》, <a href="https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents" target="_blank" rel="noopener noreferrer">https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents</a>
+
+- **Anthropic**，《Harness design for long-running application development》, <a href="https://www.anthropic.com/engineering/harness-design-long-running-apps" target="_blank" rel="noopener noreferrer">https://www.anthropic.com/engineering/harness-design-long-running-apps</a>
+
+- **Anthropic**，《Effective context engineering for AI agents》, <a href="https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents" target="_blank" rel="noopener noreferrer">https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents</a>
+
+- **LangChain**，《Improving Deep Agents with harness engineering》, <a href="https://blog.langchain.com/improving-deep-agents-with-harness-engineering/" target="_blank" rel="noopener noreferrer">https://blog.langchain.com/improving-deep-agents-with-harness-engineering/</a>
+
+- **Cognition**，《Rebuilding Devin for Claude Sonnet 4.5: Lessons and Challenges》, <a href="https://cognition.ai/blog/devin-sonnet-4-5-lessons-and-challenges" target="_blank" rel="noopener noreferrer">https://cognition.ai/blog/devin-sonnet-4-5-lessons-and-challenges</a>
+
+## Loop Engineering 是什么？AI 编程从 Prompt 到 Loop 的范式转变
+
+> Source: https://xiaolinnote.com/agent/engineering/loop-engineering.html
+
+大家好，我是小林。
+
+不知道你有没有跟我一样的感觉：AI 圈造新词的速度，已经超过我学习的速度了。
+
+前年说会用 AI 的关键是 prompt engineering，赶紧学；去年又说 prompt 过时了，现在流行 context engineering，行，接着学；今年 3 月冒出来一个 harness engineering，估计还有很多同学没整明白 harness 到底是什么。
+
+其实 harness engineering，我之前就写过一篇： <a href="https://mp.weixin.qq.com/s?__biz=MzUxODAzNDg4NQ==&amp;mid=2247556454&amp;idx=1&amp;sn=ad92c367b10877933f4556d0aceb497c&amp;scene=21#wechat_redirect" target="_blank" rel="noopener noreferrer">万字长文图解 Harness 工程</a>，还没看过的同学，可以补补课。当时这篇文章收获了很多读者的好评。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/image-20260613233503999.png" tabindex="0" loading="lazy" />
+</figure>
+
+现在这才 6 月，又来了，这次的新词叫 **loop engineering**。
+
+讲真，我第一反应是翻白眼：又来？是不是把 engineering 前面换个单词就能造一个赛道？
+
+但我把来龙去脉扒了一圈之后，我收回了白眼。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/01-ai-term-timeline-a8b9b29f.png" tabindex="0" loading="lazy" />
+</figure>
+
+这个词不是哪个营销号造的。
+
+点火的是 Peter Steinberger，开源 agent 项目 OpenClaw 的作者，他 6 月 7 日发了条推文，说：「每月例行提醒：你不该再给 coding agent 打 prompt 了。你该去设计那个给 agent 打 prompt 的 loop。」
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/image-20260611221837682.png" tabindex="0" loading="lazy" />
+</figure>
+
+给概念定名写长文的是 Addy Osmani，Google Cloud 的 AI 总监：
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/image-20260611222149377.png" tabindex="0" loading="lazy" />
+</figure>
+
+而几天前，Claude Code 创始人 Boris Cherny 在访谈里说了一句更猛的话，等于提前给这个概念背了书：
+
+「我已经不 prompt Claude 了。是 loop 在运行着 prompt Claude、决定做什么。我的工作是写 loop。」
+
+一个造工具的、一个定方法论的、一个每天泡在一线的产品创始人，三个人在同一周说了同一件事。
+
+这种程度的共振，值得认真看一看。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/02-three-source-cards-f073ff34.png" tabindex="0" loading="lazy" />
+</figure>
+
+这篇文章我整理成 6 个问题：
+
+- Q1：四个 engineering，到底都在 engineering 什么？
+- Q2：Loop Engineering 到底是什么？
+- Q3：一个 loop 由什么组成？
+- Q4：拼起来之后，一个真实的 loop 长什么样？
+- Q5：工具已经追上来了，现在就能搭
+- Q6：三盆冷水：loop 越好用，这三个问题越尖锐
+
+我们一个一个来说。
+
+------------------------------------------------------------------------
+
+### Q1：四个 engineering，到底都在 engineering 什么？
+
+在讲 loop 之前，得先把欠的账还了：prompt、context、harness 这三个词，很多人到现在也只是「听过」，没真正分清。
+
+先问一个问题：为什么这些词会一个接一个地冒出来？是 AI 圈闲得慌吗？
+
+还真不是。每个新词的出现，背后都是同一件事：**上一个瓶颈被解决了，新的瓶颈暴露出来了**。把这条线从头捋一遍，四个词一下就清楚了。
+
+时间回到 2023 年。那时候模型只会一问一答，你问得好不好，直接决定答得好不好。
+
+于是大家研究话术：角色扮演、思维链、少样本示例。
+
+这就是提示词工程（Prompt Engineering），本质是**跟一个聪明但一根筋的实习生说话的技巧**，同一件事换个问法，效果天差地别。这个阶段的瓶颈，卡在「怎么说」。
+
+但话术的红利吃不了太久。到了 2025 年，模型变强了，也开始当 agent 干活了，光会说话不够用了。
+
+你让它改一个 bug，它写得再漂亮也没用，因为它没看过你的代码、不知道你的规范、不了解之前的讨论。话术解决不了「巧妇难为无米之炊」。
+
+于是瓶颈从「怎么问」移到了「喂什么」：把对的代码、文档、工具、历史记忆，在对的时机塞进上下文窗口。这就是上下文工程（Context Engineering），当时 Shopify 的 CEO 和 Karpathy 先后带火了这个说法。
+
+类比一下：你不再纠结怎么跟实习生说话，而是开始给他准备一桌整理好的资料。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/03-prompt-vs-context-fc4d6ca0.png" tabindex="0" loading="lazy" alt="prompt engineering 与 context engineering 对比图" />
+<figcaption aria-hidden="true">prompt engineering 与 context engineering 对比图</figcaption>
+</figure>
+
+材料的问题刚解决，新的短板马上接棒。2026 年初，模型已经能连续干几个小时的活了，这时候卡脖子的不再是材料，而是它干活的「环境」跟不上。
+
+它需要工具去执行命令、需要权限边界防止误伤、需要沙箱安全地试错、需要派出子 agent 分头探索、需要上下文管理机制防止越干越糊涂。这一整套围绕模型搭建的运行装备，业内叫 **harness**（直译是马具，可以理解成 agent 的「驾驶舱」）。
+
+今年 3 月前后，Anthropic、OpenAI、LangChain 几家几乎同时发文章讨论这件事，还有人给出了一个很好记的公式：**Agent = 模型 + harness**。同一个模型，驾驶舱不一样，能力可以差出几倍。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/04-agent-model-harness-7e122580.png" tabindex="0" loading="lazy" alt="Agent 等于模型加 harness 公式拆解图" />
+<figcaption aria-hidden="true">Agent 等于模型加 harness 公式拆解图</figcaption>
+</figure>
+
+话术、材料、驾驶舱，三道坎都迈过去了。那最后剩下的瓶颈是谁？
+
+你自己。
+
+模型在等你布置任务，harness 在等你启动，材料在等你投喂。整条流水线上，**唯一还需要人肉驱动的环节，就是你坐在屏幕前敲下一条 prompt**。你睡觉，它就停工。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/05-human-enter-bottleneck-7e7a1ab8.png" tabindex="0" loading="lazy" alt="最后瓶颈示意图" />
+<figcaption aria-hidden="true">最后瓶颈示意图</figcaption>
+</figure>
+
+loop engineering 瞄准的就是这最后一环：设计一个系统，让「下一次回车」不再由你来按。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/06-four-engineering-layers-acc3986a.png" tabindex="0" loading="lazy" alt="四代概念演进总览图" />
+<figcaption aria-hidden="true">四代概念演进总览图</figcaption>
+</figure>
+
+看出规律了吗？**模型每变强一截，瓶颈就往外移一层**：从你说的那句话，到你给的那堆材料，到它干活的环境，最后落到你本人身上。
+
+所以这些词不是营销轮换，是瓶颈迁移的路标。
+
+**四个 engineering，本质是同一场瓶颈迁移：最后一个瓶颈，是坐在键盘前的你。**
+
+------------------------------------------------------------------------
+
+### Q2：Loop Engineering 到底是什么？
+
+铺垫完了，现在正面回答：loop engineering 是什么？
+
+开头 Steinberger（OpenClaw 的作者） 那条 800 多万浏览的推文，只负责把口号喊响：别再 prompt 了，去设计 loop。但口号当不了定义。
+
+紧接着，Osmani（Google Cloud 的 AI 总监） 的长文给出了正式定义：
+
+「Loop engineering 就是把『亲自给 agent 写 prompt 的那个你』替换掉。你转而去设计那个代替你做这件事的系统。」
+
+他还补了一句对 loop 本身的解释：loop 可以理解为一个**递归式的目标**，你定义一个目的，AI 持续迭代，直到完成。
+
+说人话就是：过去两年，你跟 coding agent 的协作方式是回合制的，你写一条 prompt，读它的输出，再写下一条。agent 是工具，**你全程握着它**，一回合都不能松手。
+
+loop engineering 说的是，松手吧。你把「发现任务、布置任务、检查结果、决定下一步」这套流程设计成一个能自己运转的循环，然后让循环去握着 agent。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/07-turn-based-vs-loop-98da3416.png" tabindex="0" loading="lazy" alt="回合制 vs 循环制对比图" />
+<figcaption aria-hidden="true">回合制 vs 循环制对比图</figcaption>
+</figure>
+
+打个比方。以前你是客服热线的接线员，每个电话都要你亲自接、亲自答；现在你升级成了设计工单系统的人：电话怎么分流、哪类问题转给谁、办结标准是什么、办不了的怎么升级到你，规则定好，系统自己转。
+
+你没有离开这家公司，但你的岗位变了。
+
+这也是 Claude Code 创始人说的那句「我的工作是写 loop」的真实含义。注意，他没说工作变轻松了。这句话真正的重点是：**工作没有变容易，是杠杆的支点移动了**。
+
+什么叫支点移动？以前你写一条好 prompt，收益是「这一次回答变好」；现在你设计一个好 loop，收益是「之后每一次循环都变好」。投入从消耗品变成了资产。
+
+但反过来，设计 loop 也比写 prompt 难得多：你要考虑触发、并行、验证、状态、止损，相当于从「说一句话」升级到「设计一套制度」。杠杆变长了，对握杠杆的人要求也变高了。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/08-lever-pivot-shift-f9a5b374.png" tabindex="0" loading="lazy" alt="杠杆支点移动示意图" />
+<figcaption aria-hidden="true">杠杆支点移动示意图</figcaption>
+</figure>
+
+**loop engineering 一句话：你不再是 prompt 的作者，你是 prompt 生产系统的设计师。**
+
+------------------------------------------------------------------------
+
+### Q3：一个 loop 由什么组成？
+
+概念清楚了，落地的问题马上来了：一个能自己运转的 loop，到底需要哪几样东西？
+
+把那些真正跑起来的 loop 拆开看，你会发现零件出奇地一致：**五大件，外加一个记东西的地方**。我们一件一件过，每一件都对应一个「不装它就会翻车」的具体场景。
+
+#### 第一件：自动化，loop 的心跳
+
+先想一个问题：你写了一个很完美的工作流脚本，但每次都要你手动启动，它算 loop 吗？
+
+不算。**自动化才让 loop 成为真正的 loop，否则它只是一个你跑过一次的任务**。
+
+所以第一件就是定时或事件触发：每天早上自动扫一遍 CI 失败、每次 PR 合并自动跑一轮检查。心跳有了，循环才算活着。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/09-automation-heartbeat-383711c7.png" tabindex="0" loading="lazy" alt="自动化心跳示意图" />
+<figcaption aria-hidden="true">自动化心跳示意图</figcaption>
+</figure>
+
+#### 第二件：worktree，让并行不变成打架
+
+loop 一旦跑起来，经常是几个 agent 同时干活。这时候你会撞上一个特别具体的麻烦：两个 agent 同时改同一个文件。
+
+就像两个工程师挤在同一台电脑上改同一行代码，还互相不打招呼。
+
+解法是 git 的 worktree 机制：给每个 agent 一个独立的工作目录和独立分支，共享同一份仓库历史，但物理上互不干扰。各干各的，最后各开各的 PR。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/10-worktree-parallel-isolation-9ce3cc03.png" tabindex="0" loading="lazy" alt="worktree 并行隔离示意图" />
+<figcaption aria-hidden="true">worktree 并行隔离示意图</figcaption>
+</figure>
+
+#### 第三件：skill，治好 agent 的「金鱼记忆」
+
+agent 有个天生缺陷：每个会话都是冷启动，你项目里的规范、约定、坑，它一概不知。
+
+于是你不得不**像对金鱼一样，每个会话把项目重新解释一遍**。更要命的是，你没解释到的地方，它不会空着，它会用一个自信的猜测填上。
+
+skill 就是把这些项目知识写成文件放在仓库里，让 agent 该用的时候自己读。这件事对 loop 的意义比对单次会话大得多：没有 skill，loop 每个周期都从零重新推导你的项目；有了 skill，知识是**复利**的。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/11-skill-compound-knowledge-afa405bd.png" tabindex="0" loading="lazy" alt="从零重推 vs 知识复利对比曲线图" />
+<figcaption aria-hidden="true">从零重推 vs 知识复利对比曲线图</figcaption>
+</figure>
+
+#### 第四件：connector，让 loop 摸到真实世界
+
+一个只能看见文件系统的 loop，撑死了算半个 loop。
+
+真实的工作流不止于代码：要读 issue 工单、查监控、发消息、开 PR。connector（基于 MCP 协议的连接器）就是把这些外部系统接进来的桥。
+
+接上之后的差别有多大？一个 agent 只会告诉你「修复方案在这里」，而一个完整的 loop 会**自己开好 PR、关联好工单，等 CI 变绿之后自己去频道里通知人**。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/12-connector-boundary-9ebae42f.png" tabindex="0" loading="lazy" alt="小 loop vs 大 loop 视野对比图" />
+<figcaption aria-hidden="true">小 loop vs 大 loop 视野对比图</figcaption>
+</figure>
+
+#### 第五件：sub-agent，写的人和查的人必须分开
+
+五大件里最有用的结构性设计，我认为遥遥领先的一条，是这个：**把写代码的 agent 和检查代码的 agent 分开**。
+
+为什么？理由只有一句话，但谁听谁服：**写代码的那个模型，给自己的作业打分时，实在太手下留情了**。
+
+让 A 出方案，让一个干净上下文的 B 来挑刺，B 没有「希望自己是对的」的包袱，挑出来的问题才是真问题。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/13-maker-checker-split-d4173c25.png" tabindex="0" loading="lazy" alt="maker 和 checker 分离示意图" />
+<figcaption aria-hidden="true">maker 和 checker 分离示意图</figcaption>
+</figure>
+
+#### 第六件：记忆，loop 的命根子
+
+最后这件听起来最不起眼，但它是整个 loop 的命根子。
+
+问题是这样的：模型在两次运行之间会忘掉一切。今天的循环干了什么、哪些做完了、哪些卡住了，明天的循环一概不知道。
+
+解法朴素到让人意外：**把记忆放在磁盘上，而不是上下文里**。一个 markdown 文件、一个任务看板，什么都行，只要它活在单次对话之外，记录着「做完了什么、下一步是什么」。
+
+这件事，Osmani 的博客里留了一句很妙的总结：
+
+「agent 会忘，但 repo 不会。」
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/image-20260612132111506.png" tabindex="0" loading="lazy" />
+</figure>
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/14-loop-six-parts-memory-3d8a8964.png" tabindex="0" loading="lazy" alt="五大件加记忆的全家福图" />
+<figcaption aria-hidden="true">五大件加记忆的全家福图</figcaption>
+</figure>
+
+**五大件让 loop 转得起来，磁盘上的记忆让它第二天还接得上。**
+
+------------------------------------------------------------------------
+
+### Q4：拼起来之后，一个真实的 loop 长什么样？
+
+零件都认识了，该看整车了。
+
+Osmani 在文章里给了一个他自己在用的 loop，我把流程完整搬过来。这个 loop 的任务是：**每天早上自动把项目里值得修的问题找出来、修好、提交审核**。
+
+第一步，每天早晨，自动化准时触发，调用一个负责分诊的 skill。
+
+第二步，这个 skill 去读昨天的 CI 失败记录、还没关闭的 issue、最近的提交，把「哪些问题值得处理」写进一个状态文件。
+
+第三步，对每一个值得做的问题，开一个隔离的 worktree，派一个 sub-agent 进去起草修复。
+
+第四步，第二个 sub-agent 登场，对照项目的 skill 规范和现有测试，把那份草稿审一遍。
+
+第五步，审过了，connector 自动开 PR、更新对应的工单。
+
+第六步，loop 搞不定的问题，不硬来，丢进一个待办收件箱，等真人来看。
+
+第七步，所有经过都写回状态文件。明天早上的循环从今天停下的地方继续。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/image-20260612132145898.png" tabindex="0" loading="lazy" />
+</figure>
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/15-morning-triage-loop-1eb2f51b.png" tabindex="0" loading="lazy" alt="晨间 triage loop 全流程图" />
+<figcaption aria-hidden="true">晨间 triage loop 全流程图</figcaption>
+</figure>
+
+流程走完，你品一品这里面最关键的一件事：**整个过程里，你只设计了一次，中间的任何一步，你都没有写过 prompt**。
+
+这就是 Steinberger 那句口号的落地版本。你的活从「每一步都出现」变成了「只在两个地方出现」：设计循环的时候，和收件箱里有东西的时候。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/16-human-position-change-4a2f741d.png" tabindex="0" loading="lazy" alt="人的位置变化示意图" />
+<figcaption aria-hidden="true">人的位置变化示意图</figcaption>
+</figure>
+
+**一个好 loop 的标志：你只在设计时出现一次，之后只在收件箱前出现。**
+
+------------------------------------------------------------------------
+
+### Q5：工具已经追上来了，现在就能搭
+
+听到这里你可能会想：道理是好道理，但搭这么一套系统，工程量不小吧？
+
+这正是这次概念能火起来的底气所在。这里有一个很关键的时间差：**一年前，搭一个 loop 意味着写一堆只有你自己看得懂、还得永远自己维护的 bash 脚本；而现在，五大件全部内置在主流产品里**。
+
+我把两家头部产品的部件整理成一张对照表：
+
+| 部件 | 在 loop 里的职责 | Codex | Claude Code |
+|----|----|----|----|
+| 自动化 | 定时发现和分诊 | Automations 面板 + 分诊收件箱 | 计划任务、`/loop`、hooks |
+| worktree | 隔离并行任务 | 每个线程内置 worktree | `git worktree`、隔离配置 |
+| skill | 固化项目知识 | Agent Skills | Agent Skills |
+| connector | 连接外部工具 | 基于 MCP 的 Connectors | MCP servers |
+| sub-agent | 分头干活、写查分离 | 配置文件定义子 agent | 子 agent、agent teams |
+| 记忆 | 追踪进度 | markdown 或接工单系统 | markdown 或接工单系统 |
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/17-codex-claude-parts-shelf-e0cb24c2.png" tabindex="0" loading="lazy" alt="双产品部件对照货架图" />
+<figcaption aria-hidden="true">双产品部件对照货架图</figcaption>
+</figure>
+
+这张表里还藏着一个值得单独拎出来的细节：两家都有一个 `/goal` 类的能力，它和普通定时循环的区别很微妙，但很重要。
+
+普通的循环是**按节奏重复跑**：每小时跑一次，跑完就完了，对不对另说。而 `/goal` 是**跑到你写的条件为真才停**，比如「目录下所有测试通过且 lint 干净」。更妙的是，每一轮结束后，由一个**独立的模型**来判断条件是否达成。
+
+发现没有？这就是上一节说的「写的人和查的人分开」，只不过这次用在了「什么时候算干完了」这个停止条件上。连「我做完了」这句话，都不让干活的那个 agent 自己说。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/18-timer-vs-condition-loop-098b2dff.png" tabindex="0" loading="lazy" alt="定时循环 vs 条件循环对比图" />
+<figcaption aria-hidden="true">定时循环 vs 条件循环对比图</figcaption>
+</figure>
+
+#### 实操：30 秒搭出你的第一个 loop
+
+光说不练假把式，我们拿一个所有人都烦过的场景，真刀真枪走一遍。
+
+这个场景是：你提了个 PR，然后开始等 CI。挂了，切回去看日志、改、推送，再等。一下午切了八次窗口，正经活没干多少。
+
+在 Claude Code 里，这件事用一条 `/loop` 命令就能交出去：
+
+```
+/loop 10m 检查当前分支 PR 的 CI 状态：有失败的检查就读日志、修复、推送；
+全部变绿后停下来，给我一句话总结改了什么
+```
+
+把这条命令拆开看，麻雀虽小，loop 的骨架是全的。
+
+`10m` 是心跳：每 10 分钟自动醒来跑一轮，不用你按回车。中间那段是任务：每一轮干什么。最后一句是停止条件加汇报：什么时候算完、完了怎么交差。
+
+敲下去之后你就可以去干别的了。CI 挂了它自己修，修完自己推，全绿了它叫你。刚才那个来回切窗口的下午，被压缩成了「最后看一眼总结」。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/19-loop-command-anatomy-3ace5c7a.png" tabindex="0" loading="lazy" alt="loop 命令解剖图" />
+<figcaption aria-hidden="true">loop 命令解剖图</figcaption>
+</figure>
+
+还有个更省心的玩法：把间隔省掉，直接 `/loop` 加任务。这时候节奏由模型自己定，它会根据「CI 一般要跑多久」来决定多久看一次，不会傻乎乎地一分钟刷一次。
+
+两个使用边界也交代清楚，免得你回头骂我。
+
+第一，`/loop` 活在当前会话里，适合「今天盯着这件事」的轮询；你关掉电脑它就停了。想要那种睡觉时也在跑的 loop，要用计划任务或者云端的 routines，让它脱离你的机器运行。
+
+第二，回头对照 Q3 的五大件你会发现，这个最小 loop 只有心跳、任务和停止条件，没有 worktree、没有写查分离的 sub-agent。这不是缺陷，是起点：先让最小的循环转起来，哪天你觉得「它自己改的代码我不放心」，再把检查的 sub-agent 加上；觉得「想同时盯三个 PR」，再上 worktree。**部件是一件一件长出来的，不是一天配齐的**。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/20-loop-evolution-roadmap-b1d50ff5.png" tabindex="0" loading="lazy" alt="loop 进化路线图" />
+<figcaption aria-hidden="true">loop 进化路线图</figcaption>
+</figure>
+
+而对照表还说明了一件更大的事：两家产品的部件几乎一一对应，**loop 的设计正在变得工具无关**。部件是同样的部件，差的只是商标。
+
+这意味着什么？意味着「选 Codex 还是选 Claude Code」这种争论的重要性在下降。loop 的设计图纸是你的资产，画好了，放在哪家的产品上都能转。值得积累的是图纸，不是对某家工具的肌肉记忆。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/21-loop-blueprint-tool-agnostic-e3c5e6ec.png" tabindex="0" loading="lazy" alt="loop 图纸工具无关示意图" />
+<figcaption aria-hidden="true">loop 图纸工具无关示意图</figcaption>
+</figure>
+
+**门槛已经从「自己造零件」降到了「学会拼装」，剩下的问题只是你想让 loop 替你做什么。**
+
+------------------------------------------------------------------------
+
+### Q6：三盆冷水：loop 越好用，这三个问题越尖锐
+
+文章到这里都挺振奋的，该泼冷水了。
+
+有意思的是，泼得最狠的不是哪个反对派，恰恰是给概念定名的 Osmani 本人，他在博客里直说：「现在还早，我是持怀疑态度的。」
+
+冷水的核心是一句话：**loop 改变了工作，但没有把你从工作中删除**。而且有三个问题，会随着 loop 越来越好用，变得越来越尖锐，而不是越来越轻松。
+
+#### 第一盆：验证仍然归你
+
+loop 无人值守地运行，听起来很美。但换个角度念这句话：**一个无人值守运行的 loop，也是一个无人值守犯错的 loop**。
+
+你睡觉时它在干活，也意味着你睡觉时它在犯错。
+
+就算你按规矩配了负责检查的 sub-agent，也别高兴太早：**检查 agent 嘴里的「done」，只是一个声明，不是一个证明**。它说没问题，和真的没问题，中间还隔着你的眼睛。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/22-claim-vs-proof-8af1784b.png" tabindex="0" loading="lazy" alt="声明 vs 证明对比图" />
+<figcaption aria-hidden="true">声明 vs 证明对比图</figcaption>
+</figure>
+
+#### 第二盆：理解债，越顺滑涨得越快
+
+第二个问题更隐蔽。loop 交付你没写过的代码越快，「仓库里实际存在的东西」和「你脑子里真正理解的东西」之间的鸿沟就越大。
+
+这有个专门的名字，叫**理解债（Comprehension Debt）**。
+
+它和技术债不一样：技术债是代码烂，理解债是代码可能不烂，**但你不知道它为什么是对的**。出问题的那天，你面对的是一片自己「拥有」但不「理解」的代码。一个顺滑的 loop 不会帮你还这笔债，只会让它涨得更快，除非你坚持去读 loop 产出的东西。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/23-comprehension-debt-gap-dc781e96.png" tabindex="0" loading="lazy" alt="理解债鸿沟示意图" />
+<figcaption aria-hidden="true">理解债鸿沟示意图</figcaption>
+</figure>
+
+#### 第三盆：认知投降，最舒服的姿势最危险
+
+第三个问题最扎心。loop 自己转起来之后，你会发现一个特别舒服的姿势：不再对产出有自己的观点，它给什么就收什么。
+
+这个状态有个专门的名字，叫**认知投降（Cognitive Surrender）**。Osmani 的博客里有一段关于它的原话，非常锋利：
+
+「带着判断力去设计 loop，它是解药；为了逃避思考去设计 loop，它是助燃剂。同一个动作，相反的结果。」
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/24-cure-vs-accelerant-cbff7104.png" tabindex="0" loading="lazy" alt="解药与助燃剂双面图" />
+<figcaption aria-hidden="true">解药与助燃剂双面图</figcaption>
+</figure>
+
+最后还有一笔很现实的账：token 成本。loop 是按循环烧 token 的，sub-agent 每多一个，就多一份模型和工具的开销。比较务实的花法，是把 sub-agent 用在「值得买第二意见」的地方，而不是处处双保险。token 富裕和精打细算这两种人，会设计出两种完全不同的 loop。
+
+**这三盆冷水有个共同点：它们都不是 loop 的 bug，而是 loop 的代价，并且由你来付。**
+
+------------------------------------------------------------------------
+
+### 最后
+
+把整篇浓缩成 3 句话送你：
+
+- 第一，从 prompt 到 context 到 harness 再到 loop，四个词是一场瓶颈迁移：模型越强，瓶颈越往外移，最后移到了「亲自按回车的你」身上。
+
+- 第二，一个 loop 等于五大件加一份磁盘记忆：自动化是心跳，worktree 防打架，skill 治金鱼记忆，connector 摸到真实世界，sub-agent 写查分离，状态文件让明天接得上今天。
+
+- 第三，loop 把你的杠杆变长了，但验证、理解债、认知投降这三笔账也同时变大了，工具分不出你是在加速还是在逃避，你自己分得出。
+
+Osmani 文章的结尾有一段话，我觉得是整场讨论里最值得带走的：
+
+「两个人可以搭一模一样的 loop，得到完全相反的结果。一个用它在自己深刻理解的工作上加速，另一个用它彻底逃避理解工作。loop 分不出区别，你分得出。」
+
+如果你觉得这篇文章对你有启发，欢迎点个「在看」和「赞」，这是对小林最大的肯定和帮助。
+
+我们下一篇见啦！
+
+------------------------------------------------------------------------
+
+### 参考资料
+
+- Peter Steinberger 的原帖：<a href="https://x.com/steipete/status/2063697162748260627" target="_blank" rel="noopener noreferrer">https://x.com/steipete/status/2063697162748260627</a>
+- Addy Osmani《Loop Engineering》：<a href="https://addyosmani.com/blog/loop-engineering" target="_blank" rel="noopener noreferrer">https://addyosmani.com/blog/loop-engineering</a>
+- Boris Cherny 访谈《Claude Code & the Future of Engineering》
+
+## Loop Engineering 怎么落地？一条从 0 到 1 的上手路径
+
+> Source: https://xiaolinnote.com/agent/engineering/loop_engineering_handbook.html
+
+大家好，我是小林。
+
+上次那篇讲 <a href="https://mp.weixin.qq.com/s/fhx_Lozs5G-sX11b7wnZgg" target="_blank" rel="noopener noreferrer">loop engineering 是什么</a> 的文章发出来，评论区问得最多的就一句：「道理我懂了，可到底怎么动手？」
+
+说实话，这问题问到点子上了。概念听着热血，真自己上手，全是细节，一个都绕不过去。
+
+刚好，X 上有个叫 Codez 的博主，前阵子发了份《Loop Engineering 实操手册》，近四百万人看过。他开头那句话挺扎心：十个开发者，九个到现在都没写过一个能替自己 prompt 的 loop。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/image-20260624101018608-20260624180608745.png" tabindex="0" loading="lazy" />
+</figure>
+
+我把这份手册从头到尾啃了一遍，挑出真正能落地的，掰开揉碎讲给你听。
+
+废话不多说，发车。
+
+------------------------------------------------------------------------
+
+### 先别急，你真需要 loop 吗？
+
+看完概念，你手可能已经痒了，想立马开一个 loop 让它替你打工。
+
+别急着上手。
+
+loop 这东西不是白来的。它烧 token、要花时间搭，真出了岔子，你还得去 debug 一个自己压根没盯着它跑过的系统。说白了，你这是拿真金白银加时间，赌它将来能帮你赚回来。这笔赌划不划算，动手前我建议你拿几个问题，先把自己问一遍。
+
+第一个，也最实在：这活你是不是每周都要干好几遍？要是一锤子买卖，老老实实写个好 prompt 更快更省，搭 loop 纯属杀鸡用牛刀。
+
+第二个，我觉得是条生死线：有没有一个东西能自动告诉你「这活砸了」？测试也行，类型检查、linter、跑个构建也行，随便哪个能当裁判都成。没有这个裁判，loop 吐出来的东西你还得一行行读 diff 去验。那它到底替你省了啥？
+
+第三个是钱：你的 token 预算扛得住浪费吗？loop 会反复读上下文、重试、试探，不出活也照样烧。预算紧的人，这笔空转烧得肉疼。
+
+第四个：agent 能不能跑它自己写的代码？得有日志、能复现、崩在哪看得见。要不然它两眼一抹黑，自己都不知道刚闯了啥祸，根本没法自我修正。
+
+这几个之外，还有个附加题，我觉得比上面都狠：你到底打算 review 它产出的东西吗？不打算？那别建，真的。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/99d55526_loop-decision-flow.png" tabindex="0" loading="lazy" />
+</figure>
+
+还得算笔不太中听的账。loop 这东西，说到底是偏向「花得起钱的人」的。
+
+token 管够的人玩它觉得真香，背着消费套餐的人呢，跑个两轮可能就触顶了，要么月底收到一张吓人的账单。
+
+所以一句可能不讨喜的大实话：**loop 是真东西，但大部分人现在还用不上**。这不是泼冷水，是帮你省下一次「搭了个寂寞」。
+
+还有几类活，再馋也别碰：架构、鉴权、支付、生产部署，一出事就是大事，必须有人盯着。
+
+至于哪些活适合拿来开张，下一节讲场景时一起说。
+
+------------------------------------------------------------------------
+
+### 第一个 loop 该怎么搭？
+
+上面这些都想清楚了，确实该搭。
+
+这时候新手最容易犯的错，是一上来就想搭个无所不能的系统：自动化、并行、写查分离、连一堆外部工具，恨不得一步到位。
+
+结果就是搭到一半被各种联调问题劝退，或者搭出来一个根本没法 debug 的庞然大物。
+
+正确的姿势是反过来：先搭一个能跑起来的最小版，就四样东西。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/b61a7d79_all-in-one-vs-minimal.png" tabindex="0" loading="lazy" />
+</figure>
+
+第一样，automation，也就是 loop 的心跳。按节奏自动触发，定时也行，某个事件也行。这里有条铁律千万别忘：停止条件一定要写死。不然 token 烧光了，它还在那傻乎乎兜圈子。
+
+第二样，skill，把项目背景存下来。用什么框架、有什么约定、踩过哪些坑，统统写进一个 skill 文件丢仓库里，agent 每轮自己读，省得你一遍遍从头解释。
+
+第三样，状态文件，专门记「做完了啥、下一步干啥」，好让明天的循环接得上今天。
+
+为什么单把状态文件拎出来说？因为它是命根子。
+
+agent 这东西，是个金鱼记忆。这次会话学到的，明天一重启就忘得干干净净。
+
+我看到有句话点得特别透：agent 会忘，但 repo 不会。你把进度写进文件，loop 才接得上昨天，不然每天都是从头来过。
+
+这文件放哪，看你情况。
+
+最简单的办法，就是在仓库里放一个 `STATE.md`，跟代码一起管，改了还能 diff，谁打开都看得懂，个人或者小团队用这个就够了。
+
+要是想更正式一点，就接到外部系统里，Linear（研发项目管理工具）、GitHub Issues、甚至一张数据库表都行，好处是能跨好几个仓库、随时能查，团队里每个人都看得到 loop 在做什么，正经上生产的 loop 更适合这么放。
+
+它长什么样并不复杂，一个极简的 `STATE.md` 大概就这意思：
+
+```
+# STATE.md
+## 进行中
+- 升级 lodash 到 4.x，本地测试已过，等 CI
+## 今天完成
+- 修掉登录接口的空指针，已合并
+## 卡住了，等人看
+- 支付回调偶发超时，复现不稳定，先挂起
+## 下一步
+- 扫一遍本周新开的 issue，挑能自动改的
+```
+
+光有状态还不够。loop 跑久了容易跑偏，所以最好再放一个常驻的目标文件（`VISION.md` 或者 `AGENTS.md`），每轮开工前先让它读一遍。
+
+你可以这么理解。状态文件记的是它现在做到哪了。目标文件不一样，管的是它最终要去哪。一个盯当下，一个盯方向。少了哪个，它都会跑着跑着就忘了自己在干嘛。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/8859cc93_state-vs-vision.png" tabindex="0" loading="lazy" />
+</figure>
+
+第四样，闸门，就是前面反复念叨的那个裁判：测试、类型检查、构建，过不了就直接拦下。这是 loop 唯一能挡住烂活的关卡。这道千万省不得。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/45b2c8fc_minimal-four-piece.png" tabindex="0" loading="lazy" />
+</figure>
+
+四样凑齐了，还有件事比凑齐零件更要命：顺序别搞反。
+
+正确的走法是，先让一次手动运行稳稳跑通，再把背景沉淀成 skill，再包成 loop，最后才接上自动调度。一步稳了，再上下一步。
+
+非要跳着来，手动都没跑顺就急吼吼上调度，回头出了岔子，你根本分不清是哪一环的锅。
+
+先把路走稳。再谈自动。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/ee4b07ea_build-order-stairs.png" tabindex="0" loading="lazy" />
+</figure>
+
+------------------------------------------------------------------------
+
+### 完整的 loop 还缺哪几块？
+
+最小四件套能转起来，但它还很素，只能干最简单的活。想让它干得更多、更稳，就往上加。
+
+一个完整的 loop，手册拆成五个构件，我先简单过一遍各是干嘛的：
+
+- **自动化**：loop 的心跳。最小版那个 automation 就是它，按时间或事件踢它一脚，它就跑一轮。
+- **worktree**：多个 agent 一起干活时，各分一间独立工作区，免得它俩改同一个文件、打起来。
+- **skill**：项目背景、约定、踩过的坑，全塞进文件，agent 每轮自己翻，不用你一遍遍念。
+- **connector**：走 MCP 接上 GitHub、Slack、Jira 这些，loop 才能真去开 PR、发消息、查告警，而不是干瞪眼。
+- **sub-agent**：写代码的和验收的，拆成两个 agent。别让同一个 agent 给自己的作业打分。
+
+好在这五样，工具里基本都给你备好了，不用自己造轮子。
+
+就拿 Claude Code 说：自动化是 `/loop` 配上桌面端定时任务和云端 Routines；worktree 直接内置；skill 就是个 <a href="http://SKILL.md" target="_blank" rel="noopener noreferrer">SKILL.md</a> 文件；connector 走 MCP。现成的零件，你把它们拼起来就完事。
+
+这五个里，要我说，最该刻进脑子的是 sub-agent，也就是「写代码的和验收的分家」。
+
+说个有点打脸的冷知识：这套「一个 agent 写、另一个 agent 挑刺」的玩法，听着特别 2026，其实 Anthropic 早在 2024 年底就写进工程博客了，叫 evaluator-optimizer。换个新名字，又火一遍。
+
+道理特别朴素。让写代码的模型给自己的活打分？它准手下留情，跟学生自己批自己的卷子一个样。换一个干净上下文、带着不同指令的第二个 agent 来挑刺，才揪得出第一个它自己骗过自己的毛病。
+
+loop 是在你不看的时候跑的。一个你真信得过的验证器，是你敢撒手走开的唯一底气。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/3aef445a_five-components-table.png" tabindex="0" loading="lazy" />
+</figure>
+
+------------------------------------------------------------------------
+
+### loop 到底能拿来干嘛？
+
+光认识零件还不够，你得知道它们拼起来能替你干什么。
+
+我把见过的、真能跑起来的 loop 场景，按从轻到重分了三档，你对号入座。
+
+**最轻的一档，盯自己手头的活。** 这档不用搭什么系统，一条命令就行，适合所有人。
+
+比如你提了个 PR 在等 CI，与其自己每隔几分钟切回去看一眼，不如一条命令丢给它：
+
+```
+/loop 10m 检查当前分支 PR 的 CI：有失败就去读日志、修掉、推送；全绿就停下来，给我一句话总结改了什么
+```
+
+这条命令拆开看就三段：开头的 `10m` 是心跳，每 10 分钟自己醒一次；中间那段是每轮要干的活；最后一句是停止条件加交差方式。敲下去你就能去忙别的，CI 挂了它自己修，全绿了再回来叫你。
+
+把任务换一换，同一个 `/loop` 还能盯别的：
+
+```
+/loop 监控这次部署，跑完通知我
+/loop 每天早上用 Slack 把我昨天被 @ 的消息汇总一下
+```
+
+注意第二条没写时间间隔，这时候节奏就交给模型自己定，它会按任务性质挑个合理的频率，不用你操心。
+
+这些活的共同点是：本来得你时不时切回去瞄一眼，现在交给 loop，你专心干别的，它有事才喊你。
+
+这里要分清两个命令，踩过坑的都懂。
+
+**`/loop` 是绑在当前会话上的**，你关掉终端它就停了，适合「今天就盯这一件事」的临时轮询；想要那种你都睡了它还在云端跑、关了机也不耽误的，就得用 **`/schedule`** 这类把任务丢到云端的方式。
+
+`/loop` 陪你白天忙活。`/schedule` 不一样，你下班、关了机，它还在云端接着替你盯。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/d9c6c461_loop-vs-schedule.png" tabindex="0" loading="lazy" />
+</figure>
+
+对了，`/loop` 还有个更聪明的兄弟叫 `/goal`，这俩的区别值得单独说一下。
+
+普通的 `/loop` 是按固定节奏重复跑：每隔十分钟跑一轮，至于这轮干得对不对，它不管。而 `/goal` 是盯着一个你写好的条件跑，比如「所有测试都变绿」，条件不达成就一直跑，达成了才收手。
+
+更妙的是，这个条件到底达没达成，不是干活的那个 agent 自己说了算，而是另派一个独立的小模型来判。你看，这又是一次「写的和验的分开」，连「我搞定了」这句话，都不让动手的 agent 自己下结论。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/928e1113_loop-vs-goal.png" tabindex="0" loading="lazy" />
+</figure>
+
+**中间一档，每天定时帮你清理。** 这档就得用上前面那些构件了，适合有点规模的项目。
+
+最典型的是「晨间分诊」：每天早上自动跑一轮，读昨天挂掉的 CI、还开着的 issue、最近的提交，判断哪些值得处理，写进状态文件，能自己修的修掉提 PR，搞不定的丢进收件箱等你。
+
+等于你每天到工位，活已经被分好类、好处理的那批甚至已经处理完了。
+
+类似的还有定时修 CI（每天凌晨把红掉的流水线捞起来修）、依赖升级（定期查有没有新版本，升完跑测试，绿了才提 PR）。
+
+我见过玩得猛的，一个人挂着 loop，一晚上给三十来个开源仓库自动开依赖升级 PR，早上起来挨个 review 就完事。
+
+**最重的一档，让 loop 自己接活、自己验活。** 这档是给重度玩家的。
+
+比如开源项目上，有人提了个 issue，loop 自动去读，对照项目的愿景文档判断这需求合不合方向，合的话直接起草一个 PR，还顺手让另一个 agent 先 review 一遍，再交到你面前。从「有人提需求」到「一个审过的 PR 草稿」，中间没你什么事。
+
+到了这一档，有个让 loop 越跑越好的技巧值得单独说：**内外两层循环**。
+
+内层那个 loop 负责干活，外层那个 loop 专门吸收你每次 review 时的反馈，拿去改进下一轮怎么干。
+
+说白了，你每一次「这里改改」，都不只修了这一次，而是喂给了系统，让它下回别再犯。这才是把「设计 loop」的复利真正吃满。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/155dc88e_three-scenario-levels.png" tabindex="0" loading="lazy" />
+</figure>
+
+------------------------------------------------------------------------
+
+### 你的 loop 是赚是亏？
+
+很多人搭完 loop 就傻乐，觉得进入了自动化时代，却没算过一笔账：这东西到底帮你赚了，还是在偷偷亏钱？
+
+loop 不像写 prompt 对错当场可知，它长期运行、持续烧钱，赚亏得靠一个指标来盯。这个指标就一个：
+
+**每个被接受的改动，花了你多少成本。**
+
+把 loop 这阵子烧的 token、占的算力，加上你 review 花掉的时间，全算进去。再除以它真正被你合并了的改动数。得出来的，就是单位成本。这个数你得心里有底。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/b4d2efeb_unit-cost-formula.png" tabindex="0" loading="lazy" />
+</figure>
+
+配套还有个特别简单的红线：**如果接受率低于 50%，这个 loop 就在亏本**。
+
+意思是，它产出十个改动，你看完只有不到五个能用，剩下一多半要么被你打回要么直接扔。那它产出的「废品」消耗的 token 和你的审查精力，已经超过了它帮你省下的那点活。这种 loop，要么赶紧调，要么干脆关掉。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/da327658_loop-economics-balance.png" tabindex="0" loading="lazy" />
+</figure>
+
+还有笔账顺带说一句：sub-agent 是按个烧钱的，你每多挂一个做检查的，就多花一份模型和工具的钱。
+
+所以别处处都上双保险，「再请一个 agent 来挑刺」这件事，用在那种真正值得买个第二意见的地方就行。token 宽裕的人和精打细算的人，搭出来的 loop 会很不一样。
+
+------------------------------------------------------------------------
+
+### 没人盯着，安全怎么办？
+
+前面都在讲怎么让 loop 跑得好。最后这节，得讲讲怎么让它别给你惹祸。
+
+loop 最大的卖点是无人值守，你睡觉它干活。但你把这句话反过来念一遍就该警觉了：它在你不看的时候替你干活，**可同样在你不看的时候，它也敞着一个没人守的口子**。
+
+自动开 PR、自动装 skill、自动连外部工具，每一个口子都可能被人钻。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/9b0a2838_unattended-attack-surface.png" tabindex="0" loading="lazy" />
+</figure>
+
+我给你拎四条红线，建议直接焊死在闸门里，一条都别松。
+
+第一条，生成的代码没审就上线。闸门里光有测试和构建还不够，得再塞进 SAST（静态安全扫描）、依赖审计、密钥扫描。让安全检查跟功能检查一个待遇，都是上线前必须过的关。
+
+第二条，也是我觉得最阴的一条：skill 本身就是个注入入口。你以为装个 skill，不就是多份说明书？能有多大风险？讲真，下面这个数据，我第一次看到的时候，手一抖。
+
+今年 4 月有一篇 arXiv 上的实证研究（《Credential Leakage in LLM Agent Skills》），专门去扒社区里的 skill 安全问题。研究者从一个 skill 平台的十几万个 skill 里抽样了 17022 个来分析，结果发现其中 **520 个会泄露凭证**，总共揪出 1708 处问题。
+
+更扎心的是泄露途径：占比最高的不是什么高深的攻击，而是 **debug 日志**，光是 print 和 console.log 这类把东西打到标准输出的操作，就造成了 73.5% 的泄露。而且这些泄露里，将近九成不需要任何权限就能被利用。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/83b52a94_skill-security-data.png" tabindex="0" loading="lazy" />
+</figure>
+
+我之前写 <a href="https://mp.weixin.qq.com/s/CIPa2c-JVB-mSI0YDEB7AA" target="_blank" rel="noopener noreferrer">claude code skills</a> 那篇讲过，skill 是个装备齐全的工具箱，agent 能自己翻里面的脚本和资料。
+
+可这话反过来一样成立。要是这工具箱里被人下了毒呢？agent 照样一声不吭、照单全收。这就跟你捡到一个来路不明的 U 盘，眼都不眨直接插进公司电脑，一个道理。所以**任何 skill，在你的 loop 自动装它之前，先把源码从头到尾读一遍**，别图省事直接挂上去。
+
+第三条，凭证泄露进日志。正好接着上面那个数据说，既然 debug 日志是泄露的头号途径，那生产上跑的 loop，就把 verbose 日志关了。开发时打满日志方便排查，没问题。但你别让一个 24 小时挂着跑、还连着一堆外部系统的 loop，把密钥哗哗往日志里灌。
+
+最后一条，权限蔓延，温水煮青蛙的典型。今天为了让 loop 多干件事，给它加个写权限；明天又加一个；一个月下来，它手里的权限大到你自己都说不清它到底能动哪些东西了。解法很笨，但管用：**每 30 天，把它的权限拉出来复审一遍**，不再需要的，收回来。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/f51114d2_four-security-rails.png" tabindex="0" loading="lazy" />
+</figure>
+
+------------------------------------------------------------------------
+
+### 最后：14 步清单带走
+
+讲了这么多，我把 Codez 这份手册的 14 步原样给你列一遍，分三段，你照着走就行。
+
+**第一段 · 先搞清楚要不要做**
+
+1.  想明白本质：你要做的不是 prompt agent，是设计那个替你 prompt 的系统
+2.  过一遍四条件：活够重复、验证能自动、token 扛得住浪费、agent 有日志能跑自己写的代码
+3.  算清经济账：loop 偏向花得起钱的人，看清自己是受益那类还是该躲那类
+4.  对着具体任务跑 30 秒清单：每周至少干一次、有 gate 能拒坏活、agent 跑得了代码、有硬性 stop、不可逆操作前有人把关
+
+**第二段 · 五个构件（概念见上一篇，这里只点名）**
+
+5.  自动化：给 loop 一个按节奏或事件触发的心跳
+6.  worktree：多 agent 并行各给一份独立工作区，别让它们改同一个文件
+7.  skill：把项目背景写成 <a href="http://SKILL.md" target="_blank" rel="noopener noreferrer">SKILL.md</a>，省得每轮重讲
+8.  connector：用 MCP 接上 GitHub、Linear、Slack 这些真实工具
+9.  sub-agent：写代码的和验收的拆成两个，别让它给自己打分
+
+**第三段 · 要么搭对，要么别搭**
+
+10. 加状态文件：让 loop 接着昨天干，而不是每天从零开始
+11. 先搭最小可用版：一个自动化、一个 skill、一个状态文件、一道闸门，按「手动跑稳→做成 skill→包成 loop→再调度」的顺序来
+12. 防 Ralph Wiggum loop：用客观的 gate（测试过没过）判断完成，别让 agent 自己喊一声「干完了」就退。这个失败模式是工程师 Geoffrey Huntley 命名的，没有硬 gate，loop 会半途装完工，还在那儿空烧钱
+13. 还掉理解债：坚持读 diff、抽查闸门、别让 loop 碰架构
+14. 交安全税：代码上线前加安全扫描、skill 装前审源、生产关 verbose、权限每 30 天复审
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/75bdfd29_fourteen-step-roadmap.png" tabindex="0" loading="lazy" />
+</figure>
+
+你回头看这 14 步会发现，真正难的根本不在中间搭建那段，构件工具早帮你备好了。难的是头一段的「要不要做」和尾一段的「守不守得住」，全是关于人的判断。
+
+<figure>
+<img src="https://cdn.xiaolincoding.com//picgo/c0d061ae_hard-at-head-and-tail.png" tabindex="0" loading="lazy" />
+</figure>
+
+这两年，我们跟编码 agent 打交道，力气一直花在 prompt 上：把提示词写得更漂亮，把上下文喂得更全，盼着它一把就给你出个好结果。
+
+但这条路现在差不多走到头了，真正的支点往上挪了一层，挪到了那个替你拿主意的系统身上，是它在决定 agent 做什么、什么时候做、要过哪道关、做完留下什么。
+
+Codez 那份手册结尾就一句话，我觉得是整篇最该带走的：**杠杆移走了，你的活也跟着变了，但你别把自己也一起交出去。Build the loop, stay the engineer，去把 loop 搭起来，但人还得是那个工程师**。
+
+说到底，把 loop 搭起来只是拿了张入场券。
+
+至于到头来它是帮了你、还是坑了你，就看一件事：你愿不愿意一直盯着那份 diff，守住自己的判断。
+
+工具替你跑，但别替你想。
+
+我们下一篇见。
+
+------------------------------------------------------------------------
+
+参考资料：
+
+- Codez（@0xCodez）《Loop engineering: the 14-step roadmap from prompter to loop designer》：<a href="https://x.com/0xCodez/status/2064374643729773029" target="_blank" rel="noopener noreferrer">https://x.com/0xCodez/status/2064374643729773029</a>
