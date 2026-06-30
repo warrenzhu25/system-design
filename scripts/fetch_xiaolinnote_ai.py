@@ -2,9 +2,8 @@
 """Archive a xiaolinnote.com content area into markdown.
 
 Fetches every article under a given root (e.g. /ai/ or /agent/), isolates the
-main content, strips site chrome, converts HTML -> GFM via pandoc, and writes
-one consolidated markdown file per subsection into an output dir. Images are
-kept as remote cdn.xiaolincoding.com links.
+main content, strips site chrome and images, converts HTML -> GFM via pandoc,
+and writes one consolidated markdown file per subsection into an output dir.
 
 Usage:
     python3 fetch_xiaolinnote_ai.py [ROOT] [OUT_DIR]
@@ -78,9 +77,11 @@ def isolate_main(html):
             if i != -1:
                 body = body[:i]
 
-    # Drop scripts and inline base64 data-URI images (decorative SVG icons).
+    # Drop scripts.
     body = re.sub(r'<script.*?</script>', '', body, flags=re.S)
-    body = re.sub(r'<img[^>]*src="data:[^"]*"[^>]*/?>', '', body, flags=re.S)
+    # Drop all images: linked images (<a><img></a>) first, then bare <img>.
+    body = re.sub(r'<a\b[^>]*>\s*<img[^>]*>\s*</a>', '', body, flags=re.S)
+    body = re.sub(r'<img[^>]*>', '', body, flags=re.S)
     # Unwrap header-anchor links so headings stay plain text, not links.
     body = re.sub(r'<a [^>]*header-anchor[^>]*>(.*?)</a>', r'\1', body, flags=re.S)
     return body
