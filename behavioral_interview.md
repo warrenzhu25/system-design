@@ -979,3 +979,108 @@ Emphasize: Speed of execution, Iteration, Pragmatic trade-offs, Cross-functional
 
 ### For Large Enterprises
 Emphasize: Stakeholder alignment, Risk management, Gradual rollout, Backward compatibility
+
+---
+
+# Behavioral (BQ) — Leadership, Hiring & Collaboration
+
+> Quick-reference question bank for leadership / cross-functional rounds, **grounded in my own projects** (Projects 1–8 above: Serverless Autoscaling V2, Hang Detection, Goal-Based Autoscaling, Migrated Shuffle Refetch, Spark Insight MCP, Easy Migration, Remote Shuffle Service, Shuffle-Aware Scheduling). Each entry lists the **intent**, my **answer grounded in real projects**, and a **trap** to avoid. Fill `[X%]` / `[$Y]` with real numbers.
+>
+> *Domain note:* Q1 is framed for my actual domain — the **Serverless Spark platform**. If the target role is recommender systems, keep the same Now/Next/Later structure and swap the platform vision for the recsys one.
+
+### Q1. 当前项目的 2-year plan（2-year vision/roadmap — Serverless Spark platform）
+
+**Intent:** Strategic thinking, connecting tech to business, prioritization over a long horizon.
+
+**My answer — the vision: a "self-driving" Serverless Spark platform** (autonomous, reliable, cost-optimal, self-diagnosing). Frame with business metrics first: **cost per job, P50/P95 job latency, scaling latency, support escalations, autotuning adoption.**
+- **Now (0–6mo) — harden what's shipped:** drive adoption of Goal-Based Autoscaling (Project 3, Perf/Cost/Balanced) as the default UX; take Remote Shuffle Service (Project 7) from P1 manual-resize to **P2 full autoscaling**; broaden hang/deadlock auto-mitigation coverage (Project 2). *Goal: scaling latency seconds-not-minutes everywhere, [X%] escalation drop.*
+- **Next (6–12mo) — close the loop:** feed **Spark Insight** signals (Project 5) into **automatic config/goal selection** so the platform tunes itself instead of customers picking a goal; RSS GA + autoscaled; make the Easy-Migration tool (Project 6) the default onboarding path. *Goal: [Y%] of jobs auto-tuned, migration in one command.*
+- **Later (12–24mo) — self-driving:** an **AI agent built on the Spark Insight MCP** that auto-diagnoses *and* auto-remediates (predictive autoscaling, cross-job/cluster optimization, LLM-assisted root-cause in the support flow). *Goal: majority of perf/cost issues resolved with zero human in the loop.*
+- **Org dimension:** platformize the autotuning + diagnostics layers so the team scales sub-linearly with surface area; reduce the build→validate cycle.
+- Each phase names **dependencies** (e.g., RSS P2 depends on autotuning metrics) and **risks** (false-positive auto-remediation — mitigate with the conservative-threshold approach proven in Project 2).
+
+**Trap:** Listing features with no metric or business tie-in; no sequencing/dependencies.
+
+### Q2. 如果让你为团队招人，最看重的资质是什么？（Top qualities when hiring）
+
+**Intent:** Your bar, your values, whether you raise the team's level.
+
+**My answer (ranked, with a real example):**
+1. **Ownership / end-to-end accountability** — drives to *customer impact*, not "code merged." My north star: the kind of person who, like the Spark Insight arc (Project 5), takes something from V1 CLI → V2 MCP → V3 IDE skill because the problem isn't solved until users self-serve.
+2. **First-principles debugging** — comfortable with ambiguity, reasons from the system. The Migrated Shuffle Refetch fix (Project 4) came from tracing the shuffle-fetch lifecycle end-to-end to a 3-line root cause; I hire for that instinct.
+3. **Customer / product sense** — connects infra work to a metric and a user (e.g., turning "15+ configs" into one goal choice, Project 3).
+4. **Collaboration & low ego** — the cross-team Spark graceful-decommissioning integration (Project 1) only shipped because of influence-without-authority.
+5. **Learning agility > current knowledge** — the field (incl. AI tooling) moves fast; trajectory beats snapshot.
+
+**Trap:** Only valuing raw coding skill; generic "smart and gets things done" with no ranking or example.
+
+### Q3. 为了补齐 domain 中最大的 gap，你会招怎样的候选人？（Hiring to fill the biggest gap）
+
+**Intent:** Self-awareness about team weaknesses; deliberate, complementary hiring.
+
+**My answer — name the gap, tie it to the 2-year plan:** the platform's biggest gap for the "self-driving" vision is **applied ML / data-driven autotuning + AI-agent depth** — today autotuning and Spark Insight are heuristic/tool-based; turning them into closed-loop auto-remediation needs someone who can build the ML and agent layer.
+- I'd hire a **senior IC who is T-shaped: deep in applied ML / ML-for-systems (or LLM-agent design), broad enough in distributed systems** to reason about Spark/shuffle internals.
+- **Complement, not clone** — my team is strong on Spark internals and platform engineering; I'd add the modeling/agent strength we lack, not another internals expert.
+- **Validate in the loop** with a design problem in that exact area (e.g., "design closed-loop autotuning from Spark Insight signals") rather than generic LeetCode.
+
+**Trap:** Hiring more of what the team already does well; vague "smart generalist."
+
+### Q4. 描述一个你从头到尾 lead 的项目（Project led end-to-end）
+
+**Intent:** Real ownership across the full lifecycle, not just coding a slice.
+
+**My answer — lead with Spark Insight (Project 5)**, the cleanest end-to-end ownership:
+- **Problem framing:** spotted two distinct patterns — 80% routine checklist vs 20% novel issues — and that one or two Spark experts were the bottleneck.
+- **Design & trade-offs:** chose a 3-phase strategy (CLI for known patterns → MCP server for AI exploration → Claude Code skill for IDE), each solving a different user need rather than one monolith.
+- **Execution:** grew it from 18 → 50+ tools, added 16 structured prompts encoding expert analysis.
+- **Launch & measurement:** open-sourced with community adoption; analysis time hours → minutes; escalations down [X%].
+- **Leadership behaviors:** made the build-for-AI bet before it was mainstream, sequenced delivery so each phase shipped value, iterated on real usage.
+- *Alternates if they want a deeper-systems story:* Serverless Autoscaling V2 (Project 1) or Remote Shuffle Service (Project 7, where I evaluated 3 architectures and chose the harder, cleaner one).
+
+**Trap:** Describing a project you contributed to vs. one you *drove*; missing the "result + iteration" tail.
+
+### Q5. 项目需求来自哪里？（Where do requirements come from）
+
+**Intent:** Whether you build the right thing and prioritize well.
+
+**My answer — multiple sources, triangulated, then prioritized by impact vs effort** — with real examples of each:
+- **Support escalations / customer pain:** repetitive config explanations drove Goal-Based Autoscaling (Project 3); plugin-heavy hang debugging drove native Hang Detection (Project 2).
+- **Customer SLA frustration / cost signals:** 10–15 min scaling delays drove Autoscaling V2 (Project 1); a single $5,000 runaway job ($50 expected) drove runaway-job auto-termination (Project 2).
+- **Data / metric gaps:** "scale 2→20 executors, only 20% speedup" drove Shuffle-Aware Scheduling (Project 8).
+- **Platform scalability / self-identified:** shuffle-compute co-location limits drove the Remote Shuffle Service (Project 7); the stale-location race drove Migrated Shuffle Refetch (Project 4).
+- I **validate before committing** (analyze production job patterns — e.g., presets in Project 3 were tuned on thousands of real jobs) and sometimes **surface needs nobody filed** (shuffle-aware scheduling, hang detection).
+
+**Trap:** "My PM/manager tells me" — sounds order-taking; show proactivity and prioritization.
+
+### Q6. 有没有 step ahead 的例子？（Stepping beyond your scope）
+
+**Intent:** Initiative, foresight, ownership beyond the assigned box.
+
+**My answer — Spark Insight MCP (Project 5) is my strongest "step ahead":** nobody asked for an AI-driven Spark analyzer; I saw the expert-bottleneck problem and bet on AI tooling *before it was mainstream*, building it from CLI to MCP to IDE skill. It became a reusable pattern adopted beyond my team (open-sourced, community usage).
+- **Second example — Hang Detection default-on (Project 2):** I pushed to ship it enabled-by-default despite false-positive concerns, because the foresight was clear: undetected hang cost ($X/month, multi-day runaway jobs) far exceeded occasional false positives. I de-risked with conservative thresholds and a monitoring plan.
+- Both show the pattern: **anticipated the pain before it became a fire, took on the risk/effort voluntarily, aligned others rather than going rogue.**
+
+**Trap:** An example that was actually assigned to you; or overstepping that stepped on others.
+
+### Q7. 收到过负面 feedback 吗？（Received negative feedback）
+
+**Intent:** Self-awareness, coachability, growth mindset.
+
+**My answer — structure (⚠️ personalize with your real feedback; the theme below fits your builder profile but confirm it's true for you):**
+- **Plausible theme given the portfolio:** "You go deep and build solo (CLI, MCP, detection systems) before socializing the direction — align stakeholders earlier so the team rallies behind it sooner."
+- **Structure:** the feedback → honest reaction (didn't love it, but saw the data — e.g., a project that could have shipped faster with earlier buy-in) → **what I changed**: started writing a short design brief and getting cross-team alignment *before* heavy build (this is exactly what made the V2 Spark-team integration in Project 1 go smoothly) → **measurable improvement** since (faster reviews, more co-owners).
+- Close by showing you now **actively seek feedback** (skip-levels, design reviews).
+
+**Trap:** Defensiveness, a fake weakness ("I work too hard"), or no evidence of change. **Do not present my suggested theme as fact unless it's genuinely yours.**
+
+### Q8. 是否合作过任务不能按时完成的人？（Worked with someone who missed deadlines）
+
+**Intent:** Empathy + accountability; how you handle dependency/conflict.
+
+**My answer — structure (⚠️ personalize with your real situation; a fitting context from your work is below):**
+- **Fitting context:** a **cross-team dependency** — e.g., the Spark team's graceful-decommissioning API that Autoscaling V2 (Project 1) depended on, or a teammate owning part of the RSS phased rollout (Project 7) — where the blocking work slipped.
+- **Diagnosis, not blame:** root cause was usually **competing priorities / unclear scope**, not capability.
+- **Steps:** direct 1:1 to understand → **re-scope to the minimum unblocking piece** and set clear milestones → **reduce their effort** (in Project 1 I offered to do the integration work myself so the other team only had to review) → communicate impact to stakeholders early → escalate factually only if truly stuck.
+- **Outcome:** the dependency landed on the adjusted timeline and the relationship stayed strong (it "became a template for future cross-team collaborations").
+
+**Trap:** Throwing the person under the bus; "I just did all their work" (doesn't scale, no growth). **Swap in your real example.**
