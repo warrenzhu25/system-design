@@ -15,6 +15,7 @@ if a conversion differs from the published layout or text.
 | [silo-sosp-2013.pdf](silo-sosp-2013.pdf) | Silo multicore in-memory transactions | SOSP 2013 | [Author copy](https://read.seas.harvard.edu/~kohler/pubs/tu13speedy.pdf) |
 | [faster-sigmod-2018.pdf](faster-sigmod-2018.pdf) | FASTER concurrent key-value store | SIGMOD 2018 | [Microsoft Research](https://www.microsoft.com/en-us/research/uploads/prod/2018/03/faster-sigmod18.pdf) |
 | [velox-vldb-2022.pdf](velox-vldb-2022.pdf) | Meta Velox unified execution engine | PVLDB 15(12), 2022 | [VLDB](https://vldb.org/pvldb/vol15/p3372-pedreira.pdf) |
+| [clickhouse-vldb-2024.pdf](clickhouse-vldb-2024.pdf) | ClickHouse analytical database | PVLDB 17(12), 2024 | [VLDB](https://www.vldb.org/pvldb/vol17/p3731-schulze.pdf) |
 | [kora-vldb-2023.pdf](kora-vldb-2023.pdf) | Confluent Kora cloud-native Kafka platform | PVLDB 16(12), VLDB 2023 Best Industry Paper | [VLDB](https://www.vldb.org/pvldb/vol16/p3822-povzner.pdf) |
 | [dynamodb-atc-2022.pdf](dynamodb-atc-2022.pdf) | Amazon DynamoDB | USENIX ATC 2022 | [USENIX](https://www.usenix.org/system/files/atc22-elhemali.pdf) |
 | [aurora-sigmod-2017.pdf](aurora-sigmod-2017.pdf) | Amazon Aurora cloud-native relational database | SIGMOD 2017 | [Amazon Science](https://cdn.amazon.science/dc/2b/4ef2b89649f9a393d37d3e042f4e/amazon-aurora-design-considerations-for-high-throughput-cloud-native-relational-databases.pdf) |
