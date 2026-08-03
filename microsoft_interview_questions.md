@@ -1,8 +1,8 @@
 # Microsoft Interview Questions
 
-Coding problems reported from Microsoft loops, with emphasis on the MAI (Microsoft AI) /
-Copilot platform rounds. Every solution below is implemented and tested in Python, Java, and
-TypeScript.
+Problems reported from Microsoft loops, with emphasis on the MAI (Microsoft AI) / Copilot
+platform rounds. Every coding solution below is implemented and tested in Python, Java, and
+TypeScript; the system-design round carries a tested Python reference for its algorithmic core.
 
 ---
 
@@ -11,6 +11,9 @@ TypeScript.
 1. [DNA Shotgun Sequencing](#1-dna-shotgun-sequencing)
 2. [In-Memory SQL Engine](#2-in-memory-sql-engine)
 3. [LRU Cache (LC 146) + Multithreading Variant](#3-lru-cache-lc-146--multithreading-variant)
+4. [Top-K Largest Elements (Retain / Rank Stores)](#4-top-k-largest-elements-retain--rank-stores)
+5. [Rate Limiter (Design + Implementation)](#5-rate-limiter-design--implementation)
+6. [Job Scheduler / ETL Pipeline System Design](#6-job-scheduler--etl-pipeline-system-design)
 
 ---
 
@@ -2369,8 +2372,1602 @@ console.log(lfu.get(2));     // -1
 
 ---
 
+## 4. Top-K Largest Elements (Retain / Rank Stores)
+
+| | |
+|---|---|
+| **Tracks** | MLE · SWE |
+| **Tags** | heap · top-k · sorting · easy |
+| **Frequency** | Low · New |
+| **Last asked** | 2026-05-15 |
+| **Stage** | phone-screen |
+
+The recurring MAI phone-screen coding warm-up: return the top-K elements of a list under a
+simple ranking rule. Appears in two shapes — retain the K largest in original order, or rank
+business candidates by a composite key. Each runs ~15-20 minutes after the BQ section of a
+45-minute MAI phone screen.
+
+**Problem Statement:**
+
+### Shape 1 — Retain the K largest, original order
+
+```
+input:  nums (list of ints), k (int)
+output: the original list with only the K largest values kept; smaller values
+        removed, remaining elements stay in their original order
+```
+
+### Shape 2 — Rank stores by a composite key
+
+```
+input:  list of business candidates, each with (score, distance, isOpen)
+output: the top-K candidates sorted by score descending, ties broken by
+        distance ascending
+```
+
+Clarify up front how `isOpen` is used — the prompt lists it as a field but does not always
+state whether closed candidates are filtered out before ranking.
+
+**Test Cases:**
+
+Shape 1 (the tie-at-cutoff rule below is "keep the earliest occurrences", which is the
+convention you should confirm before coding):
+
+| Input | Output | Why |
+|-------|--------|-----|
+| `[3,1,5,2,4], k=2` | `[5,4]` | |
+| `[3,1,5,2,4], k=3` | `[3,5,4]` | original order preserved, not sorted |
+| `[4,1,4,3], k=3` | `[4,4,3]` | |
+| `[5,5,5,1], k=2` | `[5,5]` | three elements tie at the cutoff; keep exactly K |
+| `[2,2,2,2], k=2` | `[2,2]` | every element ties; the tie budget stops at K |
+| `[-5,-1,-3,-2], k=2` | `[-1,-2]` | negatives |
+| `[1,9,9,2], k=1` | `[9]` | first of the tied maxima |
+| `[1,2,3], k=0` or `k=-1` | `[]` | |
+| `[1,2,3], k=5` | `[1,2,3]` | k ≥ n returns everything |
+| `[], k=3` | `[]` | |
+
+Shape 2, against `A(4.5, 2.0, open)`, `B(4.9, 5.0, open)`, `C(4.5, 1.0, closed)`,
+`D(3.0, 0.5, open)`, `E(4.9, 5.0, open)`:
+
+| Call | Output | Why |
+|------|--------|-----|
+| `k=2` | `[B, E]` | highest score first |
+| `k=4` | `[B, E, C, A]` | C before A: same score, nearer |
+| `k=5` | `[B, E, C, A, D]` | B before E: identical keys, input order preserved |
+| `k=3, open_only=True` | `[B, E, A]` | C is filtered out before ranking |
+| `k=99` | all 5 | k > n |
+| `k=0` | `[]` | |
+
+**Key Insights:**
+
+1. Both shapes are heap / partial-sort exercises. A size-K min-heap gives **O(N log K)**;
+   `heapq.nlargest(k, items, key=...)` handles the composite-key shape directly.
+2. **The whole difficulty is the duplicates-at-threshold case.** For Shape 1, if you find the
+   K-th largest value and then sweep keeping everything `>= threshold`, several elements can
+   tie at the cutoff and you return **more than K**. Two defensible rules — keep exactly K
+   (earliest occurrences win) or keep all ties — and the round grades you for asking which one
+   before coding. Both are implemented below.
+3. The exact-K fix is a **tie budget**: count how many elements are strictly greater than the
+   threshold, then allow only `k - that_count` elements equal to it during the sweep.
+4. The heap approach gets the same tie rule for free by ordering on `(value, -index)`: among
+   equal values the *later* index sorts smaller, so it is the one evicted, and the earliest
+   occurrences survive.
+5. Quickselect gives **O(N) average** but O(N²) worst case and it mutates a copy; the size-K
+   heap is O(N log K) worst case with O(K) extra space. Prefer quickselect when K is close to
+   N, the heap when K ≪ N or when the input is a stream you cannot re-read.
+6. Use a **three-way partition** in quickselect. Heavy duplicates — exactly the case the
+   interviewer probes — degrade a two-way partition to O(N²).
+7. For Shape 2, encode the composite key so that one comparator does everything: primary
+   descending, secondary ascending. Sorting the final K by `(-score, distance, index)` keeps
+   full ties in input order, which is what "stable" means here.
+
+**Complexity:** size-K heap O(N log K) time / O(K) space; quickselect O(N) average, O(N²)
+worst / O(N) space for the copy. Shape 2 is the same, plus O(K log K) to order the result.
+
+**Python Solution:**
+
+```python
+import heapq
+import random
+from dataclasses import dataclass
+
+
+# ---------- Shape 1: retain the K largest, original order ----------
+def retain_k_largest(nums: list[int], k: int) -> list[int]:
+    """
+    Size-K min-heap. Ties at the cutoff keep the earliest occurrences.
+    Time: O(N log K), Space: O(K)
+    """
+    if k <= 0:
+        return []
+    if k >= len(nums):
+        return list(nums)
+
+    heap: list[tuple[int, int]] = []
+    for i, v in enumerate(nums):
+        entry = (v, -i)                 # -i: among equal values the LATER index is "smaller"
+        if len(heap) < k:
+            heapq.heappush(heap, entry)
+        elif entry > heap[0]:
+            heapq.heapreplace(heap, entry)
+
+    keep = {-neg_i for _, neg_i in heap}
+    return [v for i, v in enumerate(nums) if i in keep]
+
+
+def _kth_largest(nums: list[int], k: int) -> int:
+    """Iterative quickselect with a random pivot. O(N) average."""
+    arr = list(nums)
+    target = len(arr) - k               # k-th largest == target-th smallest (0-indexed)
+    lo, hi = 0, len(arr) - 1
+    while lo < hi:
+        pivot = arr[random.randint(lo, hi)]
+        i, j, p = lo, hi, lo
+        while p <= j:                   # three-way partition handles heavy duplicates
+            if arr[p] < pivot:
+                arr[i], arr[p] = arr[p], arr[i]
+                i += 1
+                p += 1
+            elif arr[p] > pivot:
+                arr[p], arr[j] = arr[j], arr[p]
+                j -= 1
+            else:
+                p += 1
+        if target < i:
+            hi = i - 1
+        elif target > j:
+            lo = j + 1
+        else:
+            return pivot
+    return arr[lo]
+
+
+def retain_k_largest_quickselect(nums: list[int], k: int) -> list[int]:
+    """
+    Threshold sweep. The tie budget is what keeps the count at exactly K.
+    Time: O(N) average, Space: O(N)
+    """
+    if k <= 0:
+        return []
+    if k >= len(nums):
+        return list(nums)
+
+    threshold = _kth_largest(nums, k)
+    strictly_greater = sum(1 for v in nums if v > threshold)
+    ties_to_keep = k - strictly_greater    # how many elements equal to the cutoff we may keep
+
+    out = []
+    for v in nums:
+        if v > threshold:
+            out.append(v)
+        elif v == threshold and ties_to_keep > 0:
+            out.append(v)
+            ties_to_keep -= 1
+    return out
+
+
+def retain_k_largest_all_ties(nums: list[int], k: int) -> list[int]:
+    """The other defensible rule: keep every element tied at the cutoff (>= K results)."""
+    if k <= 0:
+        return []
+    if k >= len(nums):
+        return list(nums)
+    threshold = _kth_largest(nums, k)
+    return [v for v in nums if v >= threshold]
+
+
+# ---------- Shape 2: rank stores by a composite key ----------
+@dataclass(frozen=True)
+class Store:
+    name: str
+    score: float
+    distance: float
+    is_open: bool
+
+
+def top_k_stores(stores: list[Store], k: int, open_only: bool = False) -> list[Store]:
+    """
+    Top K by score DESC, ties broken by distance ASC, further ties by input order.
+    open_only is the clarifying question: does is_open filter, or is it ignored?
+    Time: O(N log K + K log K), Space: O(K)
+    """
+    candidates = [s for s in stores if s.is_open] if open_only else stores
+    if k <= 0:
+        return []
+
+    # Min-heap keyed so that "smallest" == worst candidate: lowest score,
+    # then largest distance, then latest input position.
+    heap: list[tuple[float, float, int, Store]] = []
+    for i, s in enumerate(candidates):
+        entry = (s.score, -s.distance, -i, s)
+        if len(heap) < k:
+            heapq.heappush(heap, entry)
+        elif entry[:3] > heap[0][:3]:
+            heapq.heapreplace(heap, entry)
+
+    heap.sort(key=lambda e: (-e[0], -e[1], -e[2]))   # score desc, distance asc, index asc
+    return [e[3] for e in heap]
+
+
+def top_k_stores_oneliner(stores: list[Store], k: int, open_only: bool = False) -> list[Store]:
+    """What you write if the interviewer allows the library: nlargest is stable on ties."""
+    candidates = [s for s in stores if s.is_open] if open_only else stores
+    return heapq.nlargest(k, candidates, key=lambda s: (s.score, -s.distance))
+
+
+# Example usage
+if __name__ == "__main__":
+    print(retain_k_largest([3, 1, 5, 2, 4], 3))     # [3, 5, 4]
+    print(retain_k_largest([5, 5, 5, 1], 2))        # [5, 5]   (exactly K)
+    print(retain_k_largest_all_ties([5, 5, 5, 1], 2))   # [5, 5, 5]   (all ties)
+
+    stores = [
+        Store("A", 4.5, 2.0, True), Store("B", 4.9, 5.0, True),
+        Store("C", 4.5, 1.0, False), Store("D", 3.0, 0.5, True),
+    ]
+    print([s.name for s in top_k_stores(stores, 3)])                    # ['B', 'C', 'A']
+    print([s.name for s in top_k_stores(stores, 3, open_only=True)])    # ['B', 'A', 'D']
+```
+
+**Java Solution:**
+
+```java
+import java.util.*;
+import java.util.stream.Collectors;
+
+public class TopKLargest {
+
+    // ---------- Shape 1: retain the K largest, original order ----------
+    /** Size-K min-heap. Ties at the cutoff keep the earliest occurrences. O(N log K). */
+    public static List<Integer> retainKLargest(List<Integer> nums, int k) {
+        if (k <= 0) return List.of();
+        if (k >= nums.size()) return new ArrayList<>(nums);
+
+        // Order by value, then by LATER index first, so the heap root is the
+        // element we want to evict.
+        PriorityQueue<int[]> heap = new PriorityQueue<>(
+                Comparator.<int[]>comparingInt(e -> e[0]).thenComparing(e -> -e[1]));
+        for (int i = 0; i < nums.size(); i++) {
+            int[] entry = {nums.get(i), i};
+            if (heap.size() < k) heap.add(entry);
+            else if (beats(entry, heap.peek())) { heap.poll(); heap.add(entry); }
+        }
+
+        Set<Integer> keep = heap.stream().map(e -> e[1]).collect(Collectors.toSet());
+        List<Integer> out = new ArrayList<>();
+        for (int i = 0; i < nums.size(); i++) {
+            if (keep.contains(i)) out.add(nums.get(i));
+        }
+        return out;
+    }
+
+    private static boolean beats(int[] a, int[] b) {
+        if (a[0] != b[0]) return a[0] > b[0];
+        return a[1] < b[1];              // equal values: the earlier index wins
+    }
+
+    private static final Random RNG = new Random();
+
+    /** Iterative quickselect with a random pivot. O(N) average. */
+    public static int kthLargest(List<Integer> nums, int k) {
+        int[] arr = nums.stream().mapToInt(Integer::intValue).toArray();
+        int target = arr.length - k;     // k-th largest == target-th smallest (0-indexed)
+        int lo = 0, hi = arr.length - 1;
+        while (lo < hi) {
+            int pivot = arr[lo + RNG.nextInt(hi - lo + 1)];
+            int i = lo, j = hi, p = lo;
+            while (p <= j) {             // three-way partition handles heavy duplicates
+                if (arr[p] < pivot) { swap(arr, i++, p++); }
+                else if (arr[p] > pivot) { swap(arr, p, j--); }
+                else { p++; }
+            }
+            if (target < i) hi = i - 1;
+            else if (target > j) lo = j + 1;
+            else return pivot;
+        }
+        return arr[lo];
+    }
+
+    private static void swap(int[] a, int i, int j) {
+        int t = a[i]; a[i] = a[j]; a[j] = t;
+    }
+
+    /** Threshold sweep. The tie budget is what keeps the count at exactly K. */
+    public static List<Integer> retainKLargestQuickselect(List<Integer> nums, int k) {
+        if (k <= 0) return List.of();
+        if (k >= nums.size()) return new ArrayList<>(nums);
+
+        int threshold = kthLargest(nums, k);
+        int strictlyGreater = 0;
+        for (int v : nums) if (v > threshold) strictlyGreater++;
+        int tiesToKeep = k - strictlyGreater;
+
+        List<Integer> out = new ArrayList<>();
+        for (int v : nums) {
+            if (v > threshold) out.add(v);
+            else if (v == threshold && tiesToKeep > 0) { out.add(v); tiesToKeep--; }
+        }
+        return out;
+    }
+
+    /** The other defensible rule: keep every element tied at the cutoff. */
+    public static List<Integer> retainKLargestAllTies(List<Integer> nums, int k) {
+        if (k <= 0) return List.of();
+        if (k >= nums.size()) return new ArrayList<>(nums);
+        int threshold = kthLargest(nums, k);
+        return nums.stream().filter(v -> v >= threshold).collect(Collectors.toList());
+    }
+
+    // ---------- Shape 2: rank stores by a composite key ----------
+    public record Store(String name, double score, double distance, boolean isOpen) {}
+
+    /**
+     * Top K by score DESC, ties broken by distance ASC, further ties by input order.
+     * openOnly is the clarifying question: does isOpen filter, or is it ignored?
+     */
+    public static List<Store> topKStores(List<Store> stores, int k, boolean openOnly) {
+        if (k <= 0) return List.of();
+        List<Store> candidates = openOnly
+                ? stores.stream().filter(Store::isOpen).collect(Collectors.toList())
+                : stores;
+
+        // "Worst first" so the heap root is always the candidate to evict.
+        Comparator<Object[]> worstFirst = Comparator
+                .<Object[]>comparingDouble(e -> ((Store) e[0]).score())
+                .thenComparing(e -> -((Store) e[0]).distance())
+                .thenComparing(e -> -(int) e[1]);
+        PriorityQueue<Object[]> heap = new PriorityQueue<>(worstFirst);
+
+        for (int i = 0; i < candidates.size(); i++) {
+            Object[] entry = {candidates.get(i), i};
+            if (heap.size() < k) heap.add(entry);
+            else if (worstFirst.compare(entry, heap.peek()) > 0) { heap.poll(); heap.add(entry); }
+        }
+
+        return heap.stream()
+                .sorted(worstFirst.reversed())      // score desc, distance asc, index asc
+                .map(e -> (Store) e[0])
+                .collect(Collectors.toList());
+    }
+
+    /** What you write if the interviewer allows a full sort: O(N log N) but two lines. */
+    public static List<Store> topKStoresSorted(List<Store> stores, int k, boolean openOnly) {
+        return (openOnly ? stores.stream().filter(Store::isOpen) : stores.stream())
+                .sorted(Comparator.comparingDouble(Store::score).reversed()
+                        .thenComparingDouble(Store::distance))   // sorted() is stable
+                .limit(Math.max(k, 0))
+                .collect(Collectors.toList());
+    }
+
+    public static void main(String[] args) {
+        System.out.println(retainKLargest(List.of(3, 1, 5, 2, 4), 3));     // [3, 5, 4]
+        System.out.println(retainKLargest(List.of(5, 5, 5, 1), 2));        // [5, 5]
+        System.out.println(retainKLargestAllTies(List.of(5, 5, 5, 1), 2)); // [5, 5, 5]
+
+        List<Store> stores = List.of(
+                new Store("A", 4.5, 2.0, true), new Store("B", 4.9, 5.0, true),
+                new Store("C", 4.5, 1.0, false), new Store("D", 3.0, 0.5, true));
+        System.out.println(topKStores(stores, 3, false).stream()
+                .map(Store::name).collect(Collectors.toList()));   // [B, C, A]
+        System.out.println(topKStores(stores, 3, true).stream()
+                .map(Store::name).collect(Collectors.toList()));   // [B, A, D]
+    }
+}
+```
+
+**TypeScript Solution:**
+
+```typescript
+/** Minimal binary min-heap — JS has no built-in priority queue. */
+class MinHeap<T> {
+    private readonly data: T[] = [];
+    private readonly worseFirst: (a: T, b: T) => number;
+
+    constructor(worseFirst: (a: T, b: T) => number) { this.worseFirst = worseFirst; }
+
+    get size(): number { return this.data.length; }
+    peek(): T { return this.data[0]; }
+    toArray(): T[] { return this.data.slice(); }
+
+    push(item: T): void {
+        this.data.push(item);
+        let i = this.data.length - 1;
+        while (i > 0) {
+            const parent = (i - 1) >> 1;
+            if (this.worseFirst(this.data[i], this.data[parent]) >= 0) break;
+            [this.data[i], this.data[parent]] = [this.data[parent], this.data[i]];
+            i = parent;
+        }
+    }
+
+    replaceRoot(item: T): void {
+        this.data[0] = item;
+        for (let i = 0;;) {
+            const l = 2 * i + 1, r = l + 1;
+            let smallest = i;
+            if (l < this.data.length
+                && this.worseFirst(this.data[l], this.data[smallest]) < 0) smallest = l;
+            if (r < this.data.length
+                && this.worseFirst(this.data[r], this.data[smallest]) < 0) smallest = r;
+            if (smallest === i) break;
+            [this.data[i], this.data[smallest]] = [this.data[smallest], this.data[i]];
+            i = smallest;
+        }
+    }
+}
+
+// ---------- Shape 1: retain the K largest, original order ----------
+type Entry = { value: number; index: number };
+
+/** Root of the heap is the element to evict: lowest value, latest index. */
+const worstFirst = (a: Entry, b: Entry): number =>
+    a.value !== b.value ? a.value - b.value : b.index - a.index;
+
+/** Size-K min-heap. Ties at the cutoff keep the earliest occurrences. O(N log K). */
+function retainKLargest(nums: number[], k: number): number[] {
+    if (k <= 0) return [];
+    if (k >= nums.length) return nums.slice();
+
+    const heap = new MinHeap<Entry>(worstFirst);
+    nums.forEach((value, index) => {
+        const entry = { value, index };
+        if (heap.size < k) heap.push(entry);
+        else if (worstFirst(entry, heap.peek()) > 0) heap.replaceRoot(entry);
+    });
+
+    const keep = new Set(heap.toArray().map((e) => e.index));
+    return nums.filter((_, i) => keep.has(i));
+}
+
+/** Iterative quickselect with a random pivot. O(N) average. */
+function kthLargest(nums: number[], k: number): number {
+    const arr = nums.slice();
+    const target = arr.length - k;          // k-th largest == target-th smallest (0-indexed)
+    let lo = 0, hi = arr.length - 1;
+    while (lo < hi) {
+        const pivot = arr[lo + Math.floor(Math.random() * (hi - lo + 1))];
+        let i = lo, j = hi, p = lo;
+        while (p <= j) {                    // three-way partition handles heavy duplicates
+            if (arr[p] < pivot) { [arr[i], arr[p]] = [arr[p], arr[i]]; i++; p++; }
+            else if (arr[p] > pivot) { [arr[p], arr[j]] = [arr[j], arr[p]]; j--; }
+            else p++;
+        }
+        if (target < i) hi = i - 1;
+        else if (target > j) lo = j + 1;
+        else return pivot;
+    }
+    return arr[lo];
+}
+
+/** Threshold sweep. The tie budget is what keeps the count at exactly K. */
+function retainKLargestQuickselect(nums: number[], k: number): number[] {
+    if (k <= 0) return [];
+    if (k >= nums.length) return nums.slice();
+
+    const threshold = kthLargest(nums, k);
+    const strictlyGreater = nums.filter((v) => v > threshold).length;
+    let tiesToKeep = k - strictlyGreater;
+
+    const out: number[] = [];
+    for (const v of nums) {
+        if (v > threshold) out.push(v);
+        else if (v === threshold && tiesToKeep > 0) { out.push(v); tiesToKeep--; }
+    }
+    return out;
+}
+
+/** The other defensible rule: keep every element tied at the cutoff. */
+function retainKLargestAllTies(nums: number[], k: number): number[] {
+    if (k <= 0) return [];
+    if (k >= nums.length) return nums.slice();
+    const threshold = kthLargest(nums, k);
+    return nums.filter((v) => v >= threshold);
+}
+
+// ---------- Shape 2: rank stores by a composite key ----------
+interface Store {
+    name: string;
+    score: number;
+    distance: number;
+    isOpen: boolean;
+}
+
+type Ranked = { store: Store; index: number };
+
+/** Root of the heap is the candidate to evict: lowest score, then farthest, then latest. */
+const worstStoreFirst = (a: Ranked, b: Ranked): number => {
+    if (a.store.score !== b.store.score) return a.store.score - b.store.score;
+    if (a.store.distance !== b.store.distance) return b.store.distance - a.store.distance;
+    return b.index - a.index;
+};
+
+/**
+ * Top K by score DESC, ties broken by distance ASC, further ties by input order.
+ * openOnly is the clarifying question: does isOpen filter, or is it ignored?
+ */
+function topKStores(stores: Store[], k: number, openOnly = false): Store[] {
+    if (k <= 0) return [];
+    const candidates = openOnly ? stores.filter((s) => s.isOpen) : stores;
+
+    const heap = new MinHeap<Ranked>(worstStoreFirst);
+    candidates.forEach((store, index) => {
+        const entry = { store, index };
+        if (heap.size < k) heap.push(entry);
+        else if (worstStoreFirst(entry, heap.peek()) > 0) heap.replaceRoot(entry);
+    });
+
+    return heap.toArray().sort((a, b) => -worstStoreFirst(a, b)).map((e) => e.store);
+}
+
+/** What you write if the interviewer allows a full sort: O(N log N) but two lines. */
+function topKStoresSorted(stores: Store[], k: number, openOnly = false): Store[] {
+    const candidates = openOnly ? stores.filter((s) => s.isOpen) : stores.slice();
+    return candidates
+        .sort((a, b) => b.score - a.score || a.distance - b.distance)   // stable in ES2019+
+        .slice(0, Math.max(k, 0));
+}
+
+// Example usage
+console.log(retainKLargest([3, 1, 5, 2, 4], 3));        // [ 3, 5, 4 ]
+console.log(retainKLargest([5, 5, 5, 1], 2));           // [ 5, 5 ]
+console.log(retainKLargestAllTies([5, 5, 5, 1], 2));    // [ 5, 5, 5 ]
+
+const storeList: Store[] = [
+    { name: "A", score: 4.5, distance: 2.0, isOpen: true },
+    { name: "B", score: 4.9, distance: 5.0, isOpen: true },
+    { name: "C", score: 4.5, distance: 1.0, isOpen: false },
+    { name: "D", score: 3.0, distance: 0.5, isOpen: true },
+];
+console.log(topKStores(storeList, 3).map((s) => s.name));         // [ 'B', 'C', 'A' ]
+console.log(topKStores(storeList, 3, true).map((s) => s.name));   // [ 'B', 'A', 'D' ]
+```
+
+**Preparation:**
+
+- Implement both a size-K min-heap selection and a quickselect-threshold sweep; be able to say
+  when each is preferable.
+- Pre-write a composite-key comparator (primary descending, secondary ascending) and rehearse
+  `heapq.nlargest`.
+- Practice the two clarifying questions: duplicate handling at the cutoff, and whether a
+  boolean field (`isOpen`) filters or just tie-breaks.
+- The round grades clean tie-handling and a stated complexity as much as a working answer, and
+  **you write your own test cases** — lead with `[5,5,5,1], k=2` to show you found the tie case
+  yourself.
+
+---
+
+## 5. Rate Limiter (Design + Implementation)
+
+| | |
+|---|---|
+| **Tracks** | SWE · MLE |
+| **Tags** | rate-limiting · redis · distributed-systems · throttling · medium |
+| **Frequency** | Medium |
+| **Last asked** | 2026-04-21 |
+| **Stage** | onsite-coding · onsite-system-design |
+
+Recurring Microsoft prompt that crosses categories. Some loops ask for a 30-minute coding
+implementation, others for a full system-design treatment, and one HE pairs both in the same
+round. The scale follow-up converges on 100K QPS.
+
+**Problem Statement:**
+
+The base ask is `allow(client_id) -> bool` that admits up to N requests per T seconds per
+client. Test cases the interviewer drives:
+
+1. Pure rate enforcement (5 requests / 10 seconds).
+2. Sliding-window precision — a request that arrived 11 seconds ago should not count.
+3. Burst handling — short spikes within the window must be admitted up to N.
+
+Common follow-ups:
+
+- **Scale to 100K QPS.** What pieces sit on the request hot-path; where does state live; what
+  is the failure mode.
+- **Distributed enforcement.** Multiple gateway nodes; cannot trust local counters.
+- **Two rate limits compose** (per-user + global). Reject if either is exceeded.
+- **Logger rate-limit variant.** Same shape but the function is
+  `shouldPrintMessage(timestamp, message)` and returns true at most once per message per window.
+
+**Test Cases:**
+
+| Scenario | Expectation |
+|----------|-------------|
+| 5 requests at t=0, limit 5/10s | all admitted (burst up to N is allowed) |
+| 6th request at t=0 | rejected |
+| request at t=9 | rejected — still inside the window |
+| request at t=11 | admitted — the t=0 batch aged out |
+| limit 1/10s: admit at t=0, retry at t=9.9 | rejected |
+| limit 1/10s: retry at t=10.0 | admitted — the window boundary is inclusive of exactly T |
+| two clients, limit 2 | counters are independent |
+| token bucket rate 0.5/s burst 5: 5 at t=0, then t=1.9 | rejected — no token has accrued yet |
+| same bucket at t=2.0 | admitted — exactly one token accrued |
+| same bucket idle until t=1000 | 5 admitted then rejected — refill caps at burst |
+| composite (per-user 3, global 4): 4th request from user A | rejected by the per-user limit |
+| composite: user B after global is exhausted | rejected, **and B's own bucket is untouched** |
+| logger: `(1,"foo")`, `(3,"foo")`, `(11,"foo")` | `true`, `false`, `true` |
+| logger: 5000 distinct messages | retained entries stay bounded (eviction works) |
+
+The counter algorithm is an approximation, and the tests pin down **both** directions of its
+error against the exact log:
+
+| Burst position | At | Exact log | Sliding-window counter |
+|----------------|-----|-----------|------------------------|
+| 5 hits at t=0 (window start) | t=11 | admits (they truly aged out) | **falsely rejects** — assumes 0.9 of them still count |
+| 5 hits at t=9 (window end) | t=15 | rejects (all 5 are in (5,15]) | **falsely admits** — credits only 0.5 of them |
+
+**Key Insights:**
+
+1. **Sliding-window log** is the textbook starting point — store every request timestamp in a
+   deque per client, drop entries outside `(now - T, now]`, admit when `len(deque) < N`.
+   Trivially correct, but memory grows with N per active client.
+2. **Token bucket is the dominant production choice**: per client, store
+   `(current_tokens, last_refill_ts)`. On request, `tokens += (now - last_refill_ts) * rate`,
+   cap at burst, decrement on admit. Memory is O(1) per client, refill is implicit (lazy), and
+   bursts are naturally supported via the burst cap.
+3. Advance `last_refill_ts` even on a **rejected** request. Forgetting this is the common bug:
+   the elapsed time gets re-counted on the next call and tokens accrue too fast.
+4. **Sliding-window counter** (fixed-window + smooth-by-overlap) is the middle ground when you
+   cannot afford the per-client deque but want sub-window precision: keep counters per window,
+   and on each request compute the weighted sum of the current and previous window proportional
+   to where the rolling window cuts. It is an approximation in both directions (table above) —
+   say so out loud rather than claiming it is exact.
+5. **Composing two limits requires a check-then-consume split.** If you call
+   `per_user.allow(...) and global.allow(...)`, a global rejection has already burned a
+   per-user token, and short-circuit evaluation means the two limiters disagree about what was
+   admitted. Peek at every limiter first, then consume from all of them.
+6. **100K QPS path.** Put state in Redis. Each `allow()` becomes a single Redis call; race
+   conditions are eliminated by wrapping the read-modify-write in a **Lua script** so the whole
+   token-bucket update is atomic on the Redis side. A single Redis instance saturates around
+   the 100K range — shard by `client_id` using consistent hashing across N instances to go
+   higher.
+7. **Distributed failure modes.** Network partition between gateway and Redis: **fail closed**
+   (reject) by default, because admitting unbounded traffic during a Redis outage propagates
+   failure downstream. Clock skew across gateway nodes is irrelevant for token-bucket (Redis
+   owns the clock) but painful for any algorithm that timestamps on the gateway and merges
+   later. Push rule changes to gateways via a config service (ZooKeeper / etcd) rather than
+   re-deploying.
+8. **Hot-key amplification.** A single very-active `client_id` saturates one Redis shard.
+   Mitigations: client-side budget (admit some fraction locally without consulting Redis),
+   request batching, and outright blocking abusive sources once detected.
+9. For the **logger variant**, the constraint is "at most one print per message per window", so
+   it reduces to `last_seen[message]` — admit when `now - last_seen[message] >= 10`. The trick
+   is the memory bound: candidates who store every message forever fail the follow-up. The
+   correct answer is eviction of entries whose timestamp is older than the window.
+
+**The Redis Lua atomic-update pattern** (memorize this shape — read, modify, conditionally
+write, all inside one `EVAL`):
+
+```lua
+-- KEYS[1] = bucket key;  ARGV = {now, rate, burst, cost}
+local now, rate, burst, cost = tonumber(ARGV[1]), tonumber(ARGV[2]),
+                               tonumber(ARGV[3]), tonumber(ARGV[4])
+local b = redis.call('HMGET', KEYS[1], 'tokens', 'ts')
+local tokens = tonumber(b[1]) or burst
+local ts     = tonumber(b[2]) or now
+
+tokens = math.min(burst, tokens + (now - ts) * rate)   -- lazy refill
+local allowed = tokens >= cost
+if allowed then tokens = tokens - cost end
+
+redis.call('HMSET', KEYS[1], 'tokens', tokens, 'ts', now)
+redis.call('EXPIRE', KEYS[1], math.ceil(burst / rate) * 2)   -- reclaim idle clients
+return allowed and 1 or 0
+```
+
+**Complexity:** log O(1) amortized per call, O(N) memory per active client. Token bucket and
+sliding-window counter are both O(1) time and O(1) memory per client.
+
+**Python Solution:**
+
+```python
+import threading
+from collections import deque, defaultdict
+
+
+# ---------- 1. Sliding-window log: the textbook starting point ----------
+class SlidingWindowLogLimiter:
+    """
+    Store every admitted timestamp per client; drop entries outside (now - T, now].
+    Exactly correct, but memory is O(N) per active client.
+    """
+
+    def __init__(self, limit: int, window_seconds: float):
+        self.limit = limit
+        self.window = window_seconds
+        self.log: dict[str, deque] = defaultdict(deque)
+        self._lock = threading.Lock()
+
+    def allow(self, client_id: str, now: float) -> bool:
+        with self._lock:
+            q = self.log[client_id]
+            cutoff = now - self.window
+            while q and q[0] <= cutoff:       # a request exactly T ago no longer counts
+                q.popleft()
+            if len(q) < self.limit:
+                q.append(now)
+                return True
+            return False
+
+
+# ---------- 2. Token bucket: the production choice ----------
+class TokenBucketLimiter:
+    """
+    Per client store (tokens, last_refill). Refill lazily on read:
+    tokens += elapsed * rate, capped at burst. O(1) memory per client.
+    """
+
+    def __init__(self, rate_per_second: float, burst: int):
+        self.rate = rate_per_second
+        self.burst = burst
+        self.state: dict[str, tuple[float, float]] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, client_id: str, now: float, cost: float = 1.0) -> bool:
+        with self._lock:
+            tokens, last = self.state.get(client_id, (float(self.burst), now))
+            tokens = min(self.burst, tokens + (now - last) * self.rate)   # lazy refill
+            if tokens >= cost:
+                self.state[client_id] = (tokens - cost, now)
+                return True
+            self.state[client_id] = (tokens, now)      # still advance the clock
+            return False
+
+
+# ---------- 3. Sliding-window counter: the middle ground ----------
+class SlidingWindowCounterLimiter:
+    """
+    Two fixed-window counters, blended by how far into the current window we are.
+    O(1) memory per client, no per-request deque, sub-window precision --
+    but an APPROXIMATION: it assumes the previous window's hits were uniform.
+    """
+
+    def __init__(self, limit: int, window_seconds: float):
+        self.limit = limit
+        self.window = window_seconds
+        self.state: dict[str, tuple[int, int, int]] = {}   # client -> (window_id, cur, prev)
+        self._lock = threading.Lock()
+
+    def allow(self, client_id: str, now: float) -> bool:
+        with self._lock:
+            wid = int(now // self.window)
+            prev_wid, cur, prev = self.state.get(client_id, (wid, 0, 0))
+            if wid == prev_wid + 1:
+                prev, cur = cur, 0
+            elif wid > prev_wid:
+                prev, cur = 0, 0
+
+            overlap = 1.0 - (now % self.window) / self.window   # share of the previous window
+            estimate = prev * overlap + cur
+            if estimate + 1 <= self.limit:
+                self.state[client_id] = (wid, cur + 1, prev)
+                return True
+            self.state[client_id] = (wid, cur, prev)
+            return False
+
+
+# ---------- 4. Composite limits: reject if EITHER is exceeded ----------
+class CompositeLimiter:
+    """
+    Per-user plus global. Check every limiter BEFORE consuming from any of them,
+    otherwise a rejection by the second limiter still burns a token in the first.
+    """
+
+    def __init__(self, per_user: TokenBucketLimiter, global_limiter: TokenBucketLimiter):
+        self.per_user = per_user
+        self.global_limiter = global_limiter
+        self._lock = threading.Lock()
+
+    def allow(self, client_id: str, now: float) -> bool:
+        with self._lock:
+            if not self._peek(self.per_user, client_id, now):
+                return False
+            if not self._peek(self.global_limiter, "__global__", now):
+                return False
+            self.per_user.allow(client_id, now)
+            self.global_limiter.allow("__global__", now)
+            return True
+
+    @staticmethod
+    def _peek(bucket: TokenBucketLimiter, key: str, now: float) -> bool:
+        """Would this admit, without consuming?"""
+        tokens, last = bucket.state.get(key, (float(bucket.burst), now))
+        return min(bucket.burst, tokens + (now - last) * bucket.rate) >= 1.0
+
+
+# ---------- 5. Logger variant (LC 359) ----------
+class Logger:
+    """
+    Print a message at most once per window. last_seen alone leaks memory on an
+    unbounded message alphabet, so evict entries older than the window.
+    """
+
+    def __init__(self, window_seconds: int = 10, evict_every: int = 1000):
+        self.window = window_seconds
+        self.last_seen: dict[str, int] = {}
+        self.evict_every = evict_every
+        self._since_evict = 0
+
+    def should_print_message(self, timestamp: int, message: str) -> bool:
+        self._since_evict += 1
+        if self._since_evict >= self.evict_every:
+            self._evict(timestamp)
+            self._since_evict = 0
+
+        last = self.last_seen.get(message)
+        if last is None or timestamp - last >= self.window:
+            self.last_seen[message] = timestamp
+            return True
+        return False
+
+    def _evict(self, now: int) -> None:
+        stale = [m for m, ts in self.last_seen.items() if now - ts >= self.window]
+        for m in stale:
+            del self.last_seen[m]
+
+
+# Example usage
+if __name__ == "__main__":
+    rl = SlidingWindowLogLimiter(5, 10)          # 5 requests / 10 seconds
+    print([rl.allow("u", 0.0) for _ in range(6)])
+    # [True, True, True, True, True, False]
+    print(rl.allow("u", 11.0))                   # True  (the t=0 batch aged out)
+
+    tb = TokenBucketLimiter(rate_per_second=0.5, burst=5)
+    print([tb.allow("u", 0.0) for _ in range(5)])   # burst admitted
+    print(tb.allow("u", 1.9), tb.allow("u", 2.0))   # False True  (one token accrues at t=2)
+
+    lg = Logger(10)
+    print(lg.should_print_message(1, "foo"),
+          lg.should_print_message(3, "foo"),
+          lg.should_print_message(11, "foo"))       # True False True
+```
+
+**Java Solution:**
+
+```java
+import java.util.*;
+
+public class RateLimiter {
+
+    // ---------- 1. Sliding-window log: the textbook starting point ----------
+    /** Exactly correct, but memory is O(N) per active client. */
+    public static class SlidingWindowLogLimiter {
+        private final int limit;
+        private final double window;
+        private final Map<String, Deque<Double>> log = new HashMap<>();
+
+        public SlidingWindowLogLimiter(int limit, double windowSeconds) {
+            this.limit = limit;
+            this.window = windowSeconds;
+        }
+
+        public synchronized boolean allow(String clientId, double now) {
+            Deque<Double> q = log.computeIfAbsent(clientId, k -> new ArrayDeque<>());
+            double cutoff = now - window;
+            while (!q.isEmpty() && q.peekFirst() <= cutoff) q.pollFirst();
+            if (q.size() < limit) { q.addLast(now); return true; }
+            return false;
+        }
+
+        public int trackedFor(String clientId) {
+            return log.getOrDefault(clientId, new ArrayDeque<>()).size();
+        }
+    }
+
+    // ---------- 2. Token bucket: the production choice ----------
+    /** Per client store (tokens, lastRefill); refill lazily. O(1) memory per client. */
+    public static class TokenBucketLimiter {
+        final double rate;
+        final int burst;
+        final Map<String, double[]> state = new HashMap<>();   // client -> {tokens, lastRefill}
+
+        public TokenBucketLimiter(double ratePerSecond, int burst) {
+            this.rate = ratePerSecond;
+            this.burst = burst;
+        }
+
+        public synchronized boolean allow(String clientId, double now) {
+            return allow(clientId, now, 1.0);
+        }
+
+        public synchronized boolean allow(String clientId, double now, double cost) {
+            double[] s = state.computeIfAbsent(clientId, k -> new double[]{burst, now});
+            double tokens = Math.min(burst, s[0] + (now - s[1]) * rate);   // lazy refill
+            s[1] = now;                                                    // advance the clock
+            if (tokens >= cost) { s[0] = tokens - cost; return true; }
+            s[0] = tokens;
+            return false;
+        }
+
+        /** Would this admit, without consuming? Needed to compose limits correctly. */
+        synchronized boolean peek(String clientId, double now) {
+            double[] s = state.get(clientId);
+            if (s == null) return burst >= 1.0;
+            return Math.min(burst, s[0] + (now - s[1]) * rate) >= 1.0;
+        }
+    }
+
+    // ---------- 3. Sliding-window counter: the middle ground ----------
+    /**
+     * Two fixed-window counters blended by overlap. O(1) memory, sub-window precision --
+     * but an APPROXIMATION: it assumes the previous window's hits were uniform.
+     */
+    public static class SlidingWindowCounterLimiter {
+        private final int limit;
+        private final double window;
+        private final Map<String, long[]> state = new HashMap<>();   // {windowId, cur, prev}
+
+        public SlidingWindowCounterLimiter(int limit, double windowSeconds) {
+            this.limit = limit;
+            this.window = windowSeconds;
+        }
+
+        public synchronized boolean allow(String clientId, double now) {
+            long wid = (long) Math.floor(now / window);
+            long[] s = state.computeIfAbsent(clientId, k -> new long[]{wid, 0, 0});
+            if (wid == s[0] + 1) { s[2] = s[1]; s[1] = 0; }
+            else if (wid > s[0]) { s[2] = 0; s[1] = 0; }
+            s[0] = wid;
+
+            double overlap = 1.0 - (now % window) / window;      // share of the previous window
+            double estimate = s[2] * overlap + s[1];
+            if (estimate + 1 <= limit) { s[1]++; return true; }
+            return false;
+        }
+    }
+
+    // ---------- 4. Composite limits: reject if EITHER is exceeded ----------
+    /**
+     * Check every limiter BEFORE consuming from any of them, otherwise a rejection
+     * by the second limiter still burns a token in the first.
+     */
+    public static class CompositeLimiter {
+        static final String GLOBAL = "__global__";
+        public final TokenBucketLimiter perUser;
+        public final TokenBucketLimiter globalLimiter;
+
+        public CompositeLimiter(TokenBucketLimiter perUser, TokenBucketLimiter globalLimiter) {
+            this.perUser = perUser;
+            this.globalLimiter = globalLimiter;
+        }
+
+        public synchronized boolean allow(String clientId, double now) {
+            if (!perUser.peek(clientId, now)) return false;
+            if (!globalLimiter.peek(GLOBAL, now)) return false;
+            perUser.allow(clientId, now);
+            globalLimiter.allow(GLOBAL, now);
+            return true;
+        }
+    }
+
+    // ---------- 5. Logger variant (LC 359) ----------
+    /** Print each message at most once per window, with bounded memory. */
+    public static class Logger {
+        private final int window;
+        private final int evictEvery;
+        private int sinceEvict = 0;
+        final Map<String, Integer> lastSeen = new HashMap<>();
+
+        public Logger(int windowSeconds) { this(windowSeconds, 1000); }
+
+        public Logger(int windowSeconds, int evictEvery) {
+            this.window = windowSeconds;
+            this.evictEvery = evictEvery;
+        }
+
+        public boolean shouldPrintMessage(int timestamp, String message) {
+            if (++sinceEvict >= evictEvery) {
+                lastSeen.entrySet().removeIf(e -> timestamp - e.getValue() >= window);
+                sinceEvict = 0;
+            }
+            Integer last = lastSeen.get(message);
+            if (last == null || timestamp - last >= window) {
+                lastSeen.put(message, timestamp);
+                return true;
+            }
+            return false;
+        }
+    }
+
+    public static void main(String[] args) {
+        SlidingWindowLogLimiter rl = new SlidingWindowLogLimiter(5, 10);
+        for (int i = 0; i < 6; i++) System.out.print(rl.allow("u", 0.0) + " ");
+        System.out.println();                       // true true true true true false
+        System.out.println(rl.allow("u", 11.0));    // true (the t=0 batch aged out)
+
+        TokenBucketLimiter tb = new TokenBucketLimiter(0.5, 5);
+        for (int i = 0; i < 5; i++) tb.allow("u", 0.0);
+        System.out.println(tb.allow("u", 1.9) + " " + tb.allow("u", 2.0));   // false true
+
+        Logger lg = new Logger(10);
+        System.out.println(lg.shouldPrintMessage(1, "foo") + " "
+                + lg.shouldPrintMessage(3, "foo") + " "
+                + lg.shouldPrintMessage(11, "foo"));    // true false true
+    }
+}
+```
+
+**TypeScript Solution:**
+
+```typescript
+// ---------- 1. Sliding-window log: the textbook starting point ----------
+/** Exactly correct, but memory is O(N) per active client. */
+class SlidingWindowLogLimiter {
+    private readonly limit: number;
+    private readonly window: number;
+    readonly log = new Map<string, number[]>();
+    private readonly head = new Map<string, number>();   // avoids O(N) shift() per eviction
+
+    constructor(limit: number, windowSeconds: number) {
+        this.limit = limit;
+        this.window = windowSeconds;
+    }
+
+    allow(clientId: string, now: number): boolean {
+        if (!this.log.has(clientId)) { this.log.set(clientId, []); this.head.set(clientId, 0); }
+        const q = this.log.get(clientId)!;
+        let h = this.head.get(clientId)!;
+        const cutoff = now - this.window;
+        while (h < q.length && q[h] <= cutoff) h++;      // a request exactly T ago is out
+        if (h > 0) { q.splice(0, h); h = 0; }            // compact once, not per element
+        this.head.set(clientId, h);
+
+        if (q.length < this.limit) { q.push(now); return true; }
+        return false;
+    }
+
+    trackedFor(clientId: string): number {
+        return (this.log.get(clientId) ?? []).length;
+    }
+}
+
+// ---------- 2. Token bucket: the production choice ----------
+/** Per client store {tokens, lastRefill}; refill lazily. O(1) memory per client. */
+class TokenBucketLimiter {
+    readonly rate: number;
+    readonly burst: number;
+    readonly state = new Map<string, { tokens: number; last: number }>();
+
+    constructor(ratePerSecond: number, burst: number) {
+        this.rate = ratePerSecond;
+        this.burst = burst;
+    }
+
+    allow(clientId: string, now: number, cost = 1): boolean {
+        const s = this.state.get(clientId) ?? { tokens: this.burst, last: now };
+        const tokens = Math.min(this.burst, s.tokens + (now - s.last) * this.rate);  // lazy refill
+        if (tokens >= cost) {
+            this.state.set(clientId, { tokens: tokens - cost, last: now });
+            return true;
+        }
+        this.state.set(clientId, { tokens, last: now });    // still advance the clock
+        return false;
+    }
+
+    /** Would this admit, without consuming? Needed to compose limits correctly. */
+    peek(clientId: string, now: number): boolean {
+        const s = this.state.get(clientId);
+        if (!s) return this.burst >= 1;
+        return Math.min(this.burst, s.tokens + (now - s.last) * this.rate) >= 1;
+    }
+}
+
+// ---------- 3. Sliding-window counter: the middle ground ----------
+/**
+ * Two fixed-window counters blended by overlap. O(1) memory, sub-window precision --
+ * but an APPROXIMATION: it assumes the previous window's hits were uniform.
+ */
+class SlidingWindowCounterLimiter {
+    private readonly limit: number;
+    private readonly window: number;
+    private readonly state = new Map<string, { wid: number; cur: number; prev: number }>();
+
+    constructor(limit: number, windowSeconds: number) {
+        this.limit = limit;
+        this.window = windowSeconds;
+    }
+
+    allow(clientId: string, now: number): boolean {
+        const wid = Math.floor(now / this.window);
+        const s = this.state.get(clientId) ?? { wid, cur: 0, prev: 0 };
+        if (wid === s.wid + 1) { s.prev = s.cur; s.cur = 0; }
+        else if (wid > s.wid) { s.prev = 0; s.cur = 0; }
+        s.wid = wid;
+
+        const overlap = 1 - (now % this.window) / this.window;   // share of the previous window
+        const estimate = s.prev * overlap + s.cur;
+        const admit = estimate + 1 <= this.limit;
+        if (admit) s.cur++;
+        this.state.set(clientId, s);
+        return admit;
+    }
+}
+
+// ---------- 4. Composite limits: reject if EITHER is exceeded ----------
+/**
+ * Check every limiter BEFORE consuming from any of them, otherwise a rejection
+ * by the second limiter still burns a token in the first.
+ */
+class CompositeLimiter {
+    private static readonly GLOBAL = "__global__";
+    readonly perUser: TokenBucketLimiter;
+    readonly globalLimiter: TokenBucketLimiter;
+
+    constructor(perUser: TokenBucketLimiter, globalLimiter: TokenBucketLimiter) {
+        this.perUser = perUser;
+        this.globalLimiter = globalLimiter;
+    }
+
+    allow(clientId: string, now: number): boolean {
+        if (!this.perUser.peek(clientId, now)) return false;
+        if (!this.globalLimiter.peek(CompositeLimiter.GLOBAL, now)) return false;
+        this.perUser.allow(clientId, now);
+        this.globalLimiter.allow(CompositeLimiter.GLOBAL, now);
+        return true;
+    }
+}
+
+// ---------- 5. Logger variant (LC 359) ----------
+/** Print each message at most once per window, with bounded memory. */
+class Logger {
+    private readonly window: number;
+    private readonly evictEvery: number;
+    private sinceEvict = 0;
+    readonly lastSeen = new Map<string, number>();
+
+    constructor(windowSeconds = 10, evictEvery = 1000) {
+        this.window = windowSeconds;
+        this.evictEvery = evictEvery;
+    }
+
+    shouldPrintMessage(timestamp: number, message: string): boolean {
+        if (++this.sinceEvict >= this.evictEvery) {
+            for (const [m, ts] of this.lastSeen) {
+                if (timestamp - ts >= this.window) this.lastSeen.delete(m);
+            }
+            this.sinceEvict = 0;
+        }
+        const last = this.lastSeen.get(message);
+        if (last === undefined || timestamp - last >= this.window) {
+            this.lastSeen.set(message, timestamp);
+            return true;
+        }
+        return false;
+    }
+}
+
+// Example usage
+const rl = new SlidingWindowLogLimiter(5, 10);            // 5 requests / 10 seconds
+console.log(Array.from({ length: 6 }, () => rl.allow("u", 0)));
+// [ true, true, true, true, true, false ]
+console.log(rl.allow("u", 11));                           // true (the t=0 batch aged out)
+
+const tb = new TokenBucketLimiter(0.5, 5);
+for (let i = 0; i < 5; i++) tb.allow("u", 0);
+console.log(tb.allow("u", 1.9), tb.allow("u", 2.0));      // false true
+
+const lg = new Logger(10);
+console.log(lg.shouldPrintMessage(1, "foo"),
+            lg.shouldPrintMessage(3, "foo"),
+            lg.shouldPrintMessage(11, "foo"));            // true false true
+```
+
+**Preparation:**
+
+- Pre-write a single-machine token bucket (10 lines) and a sliding-window log (10 lines). Drill
+  switching between them mid-round when the interviewer changes the constraint.
+- Memorize the Redis Lua atomic-update pattern above: read counter, modify, conditionally
+  write — wrapped in `EVAL` to avoid the race.
+- For the SD framing, lead with the requirements clarification (per-user vs global, soft vs
+  hard limit, what to return on rejection), then the algorithm pick with a one-sentence
+  justification, then the scale path (single host → Redis-backed → sharded Redis).
+- For the 100K-QPS follow-up, name three knobs: **algorithm pick**, **state store (Redis +
+  Lua)**, and **sharding strategy**. Interviewers want all three.
+
+---
+
+## 6. Job Scheduler / ETL Pipeline System Design
+
+| | |
+|---|---|
+| **Tracks** | SWE |
+| **Tags** | distributed-systems · scheduling · etl · messaging · medium |
+| **Frequency** | Single report |
+| **Last asked** | 2026-01-26 |
+| **Stage** | onsite-system-design |
+
+HE SD slot. Design a system that schedules and executes long-running ETL jobs reliably, with
+retry and dependency semantics.
+
+**Functional Requirements:**
+
+- Register a job with a schedule (cron-like) and a dependency on other jobs.
+- Execute on time, exactly once per scheduled tick (or at-least-once with downstream
+  idempotency).
+- Track job status (pending / running / succeeded / failed / retrying).
+- Surface a job-level retry policy.
+- Provide an admin UI / API for inspection and manual triggers.
+
+**Non-Functional Requirements:**
+
+- 10K active job definitions.
+- Per-tick fan-out can spike to thousands of concurrent runs.
+- A run may last seconds to many hours.
+- Survive worker crashes mid-run.
+
+**High-Level Design:**
+
+```
+                  ┌──────────────┐
+   admin UI/API ──│ LB + cache   │
+                  └──────┬───────┘
+                         │
+   ┌─────────────────────▼──────────────────────┐
+   │  Scheduler (single leader, ZK/etcd lease)  │
+   │  • wakes per minute, finds due jobs        │
+   │  • enqueues run tasks                      │
+   │  • reaps expired worker leases             │
+   └──────┬──────────────────────────┬──────────┘
+          │ enqueue                  │ read/write
+   ┌──────▼───────────┐      ┌───────▼─────────────────────┐
+   │ Durable queue    │      │ State store (PostgreSQL)    │
+   │ (Kafka / SQS)    │      │ jobs, runs, attempts, DAG   │
+   │ (run_id,job_id,  │      └───────▲─────────────────────┘
+   │  attempt)        │              │
+   └──────┬───────────┘              │ status + heartbeat
+          │ pull                     │
+   ┌──────▼──────────────────────────┴──────────┐
+   │  Stateless worker pool (autoscale on depth)│
+   └────────────────────────────────────────────┘
+```
+
+1. **Scheduler** — stateful service holding the schedule store. Wakes per minute, computes
+   which jobs are due, enqueues run tasks. **Single-leader** (with standby failover via
+   ZooKeeper / etcd) to avoid double-scheduling.
+2. **Job queue** — durable queue (Kafka / SQS) holding `(run_id, job_id, attempt)`. Workers pull.
+3. **Worker pool** — stateless executors, autoscaled on queue depth. Each worker picks a task,
+   marks the run `running` in the durable store, executes, and marks `succeeded` / `failed`.
+4. **State store** — durable DB (PostgreSQL) recording job definitions, runs, retry counts, and
+   the dependency graph.
+5. **Dependency engine** — when a run completes, look up downstream jobs in the DAG; enqueue
+   them if their other upstreams are also satisfied.
+6. **Load balancer + cache** for the admin UI / API.
+
+**Exactly-once semantics:** true exactly-once is hard; the practical answer is **at-least-once
+enqueue + idempotent job logic**, enforced via run-id-keyed dedup at the worker boundary. The
+worker checks `state_store.run_status(run_id)`; if the run is already `running` or `succeeded`
+under another worker, it skips. Make `run_id` deterministic — `hash(job_id, scheduled_tick)` —
+so a redelivered or re-fired tick maps to the same row instead of creating a second run.
+
+**Worker-crash recovery:** the worker holds a **heartbeat lease** on its run (a TTL on the
+state-store row). On crash the lease expires, the scheduler reaps it and re-enqueues with
+`attempt += 1` up to the retry policy max. The reaped worker must not be able to commit
+afterwards — check lease ownership on completion, otherwise a worker that merely stalled (GC
+pause, network blip) will report success for a run that has already been re-executed.
+
+**Retry policy:** exponential backoff with **jitter**, capped at max-attempts. Full jitter
+matters at this fan-out: thousands of runs failing on the same downstream outage will otherwise
+retry in lockstep and knock it over again. Permanent failures move to a **dead-letter** state
+for operator review.
+
+**Dependency graph:** cycle detection at registration time (Kahn topological sort) — reject the
+registration rather than discovering the cycle at 3am. At run time, when a node finishes, only
+its **direct downstreams** are evaluated; keep the engine local rather than re-computing the
+full DAG. A downstream fires only when *every* upstream succeeded for that same tick.
+
+**Data Model (sketch):**
+
+```
+jobs(job_id PK, cron_expr, max_attempts, timeout_s, enabled, created_at)
+job_deps(upstream_id, downstream_id, PK(upstream_id, downstream_id))
+runs(run_id PK,             -- deterministic: hash(job_id, scheduled_tick)
+     job_id, scheduled_tick, attempt, status,
+     worker_id, lease_expires_at, started_at, finished_at, error)
+  INDEX (status, lease_expires_at)   -- the reaper's scan
+  INDEX (job_id, scheduled_tick)     -- dependency lookups
+```
+
+**Observability:** per-job latency histogram, success rate, and queue-depth dashboards. Alert
+on rising queue depth (workers under-provisioned) or rising failure rate.
+
+**Reference implementation of the algorithmic core** (the parts an interviewer may ask you to
+actually write — cycle detection, downstream readiness, lease reaping, retry/backoff):
+
+```python
+import random
+from collections import defaultdict, deque
+from dataclasses import dataclass
+from enum import Enum
+from typing import Optional
+
+
+class RunStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    RETRYING = "retrying"
+    DEAD_LETTER = "dead_letter"
+
+
+@dataclass
+class Job:
+    job_id: str
+    upstreams: frozenset = frozenset()
+    max_attempts: int = 3
+
+
+@dataclass
+class Run:
+    run_id: str
+    job_id: str
+    scheduled_tick: int
+    attempt: int = 1
+    status: RunStatus = RunStatus.PENDING
+    lease_expires_at: float = 0.0
+    worker_id: Optional[str] = None
+
+
+class CycleError(ValueError):
+    pass
+
+
+# ---------- Registration: reject cycles up front (Kahn topological sort) ----------
+class JobRegistry:
+    def __init__(self):
+        self.jobs: dict[str, Job] = {}
+        self.downstreams: dict[str, set[str]] = defaultdict(set)
+
+    def register(self, job: Job) -> None:
+        """Registering a job that would close a cycle must fail, not corrupt the graph."""
+        if job.job_id in self.jobs:
+            raise ValueError(f"job {job.job_id!r} already registered")
+        missing = job.upstreams - self.jobs.keys()
+        if missing:
+            raise ValueError(f"unknown upstream(s): {sorted(missing)}")
+
+        self.jobs[job.job_id] = job
+        for up in job.upstreams:
+            self.downstreams[up].add(job.job_id)
+
+        if not self._is_acyclic():
+            for up in job.upstreams:          # roll back so the registry stays usable
+                self.downstreams[up].discard(job.job_id)
+            del self.jobs[job.job_id]
+            raise CycleError(f"registering {job.job_id!r} would create a cycle")
+
+    def register_edge(self, upstream: str, downstream: str) -> None:
+        """Add a dependency between two already-registered jobs."""
+        for j in (upstream, downstream):
+            if j not in self.jobs:
+                raise ValueError(f"unknown job {j!r}")
+        job = self.jobs[downstream]
+        self.jobs[downstream] = Job(job.job_id, job.upstreams | {upstream}, job.max_attempts)
+        self.downstreams[upstream].add(downstream)
+        if not self._is_acyclic():
+            self.jobs[downstream] = job
+            self.downstreams[upstream].discard(downstream)
+            raise CycleError(f"edge {upstream!r} -> {downstream!r} would create a cycle")
+
+    def _is_acyclic(self) -> bool:
+        """Kahn: if a topological order covers every node, there is no cycle."""
+        indegree = {j: len(self.jobs[j].upstreams) for j in self.jobs}
+        queue = deque(j for j, d in indegree.items() if d == 0)
+        seen = 0
+        while queue:
+            node = queue.popleft()
+            seen += 1
+            for down in self.downstreams.get(node, ()):
+                indegree[down] -= 1
+                if indegree[down] == 0:
+                    queue.append(down)
+        return seen == len(self.jobs)
+
+    def topological_order(self) -> list[str]:
+        indegree = {j: len(self.jobs[j].upstreams) for j in self.jobs}
+        queue = deque(sorted(j for j, d in indegree.items() if d == 0))
+        order = []
+        while queue:
+            node = queue.popleft()
+            order.append(node)
+            for down in sorted(self.downstreams.get(node, ())):
+                indegree[down] -= 1
+                if indegree[down] == 0:
+                    queue.append(down)
+        if len(order) != len(self.jobs):
+            raise CycleError("graph contains a cycle")
+        return order
+
+
+# ---------- Dependency engine + at-least-once execution ----------
+class Orchestrator:
+    """
+    In-memory stand-in for (scheduler + durable state store + queue). The point is
+    the semantics: local downstream evaluation, run-id dedup, lease reaping, retries.
+    """
+
+    def __init__(self, registry: JobRegistry, lease_seconds: float = 30.0,
+                 base_backoff: float = 1.0, max_backoff: float = 60.0):
+        self.registry = registry
+        self.lease_seconds = lease_seconds
+        self.base_backoff = base_backoff
+        self.max_backoff = max_backoff
+        self.runs: dict[str, Run] = {}
+        self.queue: deque = deque()
+        self.dead_letter: list[str] = []
+
+    @staticmethod
+    def run_id(job_id: str, tick: int) -> str:
+        """Deterministic per (job, tick): the dedup key that makes re-enqueue safe."""
+        return f"{job_id}@{tick}"
+
+    def enqueue_due(self, due_job_ids: list[str], tick: int) -> list[str]:
+        """Scheduler tick. Only roots are scheduled; downstreams trigger on completion."""
+        enqueued = []
+        for job_id in due_job_ids:
+            rid = self.run_id(job_id, tick)
+            if rid in self.runs:              # idempotent: a re-fired tick must not duplicate
+                continue
+            self.runs[rid] = Run(rid, job_id, tick)
+            self.queue.append(rid)
+            enqueued.append(rid)
+        return enqueued
+
+    def claim(self, worker_id: str, now: float) -> Optional[Run]:
+        """
+        Worker pulls a task. At-least-once delivery means the same run_id can arrive
+        twice; the status check at the worker boundary is what makes that safe.
+        """
+        while self.queue:
+            rid = self.queue.popleft()
+            run = self.runs[rid]
+            if run.status in (RunStatus.RUNNING, RunStatus.SUCCEEDED, RunStatus.DEAD_LETTER):
+                continue                      # already claimed or finished: drop the duplicate
+            run.status = RunStatus.RUNNING
+            run.worker_id = worker_id
+            run.lease_expires_at = now + self.lease_seconds
+            return run
+        return None
+
+    def heartbeat(self, run_id: str, worker_id: str, now: float) -> bool:
+        """Extend the lease. A worker that lost its lease must not keep going."""
+        run = self.runs[run_id]
+        if run.worker_id != worker_id or run.status is not RunStatus.RUNNING:
+            return False
+        run.lease_expires_at = now + self.lease_seconds
+        return True
+
+    def complete(self, run_id: str, worker_id: str, tick: int) -> list[str]:
+        """Mark succeeded and enqueue any downstream whose other upstreams are satisfied."""
+        run = self.runs[run_id]
+        if run.worker_id != worker_id or run.status is not RunStatus.RUNNING:
+            return []                         # a reaped worker's late completion is ignored
+        run.status = RunStatus.SUCCEEDED
+        return self._enqueue_ready_downstreams(run.job_id, tick)
+
+    def fail(self, run_id: str, worker_id: str, now: float) -> RunStatus:
+        """Retry with exponential backoff + jitter, or dead-letter at max attempts."""
+        run = self.runs[run_id]
+        if run.worker_id != worker_id or run.status is not RunStatus.RUNNING:
+            return run.status
+        return self._retry_or_dead_letter(run, now)
+
+    def reap_expired_leases(self, now: float) -> list[str]:
+        """Scheduler-side crash recovery: an expired lease means the worker died."""
+        reaped = []
+        for run in list(self.runs.values()):
+            if run.status is RunStatus.RUNNING and run.lease_expires_at <= now:
+                self._retry_or_dead_letter(run, now)
+                reaped.append(run.run_id)
+        return reaped
+
+    def _retry_or_dead_letter(self, run: Run, now: float) -> RunStatus:
+        job = self.registry.jobs[run.job_id]
+        run.worker_id = None                  # revoke the lease: the old worker cannot commit
+        if run.attempt >= job.max_attempts:
+            run.status = RunStatus.DEAD_LETTER
+            self.dead_letter.append(run.run_id)
+            return RunStatus.DEAD_LETTER
+        run.attempt += 1
+        run.status = RunStatus.RETRYING
+        self.queue.append(run.run_id)
+        return RunStatus.RETRYING
+
+    def backoff_seconds(self, attempt: int) -> float:
+        """Exponential backoff, capped, with full jitter to avoid a retry thundering herd."""
+        capped = min(self.max_backoff, self.base_backoff * (2 ** (attempt - 1)))
+        return random.uniform(0, capped)
+
+    def _enqueue_ready_downstreams(self, finished_job_id: str, tick: int) -> list[str]:
+        """
+        Only direct downstreams are evaluated — never re-walk the whole DAG.
+        A downstream fires when EVERY upstream succeeded for this same tick.
+        """
+        enqueued = []
+        for down in sorted(self.registry.downstreams.get(finished_job_id, ())):
+            rid = self.run_id(down, tick)
+            if rid in self.runs:
+                continue
+            upstreams = self.registry.jobs[down].upstreams
+            if all(self.runs.get(self.run_id(u, tick), Run("", "", 0)).status
+                   is RunStatus.SUCCEEDED for u in upstreams):
+                self.runs[rid] = Run(rid, down, tick)
+                self.queue.append(rid)
+                enqueued.append(rid)
+        return enqueued
+
+
+# Example usage
+if __name__ == "__main__":
+    reg = JobRegistry()
+    reg.register(Job("extract"))
+    reg.register(Job("transform", frozenset({"extract"})))
+    reg.register(Job("load", frozenset({"transform"})))
+    print(reg.topological_order())          # ['extract', 'transform', 'load']
+
+    try:
+        reg.register_edge("load", "extract")
+    except CycleError as e:
+        print("rejected:", e)               # rejected: edge 'load' -> 'extract' ...
+
+    orc = Orchestrator(reg, lease_seconds=30.0)
+    print(orc.enqueue_due(["extract"], tick=100))     # ['extract@100']
+
+    run = orc.claim("worker-1", now=0.0)
+    print(orc.complete(run.run_id, "worker-1", 100))  # ['transform@100']
+
+    # worker-2 claims the next run, then crashes: the lease expires and it is retried
+    orc.claim("worker-2", now=1.0)
+    print(orc.reap_expired_leases(now=31.0))          # ['transform@100']
+    print(orc.runs["transform@100"].status,
+          orc.runs["transform@100"].attempt)          # RunStatus.RETRYING 2
+```
+
+**Behavior pinned down by the test suite:**
+
+| Scenario | Expectation |
+|----------|-------------|
+| register a back-edge (`load → extract`) | `CycleError`, and the registry is left unchanged |
+| register with an unknown upstream | `ValueError` |
+| diamond `a → {b,c} → d` | topological order `[a, b, c, d]` |
+| same tick fired twice | second call enqueues nothing |
+| queue redelivers the same `run_id` | only one worker gets a run; the duplicate is dropped |
+| fan-in: `b` finishes, `c` has not | `d` is **not** enqueued |
+| fan-in: `c` then finishes | `d` is enqueued exactly once |
+| lease expires at exactly T | reaped; `attempt` becomes 2, status `retrying` |
+| reaped worker reports success afterwards | ignored; the run stays `retrying` |
+| reaped worker sends a heartbeat | refused |
+| 3 failures with `max_attempts=3` | `dead_letter`, and the run is not reclaimable |
+| upstream dead-letters | downstream is never enqueued |
+| backoff for attempts 1-11 | always within `[0, min(max_backoff, base·2^(n-1))]`, and jittered |
+| two different ticks of the same job | independent runs; tick 1's completion only triggers tick 1's downstream |
+
+**Follow-up Questions:**
+
+1. **Long runs vs lease TTL** — a 6-hour job with a 30-second lease needs continuous
+   heartbeating; what happens if the heartbeat path is slower than the TTL under load?
+2. **Backfill** — an operator wants to re-run last month's ticks. How do you bound the fan-out
+   so a backfill does not starve live traffic?
+3. **Scheduler failover** — the leader dies mid-tick after enqueueing half the due jobs. What
+   does the standby do on takeover? (This is why `run_id` is deterministic.)
+4. **Skew** — one job's runs take 100× longer than everything else and monopolize the pool.
+   Per-job concurrency caps, or separate queues?
+5. **Cron ambiguity** — DST transitions and missed ticks while the scheduler was down: skip,
+   run once, or catch up all of them?
+
+**Preparation:**
+
+- Pre-write the four-component diagram (scheduler / queue / workers / state store).
+- Know the exactly-once → at-least-once + idempotency framing; this is the standard answer.
+- Drill the worker-crash story: heartbeat lease, scheduler reap, re-enqueue with attempt
+  counter — and mention revoking the old worker's ability to commit.
+- Pre-rehearse the dependency DAG handling and the cycle-detection step at registration.
+
+---
+
 ## References
 
-- LeetCode 146 — LRU Cache; LeetCode 460 — LFU Cache
+- LeetCode 146 — LRU Cache; LeetCode 460 — LFU Cache; LeetCode 359 — Logger Rate Limiter
+- LeetCode 215 — Kth Largest Element (the selection core of the top-K problem)
 - Hierholzer's algorithm for Eulerian paths (Part 2 of the shotgun sequencing problem)
 - RFC 4180 — the CSV conventions the in-memory DB parser has to honor
