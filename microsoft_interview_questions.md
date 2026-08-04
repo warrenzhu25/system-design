@@ -44,12 +44,14 @@ A fragment's `end_id` equals the next fragment's `start_id`. There is exactly on
 ordering using all fragments. Implement:
 
 ```
+
 String shotgunSequence(List<Sequence> sequences)
 ```
 
 Concatenate the payloads in the recovered order.
 
 ```
+
 [("AAA","AAC","AAAA"),
  ("AGG","ACC","GGGG"),
  ("AAC","ACT","TTTT"),
@@ -64,6 +66,7 @@ in either direction, and two fragments connect whenever they share any tag. A va
 still exists and still uses every fragment. Same return type — the assembled payload string.
 
 ```
+
 [("A","B","AAAA"),
  ("B","C","TTTT"),
  ("C","D","CCCC"),
@@ -164,7 +167,7 @@ def shotgun_sequence(sequences: list[Sequence]) -> str:
         parts.append(s.payload)
         tag = s.end_id
         steps += 1
-    if steps != len(sequences):        # a side cycle would strand fragments
+    if steps != len(sequences):  # a side cycle would strand fragments
         raise ValueError("fragments do not form a single chain")
     return "".join(parts)
 
@@ -182,14 +185,14 @@ def shotgun_sequence_undirected(sequences: list[Sequence]) -> str:
     # duplicate fragments stay distinct parallel edges.
     adj: dict[str, list[tuple[str, int]]] = defaultdict(list)
     degree: dict[str, int] = defaultdict(int)
-    order: list[str] = []              # first-seen tag order, for deterministic starts
+    order: list[str] = []  # first-seen tag order, for deterministic starts
     for i, s in enumerate(sequences):
         for t in (s.start_id, s.end_id):
             if t not in degree:
                 order.append(t)
             degree[t] += 1
         adj[s.start_id].append((s.end_id, i))
-        if s.start_id != s.end_id:     # a self-loop is stored once, degree counted twice
+        if s.start_id != s.end_id:  # a self-loop is stored once, degree counted twice
             adj[s.end_id].append((s.start_id, i))
 
     odd = [t for t in order if degree[t] % 2 == 1]
@@ -198,9 +201,9 @@ def shotgun_sequence_undirected(sequences: list[Sequence]) -> str:
     start = odd[0] if odd else order[0]
 
     # Iterative Hierholzer: recursion blows the stack on long chains.
-    ptr = {t: 0 for t in adj}          # per-vertex cursor keeps this O(E) overall
+    ptr = {t: 0 for t in adj}  # per-vertex cursor keeps this O(E) overall
     used = [False] * len(sequences)
-    stack: list[tuple[str, int]] = [(start, -1)]   # (vertex, edge used to arrive)
+    stack: list[tuple[str, int]] = [(start, -1)]  # (vertex, edge used to arrive)
     path: list[tuple[str, int]] = []
     while stack:
         v, _ = stack[-1]
@@ -208,7 +211,7 @@ def shotgun_sequence_undirected(sequences: list[Sequence]) -> str:
         while ptr[v] < len(lst) and used[lst[ptr[v]][1]]:
             ptr[v] += 1
         if ptr[v] == len(lst):
-            path.append(stack.pop())   # vertex exhausted: splice it into the path
+            path.append(stack.pop())  # vertex exhausted: splice it into the path
         else:
             u, eid = lst[ptr[v]]
             ptr[v] += 1
@@ -240,7 +243,7 @@ def decompose_chains(sequences: list[Sequence]) -> tuple[list[str], list[Sequenc
     def find(x: str) -> str:
         parent.setdefault(x, x)
         while parent[x] != x:
-            parent[x] = parent[parent[x]]       # path halving
+            parent[x] = parent[parent[x]]  # path halving
             x = parent[x]
         return x
 
@@ -264,7 +267,7 @@ def decompose_chains(sequences: list[Sequence]) -> tuple[list[str], list[Sequenc
         conflict = False
         for i in idxs:
             s = sequences[i]
-            if s.start_id in by_start:          # a tag starting two fragments branches
+            if s.start_id in by_start:  # a tag starting two fragments branches
                 conflict = True
             by_start[s.start_id] = i
             end_count[s.end_id] += 1
@@ -272,9 +275,12 @@ def decompose_chains(sequences: list[Sequence]) -> tuple[list[str], list[Sequenc
             ambiguous.extend(idxs)
             continue
 
-        heads = [sequences[i].start_id for i in idxs
-                 if sequences[i].start_id not in end_count]
-        if len(heads) != 1:                     # 0 heads == cycle
+        heads = [
+            sequences[i].start_id
+            for i in idxs
+            if sequences[i].start_id not in end_count
+        ]
+        if len(heads) != 1:  # 0 heads == cycle
             ambiguous.extend(idxs)
             continue
 
@@ -290,7 +296,7 @@ def decompose_chains(sequences: list[Sequence]) -> tuple[list[str], list[Sequenc
             continue
         chains.append((head_idx, "".join(parts)))
 
-    chains.sort(key=lambda p: p[0])             # report in input order of each chain's head
+    chains.sort(key=lambda p: p[0])  # report in input order of each chain's head
     return [c for _, c in chains], [sequences[i] for i in sorted(ambiguous)]
 
 
@@ -304,19 +310,40 @@ def shotgun_sequence_multi(sequences: list[Sequence]) -> list[str]:
 
 # Example usage
 if __name__ == "__main__":
-    print(shotgun_sequence([
-        Sequence("AAA", "AAC", "AAAA"), Sequence("AGG", "ACC", "GGGG"),
-        Sequence("AAC", "ACT", "TTTT"), Sequence("ACT", "AGG", "CCCC")]))
+    print(
+        shotgun_sequence(
+            [
+                Sequence("AAA", "AAC", "AAAA"),
+                Sequence("AGG", "ACC", "GGGG"),
+                Sequence("AAC", "ACT", "TTTT"),
+                Sequence("ACT", "AGG", "CCCC"),
+            ]
+        )
+    )
     # AAAATTTTCCCCGGGG
 
-    print(shotgun_sequence_undirected([
-        Sequence("A", "B", "AAAA"), Sequence("B", "C", "TTTT"),
-        Sequence("C", "D", "CCCC"), Sequence("D", "B", "GGGG")]))
+    print(
+        shotgun_sequence_undirected(
+            [
+                Sequence("A", "B", "AAAA"),
+                Sequence("B", "C", "TTTT"),
+                Sequence("C", "D", "CCCC"),
+                Sequence("D", "B", "GGGG"),
+            ]
+        )
+    )
     # AAAATTTTCCCCGGGG
 
-    print(shotgun_sequence_multi([
-        Sequence("AAA", "AAC", "AAAA"), Sequence("TGG", "TGA", "CCCC"),
-        Sequence("AAC", "ACT", "TTTT"), Sequence("TGA", "TAA", "GGGG")]))
+    print(
+        shotgun_sequence_multi(
+            [
+                Sequence("AAA", "AAC", "AAAA"),
+                Sequence("TGG", "TGA", "CCCC"),
+                Sequence("AAC", "ACT", "TTTT"),
+                Sequence("TGA", "TAA", "GGGG"),
+            ]
+        )
+    )
     # ['AAAATTTT', 'CCCCGGGG']
 ```
 
@@ -342,7 +369,7 @@ query calls. The interviewer drives 4 follow-ups in a single 60-minute round.
 
 ```python
 db = InMemoryDB(csv_string)
-db.select(["col_a", "col_b"])   # rows, in insertion order
+db.select(["col_a", "col_b"])  # rows, in insertion order
 ```
 
 The CSV header line names columns; subsequent lines are rows. Strings, quoted fields, and
@@ -379,6 +406,7 @@ demand.
 **Example:**
 
 ```
+
 Key,location,weather,temperature,data
 1,"Sunnyvale","sunny",100,"datetimestamp"
 ```
@@ -471,7 +499,7 @@ def parse_csv(text: str) -> list[list[tuple[str, bool]]]:
     def end_field():
         nonlocal buf, quoted, state
         raw = "".join(buf)
-        row.append((raw if quoted else raw.strip(), quoted))   # trim only unquoted cells
+        row.append((raw if quoted else raw.strip(), quoted))  # trim only unquoted cells
         buf, quoted, state = [], False, FIELD_START
 
     def end_row():
@@ -484,38 +512,38 @@ def parse_csv(text: str) -> list[list[tuple[str, bool]]]:
         if state == FIELD_START:
             if ch == '"':
                 quoted, state = True, IN_QUOTED
-            elif ch == ',':
+            elif ch == ",":
                 end_field()
-            elif ch == '\n':
+            elif ch == "\n":
                 end_row()
-            elif ch != '\r':
+            elif ch != "\r":
                 buf.append(ch)
                 state = IN_FIELD
         elif state == IN_FIELD:
-            if ch == ',':
+            if ch == ",":
                 end_field()
-            elif ch == '\n':
+            elif ch == "\n":
                 end_row()
-            elif ch != '\r':
+            elif ch != "\r":
                 buf.append(ch)
         elif state == IN_QUOTED:
             if ch == '"':
                 state = AFTER_QUOTE
             else:
-                buf.append(ch)          # commas and newlines are literal here
-        else:                            # AFTER_QUOTE
+                buf.append(ch)  # commas and newlines are literal here
+        else:  # AFTER_QUOTE
             if ch == '"':
-                buf.append('"')         # doubled quote -> one literal quote
+                buf.append('"')  # doubled quote -> one literal quote
                 state = IN_QUOTED
-            elif ch == ',':
+            elif ch == ",":
                 end_field()
-            elif ch == '\n':
+            elif ch == "\n":
                 end_row()
             # anything else after a closing quote is stray junk: ignore
 
     if buf or row or state != FIELD_START:
         end_row()
-    return [r for r in rows if r != [("", False)]]      # drop the trailing blank line
+    return [r for r in rows if r != [("", False)]]  # drop the trailing blank line
 
 
 def coerce(raw: str, was_quoted: bool) -> Value:
@@ -550,16 +578,17 @@ def compare(a: Value, b: Value) -> int:
         return (na > nb) - (na < nb)
     if isinstance(a, str) and isinstance(b, str):
         return (a > b) - (a < b)
-    raise TypeError(f"cannot compare {a!r} ({type(a).__name__}) "
-                    f"with {b!r} ({type(b).__name__})")
+    raise TypeError(
+        f"cannot compare {a!r} ({type(a).__name__}) with {b!r} ({type(b).__name__})"
+    )
 
 
 OPS = {
     "==": lambda c: c == 0,
     "!=": lambda c: c != 0,
-    "<":  lambda c: c < 0,
+    "<": lambda c: c < 0,
     "<=": lambda c: c <= 0,
-    ">":  lambda c: c > 0,
+    ">": lambda c: c > 0,
     ">=": lambda c: c >= 0,
 }
 
@@ -575,10 +604,12 @@ class InMemoryDB:
         self.rows = []
         for cells in parsed[1:]:
             if len(cells) != len(self.columns):
-                raise ValueError(f"row has {len(cells)} cells, "
-                                 f"header has {len(self.columns)}")
-            self.rows.append({c: coerce(raw, q)
-                              for c, (raw, q) in zip(self.columns, cells)})
+                raise ValueError(
+                    f"row has {len(cells)} cells, header has {len(self.columns)}"
+                )
+            self.rows.append(
+                {c: coerce(raw, q) for c, (raw, q) in zip(self.columns, cells)}
+            )
 
     # ---------- Parts 1-3: filter -> sort -> project ----------
     def select(self, columns=None, where=None, order_by=None) -> list[dict[str, Value]]:
@@ -590,7 +621,9 @@ class InMemoryDB:
         return [{c: r[c] for c in cols} for r in rows]
 
     # ---------- Part 4: aggregation ----------
-    def aggregate(self, aggregates, where=None, group_by=None) -> list[dict[str, Value]]:
+    def aggregate(
+        self, aggregates, where=None, group_by=None
+    ) -> list[dict[str, Value]]:
         """
         aggregates: [("SUM","age"), ("COUNT","*")]. Single streaming pass —
         groups are never materialized, only their running state.
@@ -631,7 +664,7 @@ class InMemoryDB:
             num = _numeric(v)
             if num is None:
                 raise TypeError(f"{fn} over non-numeric value {v!r}")
-            total, count = cur or (0.0, 0)      # AVG carries (total, count): no second pass
+            total, count = cur or (0.0, 0)  # AVG carries (total, count): no second pass
             return (total + num, count + 1)
         if fn == "MIN":
             return v if cur is None or compare(v, cur) < 0 else cur
@@ -680,7 +713,7 @@ class InMemoryDB:
             raise KeyError(f"unknown column {col!r}")
 
     def _matches(self, row, where) -> bool:
-        for col, op, target in where or []:      # conjunctive: every predicate must hold
+        for col, op, target in where or []:  # conjunctive: every predicate must hold
             self._require(col)
             if op not in OPS:
                 raise ValueError(f"unknown operator {op!r}")
@@ -701,13 +734,15 @@ class InMemoryDB:
                     return -c if direction.upper() == "DESC" else c
             return 0
 
-        return sorted(rows, key=cmp_to_key(cmp))   # sorted() is stable -> ties keep input order
+        return sorted(
+            rows, key=cmp_to_key(cmp)
+        )  # sorted() is stable -> ties keep input order
 
 
 # Example usage
 if __name__ == "__main__":
     csv_text = (
-        'Key,location,weather,temperature,data\n'
+        "Key,location,weather,temperature,data\n"
         '1,"Sunnyvale","sunny",100,"datetimestamp"\n'
         '2,"Seattle","rain, heavy",48,"datetimestamp"\n'
         '3,"Redmond","he said ""cold""",30,"datetimestamp"\n'
@@ -827,7 +862,7 @@ class LRUCache:
             raise ValueError("capacity must be positive")
         self.capacity = capacity
         self.map: dict = {}
-        self.head = Node()          # sentinels remove every edge case from splicing
+        self.head = Node()  # sentinels remove every edge case from splicing
         self.tail = Node()
         self.head.next = self.tail
         self.tail.prev = self.head
@@ -846,13 +881,13 @@ class LRUCache:
         node = self.map.get(key)
         if node is None:
             return -1
-        self._unlink(node)          # a read counts as a use
+        self._unlink(node)  # a read counts as a use
         self._push_front(node)
         return node.value
 
     def put(self, key, value) -> None:
         node = self.map.get(key)
-        if node is not None:        # update: refresh recency, never evict
+        if node is not None:  # update: refresh recency, never evict
             node.value = value
             self._unlink(node)
             self._push_front(node)
@@ -902,8 +937,9 @@ class ShardedLRUCache:
     def __init__(self, capacity: int, shards: int = 16):
         shards = max(1, min(shards, capacity))
         base, extra = divmod(capacity, shards)
-        self.shards = [ThreadSafeLRUCache(base + (1 if i < extra else 0))
-                       for i in range(shards)]
+        self.shards = [
+            ThreadSafeLRUCache(base + (1 if i < extra else 0)) for i in range(shards)
+        ]
 
     def _shard(self, key):
         return self.shards[hash(key) % len(self.shards)]
@@ -926,7 +962,7 @@ class LFUCache:
         self.capacity = capacity
         self.values: dict = {}
         self.freq: dict = {}
-        self.buckets: dict = defaultdict(dict)   # freq -> {key: None}, insertion-ordered
+        self.buckets: dict = defaultdict(dict)  # freq -> {key: None}, insertion-ordered
         self.min_freq = 0
 
     def _bump(self, key) -> None:
@@ -934,7 +970,7 @@ class LFUCache:
         del self.buckets[f][key]
         if not self.buckets[f]:
             del self.buckets[f]
-            if self.min_freq == f:               # the only way min_freq ever advances
+            if self.min_freq == f:  # the only way min_freq ever advances
                 self.min_freq = f + 1
         self.freq[key] = f + 1
         self.buckets[f + 1][key] = None
@@ -953,7 +989,7 @@ class LFUCache:
             self._bump(key)
             return
         if len(self.values) == self.capacity:
-            victim = next(iter(self.buckets[self.min_freq]))   # oldest in lowest bucket
+            victim = next(iter(self.buckets[self.min_freq]))  # oldest in lowest bucket
             del self.buckets[self.min_freq][victim]
             if not self.buckets[self.min_freq]:
                 del self.buckets[self.min_freq]
@@ -962,7 +998,7 @@ class LFUCache:
         self.values[key] = value
         self.freq[key] = 1
         self.buckets[1][key] = None
-        self.min_freq = 1                        # a fresh insert always resets min_freq
+        self.min_freq = 1  # a fresh insert always resets min_freq
 
 
 # Example usage
@@ -970,16 +1006,16 @@ if __name__ == "__main__":
     cache = LRUCache(2)
     cache.put(1, 1)
     cache.put(2, 2)
-    print(cache.get(1))   # 1
-    cache.put(3, 3)       # evicts key 2
-    print(cache.get(2))   # -1
+    print(cache.get(1))  # 1
+    cache.put(3, 3)  # evicts key 2
+    print(cache.get(2))  # -1
 
     lfu = LFUCache(2)
     lfu.put(1, 1)
     lfu.put(2, 2)
-    lfu.get(1)            # freq: 1 -> 2, 2 -> 1
-    lfu.put(3, 3)         # evicts key 2
-    print(lfu.get(2))     # -1
+    lfu.get(1)  # freq: 1 -> 2, 2 -> 1
+    lfu.put(3, 3)  # evicts key 2
+    print(lfu.get(2))  # -1
 ```
 
 ## 4. Top-K Largest Elements (Retain / Rank Stores)
@@ -1002,6 +1038,7 @@ business candidates by a composite key. Each runs ~15-20 minutes after the BQ se
 ### Shape 1 — Retain the K largest, original order
 
 ```
+
 input:  nums (list of ints), k (int)
 output: the original list with only the K largest values kept; smaller values
         removed, remaining elements stay in their original order
@@ -1010,6 +1047,7 @@ output: the original list with only the K largest values kept; smaller values
 ### Shape 2 — Rank stores by a composite key
 
 ```
+
 input:  list of business candidates, each with (score, distance, isOpen)
 output: the top-K candidates sorted by score descending, ties broken by
         distance ascending
@@ -1095,7 +1133,7 @@ def retain_k_largest(nums: list[int], k: int) -> list[int]:
 
     heap: list[tuple[int, int]] = []
     for i, v in enumerate(nums):
-        entry = (v, -i)                 # -i: among equal values the LATER index is "smaller"
+        entry = (v, -i)  # -i: among equal values the LATER index is "smaller"
         if len(heap) < k:
             heapq.heappush(heap, entry)
         elif entry > heap[0]:
@@ -1108,12 +1146,12 @@ def retain_k_largest(nums: list[int], k: int) -> list[int]:
 def _kth_largest(nums: list[int], k: int) -> int:
     """Iterative quickselect with a random pivot. O(N) average."""
     arr = list(nums)
-    target = len(arr) - k               # k-th largest == target-th smallest (0-indexed)
+    target = len(arr) - k  # k-th largest == target-th smallest (0-indexed)
     lo, hi = 0, len(arr) - 1
     while lo < hi:
         pivot = arr[random.randint(lo, hi)]
         i, j, p = lo, hi, lo
-        while p <= j:                   # three-way partition handles heavy duplicates
+        while p <= j:  # three-way partition handles heavy duplicates
             if arr[p] < pivot:
                 arr[i], arr[p] = arr[p], arr[i]
                 i += 1
@@ -1144,7 +1182,9 @@ def retain_k_largest_quickselect(nums: list[int], k: int) -> list[int]:
 
     threshold = _kth_largest(nums, k)
     strictly_greater = sum(1 for v in nums if v > threshold)
-    ties_to_keep = k - strictly_greater    # how many elements equal to the cutoff we may keep
+    ties_to_keep = (
+        k - strictly_greater
+    )  # how many elements equal to the cutoff we may keep
 
     out = []
     for v in nums:
@@ -1195,11 +1235,15 @@ def top_k_stores(stores: list[Store], k: int, open_only: bool = False) -> list[S
         elif entry[:3] > heap[0][:3]:
             heapq.heapreplace(heap, entry)
 
-    heap.sort(key=lambda e: (-e[0], -e[1], -e[2]))   # score desc, distance asc, index asc
+    heap.sort(
+        key=lambda e: (-e[0], -e[1], -e[2])
+    )  # score desc, distance asc, index asc
     return [e[3] for e in heap]
 
 
-def top_k_stores_oneliner(stores: list[Store], k: int, open_only: bool = False) -> list[Store]:
+def top_k_stores_oneliner(
+    stores: list[Store], k: int, open_only: bool = False
+) -> list[Store]:
     """What you write if the interviewer allows the library: nlargest is stable on ties."""
     candidates = [s for s in stores if s.is_open] if open_only else stores
     return heapq.nlargest(k, candidates, key=lambda s: (s.score, -s.distance))
@@ -1207,16 +1251,18 @@ def top_k_stores_oneliner(stores: list[Store], k: int, open_only: bool = False) 
 
 # Example usage
 if __name__ == "__main__":
-    print(retain_k_largest([3, 1, 5, 2, 4], 3))     # [3, 5, 4]
-    print(retain_k_largest([5, 5, 5, 1], 2))        # [5, 5]   (exactly K)
-    print(retain_k_largest_all_ties([5, 5, 5, 1], 2))   # [5, 5, 5]   (all ties)
+    print(retain_k_largest([3, 1, 5, 2, 4], 3))  # [3, 5, 4]
+    print(retain_k_largest([5, 5, 5, 1], 2))  # [5, 5]   (exactly K)
+    print(retain_k_largest_all_ties([5, 5, 5, 1], 2))  # [5, 5, 5]   (all ties)
 
     stores = [
-        Store("A", 4.5, 2.0, True), Store("B", 4.9, 5.0, True),
-        Store("C", 4.5, 1.0, False), Store("D", 3.0, 0.5, True),
+        Store("A", 4.5, 2.0, True),
+        Store("B", 4.9, 5.0, True),
+        Store("C", 4.5, 1.0, False),
+        Store("D", 3.0, 0.5, True),
     ]
-    print([s.name for s in top_k_stores(stores, 3)])                    # ['B', 'C', 'A']
-    print([s.name for s in top_k_stores(stores, 3, open_only=True)])    # ['B', 'A', 'D']
+    print([s.name for s in top_k_stores(stores, 3)])  # ['B', 'C', 'A']
+    print([s.name for s in top_k_stores(stores, 3, open_only=True)])  # ['B', 'A', 'D']
 ```
 
 ## 5. Rate Limiter (Design + Implementation)
@@ -1344,7 +1390,7 @@ class SlidingWindowLogLimiter:
         with self._lock:
             q = self.log[client_id]
             cutoff = now - self.window
-            while q and q[0] <= cutoff:       # a request exactly T ago no longer counts
+            while q and q[0] <= cutoff:  # a request exactly T ago no longer counts
                 q.popleft()
             if len(q) < self.limit:
                 q.append(now)
@@ -1368,11 +1414,11 @@ class TokenBucketLimiter:
     def allow(self, client_id: str, now: float, cost: float = 1.0) -> bool:
         with self._lock:
             tokens, last = self.state.get(client_id, (float(self.burst), now))
-            tokens = min(self.burst, tokens + (now - last) * self.rate)   # lazy refill
+            tokens = min(self.burst, tokens + (now - last) * self.rate)  # lazy refill
             if tokens >= cost:
                 self.state[client_id] = (tokens - cost, now)
                 return True
-            self.state[client_id] = (tokens, now)      # still advance the clock
+            self.state[client_id] = (tokens, now)  # still advance the clock
             return False
 
 
@@ -1387,7 +1433,9 @@ class SlidingWindowCounterLimiter:
     def __init__(self, limit: int, window_seconds: float):
         self.limit = limit
         self.window = window_seconds
-        self.state: dict[str, tuple[int, int, int]] = {}   # client -> (window_id, cur, prev)
+        self.state: dict[
+            str, tuple[int, int, int]
+        ] = {}  # client -> (window_id, cur, prev)
         self._lock = threading.Lock()
 
     def allow(self, client_id: str, now: float) -> bool:
@@ -1399,7 +1447,9 @@ class SlidingWindowCounterLimiter:
             elif wid > prev_wid:
                 prev, cur = 0, 0
 
-            overlap = 1.0 - (now % self.window) / self.window   # share of the previous window
+            overlap = (
+                1.0 - (now % self.window) / self.window
+            )  # share of the previous window
             estimate = prev * overlap + cur
             if estimate + 1 <= self.limit:
                 self.state[client_id] = (wid, cur + 1, prev)
@@ -1415,7 +1465,9 @@ class CompositeLimiter:
     otherwise a rejection by the second limiter still burns a token in the first.
     """
 
-    def __init__(self, per_user: TokenBucketLimiter, global_limiter: TokenBucketLimiter):
+    def __init__(
+        self, per_user: TokenBucketLimiter, global_limiter: TokenBucketLimiter
+    ):
         self.per_user = per_user
         self.global_limiter = global_limiter
         self._lock = threading.Lock()
@@ -1470,19 +1522,23 @@ class Logger:
 
 # Example usage
 if __name__ == "__main__":
-    rl = SlidingWindowLogLimiter(5, 10)          # 5 requests / 10 seconds
+    rl = SlidingWindowLogLimiter(5, 10)  # 5 requests / 10 seconds
     print([rl.allow("u", 0.0) for _ in range(6)])
     # [True, True, True, True, True, False]
-    print(rl.allow("u", 11.0))                   # True  (the t=0 batch aged out)
+    print(rl.allow("u", 11.0))  # True  (the t=0 batch aged out)
 
     tb = TokenBucketLimiter(rate_per_second=0.5, burst=5)
-    print([tb.allow("u", 0.0) for _ in range(5)])   # burst admitted
-    print(tb.allow("u", 1.9), tb.allow("u", 2.0))   # False True  (one token accrues at t=2)
+    print([tb.allow("u", 0.0) for _ in range(5)])  # burst admitted
+    print(
+        tb.allow("u", 1.9), tb.allow("u", 2.0)
+    )  # False True  (one token accrues at t=2)
 
     lg = Logger(10)
-    print(lg.should_print_message(1, "foo"),
-          lg.should_print_message(3, "foo"),
-          lg.should_print_message(11, "foo"))       # True False True
+    print(
+        lg.should_print_message(1, "foo"),
+        lg.should_print_message(3, "foo"),
+        lg.should_print_message(11, "foo"),
+    )  # True False True
 ```
 
 ## 6. Job Scheduler / ETL Pipeline System Design
@@ -1517,6 +1573,7 @@ retry and dependency semantics.
 **High-Level Design:**
 
 ```
+
                   ┌──────────────┐
    admin UI/API ──│ LB + cache   │
                   └──────┬───────┘
@@ -1577,6 +1634,7 @@ full DAG. A downstream fires only when *every* upstream succeeded for that same 
 **Data Model (sketch):**
 
 ```
+
 jobs(job_id PK, cron_expr, max_attempts, timeout_s, enabled, created_at)
 job_deps(upstream_id, downstream_id, PK(upstream_id, downstream_id))
 runs(run_id PK,             -- deterministic: hash(job_id, scheduled_tick)
@@ -1650,7 +1708,7 @@ class JobRegistry:
             self.downstreams[up].add(job.job_id)
 
         if not self._is_acyclic():
-            for up in job.upstreams:          # roll back so the registry stays usable
+            for up in job.upstreams:  # roll back so the registry stays usable
                 self.downstreams[up].discard(job.job_id)
             del self.jobs[job.job_id]
             raise CycleError(f"registering {job.job_id!r} would create a cycle")
@@ -1661,12 +1719,16 @@ class JobRegistry:
             if j not in self.jobs:
                 raise ValueError(f"unknown job {j!r}")
         job = self.jobs[downstream]
-        self.jobs[downstream] = Job(job.job_id, job.upstreams | {upstream}, job.max_attempts)
+        self.jobs[downstream] = Job(
+            job.job_id, job.upstreams | {upstream}, job.max_attempts
+        )
         self.downstreams[upstream].add(downstream)
         if not self._is_acyclic():
             self.jobs[downstream] = job
             self.downstreams[upstream].discard(downstream)
-            raise CycleError(f"edge {upstream!r} -> {downstream!r} would create a cycle")
+            raise CycleError(
+                f"edge {upstream!r} -> {downstream!r} would create a cycle"
+            )
 
     def _is_acyclic(self) -> bool:
         """Kahn: if a topological order covers every node, there is no cycle."""
@@ -1705,8 +1767,13 @@ class Orchestrator:
     the semantics: local downstream evaluation, run-id dedup, lease reaping, retries.
     """
 
-    def __init__(self, registry: JobRegistry, lease_seconds: float = 30.0,
-                 base_backoff: float = 1.0, max_backoff: float = 60.0):
+    def __init__(
+        self,
+        registry: JobRegistry,
+        lease_seconds: float = 30.0,
+        base_backoff: float = 1.0,
+        max_backoff: float = 60.0,
+    ):
         self.registry = registry
         self.lease_seconds = lease_seconds
         self.base_backoff = base_backoff
@@ -1725,7 +1792,7 @@ class Orchestrator:
         enqueued = []
         for job_id in due_job_ids:
             rid = self.run_id(job_id, tick)
-            if rid in self.runs:              # idempotent: a re-fired tick must not duplicate
+            if rid in self.runs:  # idempotent: a re-fired tick must not duplicate
                 continue
             self.runs[rid] = Run(rid, job_id, tick)
             self.queue.append(rid)
@@ -1740,8 +1807,12 @@ class Orchestrator:
         while self.queue:
             rid = self.queue.popleft()
             run = self.runs[rid]
-            if run.status in (RunStatus.RUNNING, RunStatus.SUCCEEDED, RunStatus.DEAD_LETTER):
-                continue                      # already claimed or finished: drop the duplicate
+            if run.status in (
+                RunStatus.RUNNING,
+                RunStatus.SUCCEEDED,
+                RunStatus.DEAD_LETTER,
+            ):
+                continue  # already claimed or finished: drop the duplicate
             run.status = RunStatus.RUNNING
             run.worker_id = worker_id
             run.lease_expires_at = now + self.lease_seconds
@@ -1760,7 +1831,7 @@ class Orchestrator:
         """Mark succeeded and enqueue any downstream whose other upstreams are satisfied."""
         run = self.runs[run_id]
         if run.worker_id != worker_id or run.status is not RunStatus.RUNNING:
-            return []                         # a reaped worker's late completion is ignored
+            return []  # a reaped worker's late completion is ignored
         run.status = RunStatus.SUCCEEDED
         return self._enqueue_ready_downstreams(run.job_id, tick)
 
@@ -1782,7 +1853,7 @@ class Orchestrator:
 
     def _retry_or_dead_letter(self, run: Run, now: float) -> RunStatus:
         job = self.registry.jobs[run.job_id]
-        run.worker_id = None                  # revoke the lease: the old worker cannot commit
+        run.worker_id = None  # revoke the lease: the old worker cannot commit
         if run.attempt >= job.max_attempts:
             run.status = RunStatus.DEAD_LETTER
             self.dead_letter.append(run.run_id)
@@ -1808,8 +1879,11 @@ class Orchestrator:
             if rid in self.runs:
                 continue
             upstreams = self.registry.jobs[down].upstreams
-            if all(self.runs.get(self.run_id(u, tick), Run("", "", 0)).status
-                   is RunStatus.SUCCEEDED for u in upstreams):
+            if all(
+                self.runs.get(self.run_id(u, tick), Run("", "", 0)).status
+                is RunStatus.SUCCEEDED
+                for u in upstreams
+            ):
                 self.runs[rid] = Run(rid, down, tick)
                 self.queue.append(rid)
                 enqueued.append(rid)
@@ -1822,24 +1896,25 @@ if __name__ == "__main__":
     reg.register(Job("extract"))
     reg.register(Job("transform", frozenset({"extract"})))
     reg.register(Job("load", frozenset({"transform"})))
-    print(reg.topological_order())          # ['extract', 'transform', 'load']
+    print(reg.topological_order())  # ['extract', 'transform', 'load']
 
     try:
         reg.register_edge("load", "extract")
     except CycleError as e:
-        print("rejected:", e)               # rejected: edge 'load' -> 'extract' ...
+        print("rejected:", e)  # rejected: edge 'load' -> 'extract' ...
 
     orc = Orchestrator(reg, lease_seconds=30.0)
-    print(orc.enqueue_due(["extract"], tick=100))     # ['extract@100']
+    print(orc.enqueue_due(["extract"], tick=100))  # ['extract@100']
 
     run = orc.claim("worker-1", now=0.0)
     print(orc.complete(run.run_id, "worker-1", 100))  # ['transform@100']
 
     # worker-2 claims the next run, then crashes: the lease expires and it is retried
     orc.claim("worker-2", now=1.0)
-    print(orc.reap_expired_leases(now=31.0))          # ['transform@100']
-    print(orc.runs["transform@100"].status,
-          orc.runs["transform@100"].attempt)          # RunStatus.RETRYING 2
+    print(orc.reap_expired_leases(now=31.0))  # ['transform@100']
+    print(
+        orc.runs["transform@100"].status, orc.runs["transform@100"].attempt
+    )  # RunStatus.RETRYING 2
 ```
 
 **Behavior pinned down by the test suite:**
