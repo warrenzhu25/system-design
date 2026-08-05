@@ -2,6 +2,8 @@
 
 > VLDB 2025 Best Industry Paper — structured reading notes
 
+Full paper content: [Markdown conversion](../original/ursa-vldb-2025.md)
+
 ## Paper information
 
 - **Authors:** Matteo Merli, Sijie Guo, Penghui Li, Hang Chen, and Neng Lu
