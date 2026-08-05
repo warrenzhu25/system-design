@@ -12,6 +12,12 @@ HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*$", re.MULTILINE)
 MARKDOWN_FORMATTING = re.compile(r"[*_`\[\]]")
 NON_SLUG_CHARACTER = re.compile(r"[^a-z0-9 -]")
 
+DEFAULT_TITLE = "Database Systems Papers"
+DEFAULT_SUBTITLE = (
+    "Combined text-only Markdown volume. Images and diagrams are omitted; "
+    "the source PDFs remain authoritative."
+)
+
 
 def paper_title(markdown: str, source: Path) -> str:
     """Return a readable title from the first heading or filename."""
@@ -27,7 +33,12 @@ def slugify(value: str) -> str:
     return re.sub(r"[ -]+", "-", value).strip("-")
 
 
-def merge_markdown(source_directory: Path, output: Path) -> None:
+def merge_markdown(
+    source_directory: Path,
+    output: Path,
+    title: str = DEFAULT_TITLE,
+    subtitle: str = DEFAULT_SUBTITLE,
+) -> None:
     """Merge source Markdown files in filename order, excluding the output."""
     output_path = output.resolve()
     sources = [
@@ -41,8 +52,8 @@ def merge_markdown(source_directory: Path, output: Path) -> None:
     papers = []
     for source in sources:
         markdown = source.read_text(encoding="utf-8").strip()
-        title = paper_title(markdown, source)
-        papers.append((title, markdown))
+        heading = paper_title(markdown, source)
+        papers.append((heading, markdown))
 
     contents = [
         f"- [{title}](#paper-{slugify(title)})"
@@ -54,10 +65,9 @@ def merge_markdown(source_directory: Path, output: Path) -> None:
     ]
     merged = "\n".join(
         [
-            "# Database Systems Papers",
+            f"# {title}",
             "",
-            "> Combined text-only Markdown volume. Images and diagrams are omitted; "
-            "the source PDFs remain authoritative.",
+            f"> {subtitle}",
             "",
             "## Contents",
             "",
@@ -81,12 +91,14 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("original/all-papers.md"),
     )
+    parser.add_argument("--title", default=DEFAULT_TITLE)
+    parser.add_argument("--subtitle", default=DEFAULT_SUBTITLE)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    merge_markdown(args.source, args.output)
+    merge_markdown(args.source, args.output, args.title, args.subtitle)
     print(f"Merged Markdown papers into {args.output}")
 
 

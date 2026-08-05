@@ -37,6 +37,40 @@ class MergeMarkdownTest(unittest.TestCase):
         self.assertIn("- [Beta](#paper-beta)", result)
         self.assertEqual(result.count("## Paper: "), 2)
 
+    def test_uses_default_title_and_subtitle(self):
+        merger = load_merge_module()
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "alpha.md").write_text("# Alpha\n\nAlpha text.\n", encoding="utf-8")
+            output = source / "all-papers.md"
+
+            merger.merge_markdown(source, output)
+            result = output.read_text(encoding="utf-8")
+
+        self.assertTrue(result.startswith("# Database Systems Papers\n"))
+        self.assertIn("> Combined text-only Markdown volume.", result)
+
+    def test_overrides_title_and_subtitle(self):
+        merger = load_merge_module()
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "alpha.md").write_text("# Alpha\n\nAlpha text.\n", encoding="utf-8")
+            output = source / "all-notes.md"
+
+            merger.merge_markdown(
+                source,
+                output,
+                title="Reading Notes",
+                subtitle="Study aids, not substitutes for the papers.",
+            )
+            result = output.read_text(encoding="utf-8")
+
+        self.assertTrue(result.startswith("# Reading Notes\n"))
+        self.assertIn("> Study aids, not substitutes for the papers.", result)
+        self.assertNotIn("Database Systems Papers", result)
+
 
 if __name__ == "__main__":
     unittest.main()
