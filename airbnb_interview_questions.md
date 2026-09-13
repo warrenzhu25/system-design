@@ -479,6 +479,30 @@ print(find_split_stays(listings, 3, 11))
 # Output: [('B', 'C')]
 ```
 
+**Alternative Approach — Bitmask (when only two specific listings are given):**
+When the question is narrowed to exactly two named listings (rather than searching over all pairs), each
+listing's availability over the requested date range can be packed into a single integer bitmask, and
+checking a candidate split point becomes O(1) bitwise comparison instead of a set/interval comparison:
+
+```python
+def can_split_stay(days_available_a: set[int], days_available_b: set[int], n: int) -> tuple[bool, int | None]:
+    """days_available_a/b: sets of ints (day offsets, 0-indexed) each listing is free."""
+    mask_a = sum(1 << d for d in days_available_a if 0 <= d < n)
+    mask_b = sum(1 << d for d in days_available_b if 0 <= d < n)
+
+    full = (1 << n) - 1
+    for k in range(n + 1):
+        prefix_needed = (1 << k) - 1          # bits [0, k) — days covered by listing A
+        suffix_needed = full ^ prefix_needed   # bits [k, n) — days covered by listing B
+        if (mask_a & prefix_needed) == prefix_needed and (mask_b & suffix_needed) == suffix_needed:
+            return True, k
+    return False, None
+```
+Same O(n) split-point search as above, but O(1) per check instead of O(n) set/interval work — worth
+mentioning as a tighter alternative when the interviewer fixes the problem to two listings instead of
+searching over all pairs. Breaks down once `n` exceeds a machine word width, which is worth naming
+explicitly rather than assuming it silently.
+
 ---
 
 ## 8. Simulate Water Flow on Terrain
@@ -2007,5 +2031,124 @@ print(f"Refunds: {refunds}")
 
 ---
 
-*Total: 23 questions with Python solutions*
+## 24. System Design — In-Memory Key-Value Store
+
+**Problem Description:**
+Design an in-memory key-value store supporting `get`/`set`/`delete` with optional TTL, that can survive a
+process restart and scale beyond a single machine's memory. Reported as one of Airbnb's canonical system
+design questions.
+
+**Approach:**
+
+1. **Single-node core**: a hashmap gives O(1) `get`/`set`/`delete`. TTL is enforced via lazy expiration
+   (check expiry on read) plus a periodic active sweep, so keys nobody ever reads again don't grow memory
+   unbounded.
+2. **Durability**: an append-only write-ahead log (WAL) records every mutation, with periodic snapshots
+   of the full keyspace; on restart, replay the WAL entries since the last snapshot. This is the concrete
+   durability-vs-performance tradeoff to discuss explicitly: `fsync` on every write is safe but slow,
+   batched `fsync` is faster but leaves a small window of possible data loss.
+3. **Scaling beyond one machine**: consistent hashing shards keys across nodes so adding/removing a node
+   only remaps `~1/N` of keys; each shard is replicated (leader/follower) for availability. State plainly
+   which consistency model you're offering (eventual vs. strong) and why that's the right tradeoff for a
+   generic KV store.
+
+**Key Technical Areas:**
+- Lazy vs. active TTL expiration, and the memory-growth risk of lazy-only expiration
+- WAL + snapshot replay for restart durability
+- Consistent hashing for horizontal sharding, and leader/follower replication per shard
+
+**Problem Type:** System Design
+
+**Python Solution (Conceptual Implementation):**
+```python
+import time
+import threading
+
+
+class KVStore:
+    """
+    get/set/delete: O(1) amortized (ignoring the O(k) active-sweep background thread)
+    """
+
+    def __init__(self, sweep_interval_seconds: float = 5.0):
+        self._data: dict[str, object] = {}
+        self._expires_at: dict[str, float] = {}
+        self._lock = threading.Lock()
+        self._wal: list[tuple] = []  # append-only; a real impl fsyncs this to disk
+
+    def set(self, key: str, value: object, ttl_seconds: float | None = None) -> None:
+        with self._lock:
+            self._wal.append(("SET", key, value, ttl_seconds, time.time()))
+            self._data[key] = value
+            if ttl_seconds is not None:
+                self._expires_at[key] = time.time() + ttl_seconds
+            else:
+                self._expires_at.pop(key, None)
+
+    def get(self, key: str) -> object | None:
+        with self._lock:
+            if self._is_expired(key):
+                self._evict(key)
+                return None
+            return self._data.get(key)
+
+    def delete(self, key: str) -> None:
+        with self._lock:
+            self._wal.append(("DELETE", key, None, None, time.time()))
+            self._evict(key)
+
+    def _is_expired(self, key: str) -> bool:
+        expiry = self._expires_at.get(key)
+        return expiry is not None and time.time() >= expiry
+
+    def _evict(self, key: str) -> None:
+        self._data.pop(key, None)
+        self._expires_at.pop(key, None)
+
+    def active_sweep(self) -> None:
+        """Periodic background pass to reclaim memory from keys nobody reads again."""
+        with self._lock:
+            expired = [k for k in self._expires_at if self._is_expired(k)]
+            for k in expired:
+                self._evict(k)
+
+    def replay_wal(self, wal_entries: list[tuple]) -> None:
+        """Rebuild state from a WAL (since the last snapshot) after a restart."""
+        for op, key, value, ttl_seconds, _ts in wal_entries:
+            if op == "SET":
+                self.set(key, value, ttl_seconds)
+            elif op == "DELETE":
+                self.delete(key)
+```
+
+---
+
+## 25. Behavioral — Core Values Screen & Code Review Round
+
+**Problem Description:**
+Airbnb runs a standalone core-values evaluation as a significant filtering mechanism, separate from the
+technical rounds — a harder gate than most companies' behavioral rounds, built around Airbnb's specific
+stated values (e.g. "Be a Host," "Embrace the Adventure," "Be a Cereal Entrepreneur"). Airbnb also runs a
+distinct "Code Review" round that evaluates how constructively and specifically a candidate gives feedback
+on someone else's code, separate from raw coding ability.
+
+**Approach:**
+
+1. **Core Values Screen**: look up Airbnb's actual current stated values before the interview, and prepare
+   at least one concrete story mapped to two or more of them. Generic "I'm collaborative and hardworking"
+   answers are exactly what this round is designed to filter out — specificity is the signal being scored.
+2. **Code Review Round**: prepare to review someone else's code (not write your own) and give feedback
+   that is kind, specific, and actionable — call out both correctness issues and readability/maintainability
+   concerns, and frame feedback as questions/suggestions rather than directives where the intent is
+   ambiguous.
+
+**Key Technical Areas:**
+- Values-alignment interviewing as a hard gate, not just a soft-skills check
+- Giving structured, specific, non-defensive code review feedback
+
+**Problem Type:** Behavioral / Culture Fit
+
+---
+
+*Total: 25 questions with Python solutions*
 *Last updated: 2026-04-02*

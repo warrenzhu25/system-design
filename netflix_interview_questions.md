@@ -57,6 +57,9 @@ Source: https://www.1point3acres.com/interview/problems/company/netflix
 36. [Error Rate Monitor](#16-error-rate-monitor)
 37. [Spam Email Detection](#28-spam-email-detection)
 
+### Behavioral (1)
+38. [Culture & Communication](#38-culture--communication-behavioral)
+
 ---
 
 ## 1. Homepage Title Deduplication
@@ -679,6 +682,9 @@ For `n = 3, relations = [[1,3], [2,3]]`:
 
 4. **Time complexity?**
    - O(V + E) where V = n courses and E = number of relations. Each course and relation is processed exactly once.
+
+5. **Reported variant: return *all* valid orderings, not just one/the minimum semester count?**
+   - Backtrack instead of a single-pass BFS: at each step, branch over every currently-available course (in-degree 0 and not yet visited), recurse, then undo. This is exponential — say so explicitly and discuss bounding it (return the first K, or only run it when the graph is small/sparse). The BFS-layer grouping used above for "minimum semesters" is exactly the "parallel scheduling" answer for this variant too: each layer is a set of courses that can run concurrently, directly analogous to a DAG task scheduler.
 
 ### Complexity Analysis
 
@@ -3039,6 +3045,23 @@ class BatchedCapUpdater:
 | Counter Strategy | Per-window keys | Automatic expiration, no cleanup needed |
 | Consistency | Eventual | Slight over-delivery acceptable vs latency |
 | Local Cache | Yes, short TTL | Reduce Redis calls for hot users |
+
+### Rate-Limiting Algorithm Choice
+
+The per-window Redis key above is a **fixed-window counter** — simplest to implement, but it can
+allow up to 2x the intended rate in a burst straddling a window boundary. Know the alternatives cold,
+since interviewers commonly probe this tradeoff directly:
+
+| Algorithm | Accuracy | Memory | Notes |
+|---|---|---|---|
+| Fixed window counter | Approximate (boundary burst) | O(1) per key | What this design uses — simple, cheap, good enough given the stated 1-2% over-delivery tolerance |
+| Sliding window log | Exact | O(requests in window) | Stores a timestamp per impression; too much memory at this scale |
+| Sliding window counter | Good approximation | O(1) per key | Weights the previous window's count by overlap fraction; fixes the boundary-burst problem cheaply |
+| Token bucket | Smooths bursts | O(1) per key | Standard choice for outbound-facing rate limiters (APIs); less natural fit for a pure "N per window" ad cap |
+
+`INCR` + `EXPIRE` (or a single Lua script for atomicity, avoiding a race between the two commands)
+is what makes the fixed/sliding-window-counter approaches a one-round-trip operation in Redis — this
+is the implementation detail worth naming explicitly, not just the algorithm choice.
 
 ### Handling Edge Cases
 
@@ -6417,6 +6440,30 @@ def longestPalindromeDP(s: str) -> str:
 
 ---
 
+## 38. Culture & Communication (Behavioral)
+
+**Type:** Behavioral
+
+**What it's assessing:** Netflix is famous for its "Freedom & Responsibility" culture — behavioral
+questions probe whether you exercise good independent judgment rather than needing heavy
+process/oversight, and whether you communicate directly.
+
+**Prep:** Favor stories where you made a real judgment call with incomplete information and owned the
+outcome, over stories where you simply followed an established process correctly. Practice being
+direct and specific rather than diplomatically vague — Netflix's culture explicitly rewards candor.
+
+### Interview Questions
+
+1. **Tell me about a time you made a decision without waiting for consensus.**
+   - Look for: clear reasoning under uncertainty, ownership of the outcome (good or bad), and why
+     waiting would have cost more than deciding.
+
+2. **Describe a time you gave a colleague or manager direct, potentially unwelcome feedback.**
+   - Look for: specificity over diplomacy — Netflix's "candor" value rewards being direct and
+     respectful simultaneously, not softened to the point of being unclear.
+
+---
+
 ## Summary by Category
 
 | Category | Count | Questions |
@@ -6427,8 +6474,9 @@ def longestPalindromeDP(s: str) -> str:
 | Data Structures | 6 | LRU Cache, Merge K Sorted Lists, Versioned File System, Auto-Expire Cache, Music Playlist, Homepage Deduplication |
 | Concurrency | 2 | Countdown Latch, Timer Function |
 | ML & Analytics | 2 | Error Rate Monitor, Spam Email Detection |
+| Behavioral | 1 | Culture & Communication |
 
-**Total: 37 questions**
+**Total: 38 questions**
 
 ---
 

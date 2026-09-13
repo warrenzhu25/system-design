@@ -19,14 +19,16 @@
 12. [Order Batching](#12-order-batching)
 13. [Validate Shopping Cart](#13-validate-shopping-cart)
 14. [Maximize Total Profit by Assigning Chefs to Dishes](#14-maximize-total-profit-by-assigning-chefs-to-dishes)
+15. [Circuit Breaker for a Flaky Downstream API](#15-circuit-breaker-for-a-flaky-downstream-api)
+16. [AI-Collaboration Coding Round](#16-ai-collaboration-coding-round)
 
 **System Design**
-15. [Restaurant & Dish Ranking / Search](#15-system-design--restaurant--dish-ranking--search)
-16. [Idempotent Payment & Refund Processing](#16-system-design--idempotent-payment--refund-processing)
-17. [Real-Time Order Status Notifications (Fan-Out)](#17-system-design--real-time-order-status-notifications-fan-out)
+17. [Restaurant & Dish Ranking / Search](#17-system-design--restaurant--dish-ranking--search)
+18. [Idempotent Payment & Refund Processing](#18-system-design--idempotent-payment--refund-processing)
+19. [Real-Time Order Status Notifications (Fan-Out)](#19-system-design--real-time-order-status-notifications-fan-out)
 
 **Behavioral**
-18. [Behavioral Themes](#18-behavioral-themes)
+20. [Behavioral Themes](#20-behavioral-themes)
 
 ---
 
@@ -179,6 +181,13 @@ class DasherPayCalculator:
    keep `open_orders` as durable state; price and emit each interval as soon as it closes.
 3. How do you unit test the peak-window splitting in isolation from the event state machine? →
    expose `_price_interval` as pure/testable, feed it interval fixtures directly.
+4. Some orders carry a flat "guarantee" — e.g., an order canceled more than 10 minutes after acceptance
+   still owes the dasher a flat minimum payout even if computed active-time pay would be less, and some
+   orders carry an additional flat promo bonus paid on completion (not prorated across intervals) → treat
+   both as separate additive terms resolved at the order's terminal event: `pay = max(interval_pay,
+   guarantee_floor)` for a late cancellation, and `pay = interval_pay + promo_bonus` for a completed one.
+   Keep this resolution logic outside `_price_interval`, which should stay a pure per-interval pricing
+   function.
 
 ---
 
@@ -1287,7 +1296,139 @@ def max_profit_assignment(requirement: list[int], profit: list[int],
 
 ---
 
-## 15. System Design — Restaurant & Dish Ranking / Search
+## 15. Circuit Breaker for a Flaky Downstream API
+
+**Problem Statement:**
+Design a client wrapper around a flaky third-party HTTP API (e.g., a menu-sync or fraud-check provider)
+that implements a circuit breaker: after too many consecutive failures, stop calling the real API for a
+cooldown period (fail fast instead of piling up timeouts), then allow a single trial request through to
+test recovery before fully closing the circuit again.
+
+**Requirements:**
+- Three states: `CLOSED` (normal, calls pass through), `OPEN` (failing fast, no real calls), `HALF_OPEN`
+  (exactly one trial call allowed).
+- Trip to `OPEN` after `failure_threshold` consecutive failures.
+- After `cooldown_seconds` in `OPEN`, transition to `HALF_OPEN` and allow one call through.
+- A `HALF_OPEN` success closes the circuit; a `HALF_OPEN` failure reopens it (and resets the cooldown).
+
+**Test Cases:**
+
+| Scenario | Expectation |
+|---|---|
+| Fewer than `failure_threshold` consecutive failures | stays `CLOSED`, calls keep passing through |
+| `failure_threshold` consecutive failures | trips to `OPEN` |
+| Call attempted while `OPEN`, before cooldown elapses | raises `CircuitOpenError` without calling `fn` |
+| Call attempted while `OPEN`, after cooldown elapses | transitions to `HALF_OPEN`, allows exactly one real call |
+| `HALF_OPEN` trial call succeeds | transitions to `CLOSED`, failure counter resets |
+| `HALF_OPEN` trial call fails | transitions back to `OPEN`, cooldown restarts |
+
+**Key Insights:**
+1. `HALF_OPEN` must allow exactly one trial call, not a burst — letting multiple requests through the
+   moment the cooldown expires would immediately re-trigger the breaker under sustained load (a thundering
+   herd against a service that's still recovering).
+2. State transitions and the failure counter need to be guarded by a lock if this client is shared across
+   concurrent request handlers — two threads racing on `_record_failure` can otherwise miscount.
+3. A raw consecutive-failure count is brittle for a bursty API (one failure in a sea of successes shouldn't
+   trip it); a rolling error-rate window is the more production-realistic threshold, worth naming as a
+   follow-up even if the base implementation uses a simple counter.
+
+**Python Solution:**
+```python
+import time
+from enum import Enum
+
+
+class State(Enum):
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+
+
+class CircuitOpenError(Exception):
+    pass
+
+
+class CircuitBreaker:
+    """
+    Time:  O(1) per call
+    Space: O(1)
+    """
+
+    def __init__(self, failure_threshold=5, cooldown_seconds=30):
+        self.failure_threshold = failure_threshold
+        self.cooldown_seconds = cooldown_seconds
+        self.state = State.CLOSED
+        self.consecutive_failures = 0
+        self.opened_at = None
+
+    def call(self, fn, *args, **kwargs):
+        if self.state == State.OPEN:
+            if time.monotonic() - self.opened_at >= self.cooldown_seconds:
+                self.state = State.HALF_OPEN
+            else:
+                raise CircuitOpenError("circuit open, failing fast")
+
+        try:
+            result = fn(*args, **kwargs)
+        except Exception:
+            self._record_failure()
+            raise
+        else:
+            self._record_success()
+            return result
+
+    def _record_failure(self):
+        self.consecutive_failures += 1
+        if self.state == State.HALF_OPEN or self.consecutive_failures >= self.failure_threshold:
+            self.state = State.OPEN
+            self.opened_at = time.monotonic()
+
+    def _record_success(self):
+        self.consecutive_failures = 0
+        self.state = State.CLOSED
+```
+
+**Follow-Up Questions:**
+1. Make the threshold adaptive to a bursty API → track a rolling error-rate window (e.g., failures in the
+   last N calls or last T seconds) instead of a raw consecutive-failure count.
+2. Make this thread-safe for a shared client across concurrent request handlers → guard state reads and
+   the failure/success transitions with a lock, or make the state transitions atomic compare-and-swap
+   operations.
+3. How is this different from the retry logic in Q7 (Bootstrap API)? → they're complementary, not
+   redundant: retry handles transient single-call failures, the circuit breaker prevents *retrying at all*
+   once a downstream is clearly down — a real client typically wraps a circuit breaker around a
+   retry-with-backoff call, not the other way around.
+
+---
+
+## 16. AI-Collaboration Coding Round
+
+**What It Is:**
+Some DoorDash coding rounds explicitly allow (and expect) use of an AI coding assistant during the
+interview. The round is evaluating how you *collaborate* with the tool, not whether you can avoid it: you
+get a moderately complex, underspecified task and are expected to use the assistant to accelerate
+scaffolding while still driving the design, catching wrong or hallucinated suggestions, and being able to
+explain and modify every line of the final code.
+
+**What It's Assessing:**
+- Whether you critically review AI-generated output rather than accepting it silently.
+- Whether you can catch a subtly wrong or over-engineered suggestion in real time.
+- Whether you still own the core algorithm and design decisions, using the tool for boilerplate
+  (test scaffolding, data loading, JSON parsing) rather than the trickiest logic.
+
+**Prep:**
+- Practice narrating your prompts out loud, and narrate your *review* of what comes back just as
+  explicitly — interviewers are specifically watching for whether you catch a wrong suggestion, not just
+  whether you produce working code.
+- Don't let the tool write the core algorithm for a problem the interviewer wants to see you reason
+  through (e.g., the trickiest part of a Dasher Pay–style state machine); let it handle the parts that
+  aren't the point of the exercise.
+- Have a plan for what you do when a suggestion is subtly wrong — say so out loud, correct it, and briefly
+  explain why, rather than silently accepting or silently rewriting it without comment.
+
+---
+
+## 17. System Design — Restaurant & Dish Ranking / Search
 
 **Problem Statement:**
 The recurring system-design favorite on the DoorDash loop. Design the service that ranks and returns
@@ -1301,6 +1442,8 @@ time of day, and past order history.
   business constraints (promoted placements, diversity of cuisine).
 - Personalize using the consumer's order history and affinities.
 - Freshness: a restaurant that just closed or went out-of-stock on its top items should drop out quickly.
+- Accept user-submitted reviews/ratings that roll up into each restaurant's aggregate score, which in turn
+  feeds the ranking signal above.
 
 **Non-Functional Requirements:**
 - p99 latency budget in the tens of milliseconds for the ranking call itself (feed load time matters a
@@ -1350,10 +1493,15 @@ ranking_logs(request_id, consumer_id, candidates[], scores[], final_order[], ts)
    discuss the latency/cost tradeoff explicitly.
 3. Cold-start for a brand-new restaurant with no history → fall back to content-based features
    (cuisine, price tier, location) until enough interaction data accumulates for the learned embedding.
+4. How do you handle review-submission writes reliably? → dedupe retried submissions via a client-supplied
+   idempotency key (a flaky mobile network shouldn't let one review double-count); maintain each
+   restaurant's aggregate rating incrementally (running sum/count updated on each new review) rather than
+   recomputing from full review history on every write, and re-rank in a hybrid fashion — real-time for a
+   review large enough to swing the score meaningfully, batch (e.g. hourly) otherwise.
 
 ---
 
-## 16. System Design — Idempotent Payment & Refund Processing
+## 18. System Design — Idempotent Payment & Refund Processing
 
 **Problem Statement:**
 Design the payment and refund pipeline for an order: charge the consumer on order placement, and issue
@@ -1414,10 +1562,15 @@ refunds(refund_id PK, payment_id, amount, reason, idempotency_key UNIQUE, status
 3. Refund initiated twice from two different code paths (support tooling + automated fraud reversal) at
    the same time → the conditional state transition (`WHERE status = 'CAPTURED'`) plus the refund's own
    idempotency key ensures only one actually executes; the second observes the already-updated state.
+4. A secondary charge tied to the order (e.g., a portion of the total donated to a charity partner)
+   settles asynchronously with the charity/processor over multiple days rather than confirming
+   immediately → model it as its own row through the same `PENDING → CONFIRMED/FAILED` state machine as
+   the primary charge, and add a scheduled sweep job that retries or escalates anything still `PENDING`
+   past the expected settlement window (e.g. 3 days) instead of waiting on a webhook indefinitely.
 
 ---
 
-## 17. System Design — Real-Time Order Status Notifications (Fan-Out)
+## 19. System Design — Real-Time Order Status Notifications (Fan-Out)
 
 **Problem Statement:**
 Design the system that pushes real-time order status updates (`order placed`, `restaurant confirmed`,
@@ -1487,12 +1640,17 @@ order_latest_status(order_id, status, ts)          # for reconnect/REST fetch
 
 ---
 
-## 18. Behavioral Themes
+## 20. Behavioral Themes
 
 DoorDash's behavioral round is a standard STAR-format interview but consistently probes a few company
 values — see [`behavioral_interview.md`](./behavioral_interview.md) for general STAR-method prep. Themes
 specific to DoorDash's loop:
 
+- **Conflict and disagreement under deadline pressure**: expect at least one question specifically about
+  disagreement or conflict resolution with a peer, manager, or cross-functional partner (product/ops), on
+  top of the usual ownership/impact questions — DoorDash's operational, deadline-driven culture probes
+  specifically how you handle disagreement under time pressure, not just in the abstract. Have a story
+  where you come across as neither a pushover nor combative.
 - **Bias for action / urgency under ambiguity**: a time you shipped something with incomplete
   information because waiting would've cost more than a wrong-but-correctable decision.
 - **Ownership beyond your ticket**: a time you fixed or flagged something outside your immediate scope

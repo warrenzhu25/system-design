@@ -1361,6 +1361,46 @@ getPeople(2) → 1
 *N = non-empty rooms (due to sorted set)
 **N = non-empty rooms only
 
+**Alternative: Single SortedList Keyed by Rank**
+
+Instead of a per-room linked list plus a separate non-empty-room index, encode each player's full rank
+directly as a sort key `(-room, arrival_seq, player_id)` in one `SortedList` — descending room (so higher
+room ranks first), then arrival sequence (earlier arrival ranks first within the same room). `move`
+removes the old key and inserts the new one; `getTop(k)` is a direct slice.
+
+```python
+from sortedcontainers import SortedList
+
+class GameRankedSortedList:
+    def __init__(self, n_players: int):
+        self.player_room = {p: 0 for p in range(n_players)}
+        self.arrival_seq = {p: 0 for p in range(n_players)}
+        self.room_counts_by_room = {}
+        self._clock = 0
+        self.leaderboard = SortedList((0, 0, p) for p in range(n_players))
+
+    def proceedToNextRoom(self, player_id: int) -> None:
+        """O(log m) — a single sorted-list remove + insert replaces the linked-list splice."""
+        old_room = self.player_room[player_id]
+        old_seq = self.arrival_seq[player_id]
+        self.leaderboard.remove((-old_room, old_seq, player_id))
+
+        self._clock += 1
+        new_room = old_room + 1
+        self.player_room[player_id] = new_room
+        self.arrival_seq[player_id] = self._clock
+        self.leaderboard.add((-new_room, self._clock, player_id))
+
+    def getTop(self, k: int) -> list[int]:
+        """O(k) — direct slice, no room-by-room scan needed."""
+        return [player for _, _, player in self.leaderboard[:k]]
+```
+
+Trade-off vs. the DLL-per-room design above: `getPeople(room_id)` drops from O(1) to O(m) (no per-room
+count is maintained) unless you add a separate counter array back in — so this shape is the right answer
+specifically when `getTop` dominates and per-room headcount is rare, and the DLL design is the right
+answer when both are equally hot. Say this out loud rather than presenting one as strictly better.
+
 **Simpler Phone Screen Variant (No Leaderboard):**
 
 ```python
@@ -2877,6 +2917,14 @@ def build_home_feed(user_id, cursor, limit=25):
 | Diversity | Penalize repeated creator/board/topic in one page |
 | Quality | Image quality, spam/low-quality demotion |
 
+### Real-Time Signal Ingestion
+
+User actions (click, save, hide) should influence the *next* feed request, not just tomorrow's batch
+retrain. Keep two paths alongside each other: a heavy **offline** pipeline that retrains embeddings/ranker
+weights on a daily-ish cadence, and a lightweight **online** path that streams recent actions into a
+per-user feature (e.g. "boards/topics interacted with in the last hour") which the ranker reads at request
+time. This is what makes the feed feel responsive within a single session without needing full retraining.
+
 ### Infinite Scroll & Pagination
 
 - **Cursor-based**, not offset — the cursor encodes the ranked position + a feed-session id so new pins arriving mid-scroll don't shift or duplicate results.
@@ -3313,6 +3361,11 @@ notifications(id PK, user_id, type, channel, payload, status, created_at, sent_a
 - Describe a project where you had to balance speed vs quality
 - How do you handle disagreements with teammates on technical approaches?
 - Tell me about a time you improved a system's performance significantly
+
+**What Pinterest specifically emphasizes:** reported feedback points to an unusually strong weight on
+*quantified* impact rather than narrative alone — have real numbers ready for your top 2-3 stories
+(latency improved by X%, cost reduced by $Y, adoption by Z teams) instead of purely qualitative
+descriptions of outcomes.
 
 ---
 
