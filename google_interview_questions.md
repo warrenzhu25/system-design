@@ -9,13 +9,19 @@
 2. [Accounts Merge (Union-Find)](#2-accounts-merge-union-find)
 3. [Top-K Frequent Items (Streaming)](#3-top-k-frequent-items-streaming)
 4. [Word Dictionary with Wildcard Search (Trie + DFS)](#4-word-dictionary-with-wildcard-search-trie--dfs)
+5. [Decode String (Nested Stack Decoding)](#5-decode-string-nested-stack-decoding)
+6. [3Sum (Zero-Sum Triplets)](#6-3sum-zero-sum-triplets)
+7. [Longest Increasing Subarray / Subsequence](#7-longest-increasing-subarray--subsequence)
+8. [Implement a Queue Using Two Stacks](#8-implement-a-queue-using-two-stacks)
 
 **System Design**
-5. [Retrieval-Augmented Generation (RAG)](#5-system-design--retrieval-augmented-generation-rag)
-6. [Distributed Message Queue (Kafka-Style)](#6-system-design--distributed-message-queue-kafka-style)
+9. [Retrieval-Augmented Generation (RAG)](#9-system-design--retrieval-augmented-generation-rag)
+10. [Distributed Message Queue (Kafka-Style)](#10-system-design--distributed-message-queue-kafka-style)
+11. [URL Shortener](#11-system-design--url-shortener)
+12. [Distributed Cache (Redis-Style)](#12-system-design--distributed-cache-redis-style)
 
 **Behavioral**
-7. [Behavioral Themes](#7-behavioral-themes)
+13. [Behavioral Themes](#13-behavioral-themes)
 
 ---
 
@@ -316,7 +322,310 @@ class WordDictionary:
 
 ---
 
-## 5. System Design — Retrieval-Augmented Generation (RAG)
+## 5. Decode String (Nested Stack Decoding)
+
+**Problem Statement:**
+A real, commonly-reported Google interview question (corroborated across Glassdoor and multiple
+interview-prep aggregators, not from a paywalled source). Given an encoded string with the pattern
+`k[encoded_string]` — meaning `encoded_string` repeats exactly `k` times — decode it fully. Encodings can
+nest arbitrarily deep, e.g. `3[a2[c]]`.
+
+**Example:**
+```
+Input:  "3[a2[c]]"
+Output: "accaccacc"
+
+Input:  "2[abc]3[cd]ef"
+Output: "abcabccdcdcdef"
+```
+
+**Test Cases:**
+
+| Input | Output |
+|---|---|
+| `"3[a]2[bc]"` | `"aaabcbc"` |
+| `"3[a2[c]]"` | `"accaccacc"` |
+| `"2[abc]3[cd]ef"` | `"abcabccdcdcdef"` |
+| `"abc"` (no brackets) | `"abc"` |
+| `"10[a]"` (multi-digit count) | `"aaaaaaaaaa"` |
+
+**Key Insights:**
+1. Two stacks (or one stack of `(count, partial_string)` pairs): one tracks the repeat counts seen so
+   far, the other tracks the string built up before entering each bracket level.
+2. On `[`, push the current count and the string built so far, then reset both to start accumulating the
+   bracket's contents fresh.
+3. On `]`, pop the saved count and prefix string, and append `count * current_string` onto the popped
+   prefix — this is what correctly handles arbitrary nesting depth without recursion (though a recursive
+   solution mirroring the same push/pop structure on the call stack is equally valid).
+4. Multi-digit counts (`"10[a]"`) require accumulating consecutive digit characters, not just reading one
+   digit at a time.
+
+**Python Solution:**
+```python
+def decode_string(s: str) -> str:
+    """
+    Time:  O(n * m) where m is the maximum expansion multiplier along any nesting chain
+           (dominated by the size of the final decoded output)
+    Space: O(n) for the stacks
+    """
+    count_stack: list[int] = []
+    string_stack: list[str] = []
+    current = ""
+    count = 0
+
+    for ch in s:
+        if ch.isdigit():
+            count = count * 10 + int(ch)
+        elif ch == "[":
+            count_stack.append(count)
+            string_stack.append(current)
+            count = 0
+            current = ""
+        elif ch == "]":
+            prev_count = count_stack.pop()
+            prev_string = string_stack.pop()
+            current = prev_string + current * prev_count
+        else:
+            current += ch
+
+    return current
+```
+
+**Follow-Up Questions:**
+1. What if the input can be malformed (unbalanced brackets, a count with no following `[`)? → validate
+   during the same pass: an unmatched `]` means `count_stack` is empty on pop, an unmatched `[` means the
+   stacks are non-empty at the end — raise on either.
+2. How would you decode without materializing the full expanded string (if it's astronomically large,
+   e.g. deeply nested counts)? → this becomes a "query the i-th character without expanding" problem,
+   solved by tracking expansion *lengths* (which can overflow a normal string but fit in an integer) and
+   recursing/jumping directly to the segment containing index `i`.
+
+---
+
+## 6. 3Sum (Zero-Sum Triplets)
+
+**Problem Statement:**
+A classic, widely-reported Google interview question. Given an integer array, return all unique triplets
+`[a, b, c]` such that `a + b + c == 0`. The result must not contain duplicate triplets.
+
+**Example:**
+```
+Input:  [-1, 0, 1, 2, -1, -4]
+Output: [[-1, -1, 2], [-1, 0, 1]]
+```
+
+**Test Cases:**
+
+| Input | Output |
+|---|---|
+| `[-1,0,1,2,-1,-4]` | `[[-1,-1,2],[-1,0,1]]` |
+| `[0,1,1]` | `[]` |
+| `[0,0,0]` | `[[0,0,0]]` |
+| `[0,0,0,0]` | `[[0,0,0]]` (still just one unique triplet) |
+
+**Key Insights:**
+1. Sort the array first, then fix each element in turn as the smallest of the triplet and two-pointer
+   the remaining subarray for a pair summing to `-fixed` — this turns an `O(n^3)` brute force into
+   `O(n^2)`.
+2. Skip duplicate values for the fixed element (`if i > 0 and nums[i] == nums[i-1]: continue`) and skip
+   duplicates for the two pointers after finding a match, to avoid emitting the same triplet twice.
+3. Sorting first is also what makes the two-pointer sweep possible at all — without it you'd need a
+   hashset-based approach that's harder to dedupe cleanly.
+
+**Python Solution:**
+```python
+def three_sum(nums: list[int]) -> list[list[int]]:
+    """
+    Time:  O(n^2)
+    Space: O(1) extra beyond the output (O(n) or O(log n) for the sort, depending on implementation)
+    """
+    nums = sorted(nums)
+    n = len(nums)
+    result = []
+
+    for i in range(n - 2):
+        if i > 0 and nums[i] == nums[i - 1]:
+            continue
+        if nums[i] > 0:
+            break  # smallest element positive => no triplet can sum to zero
+
+        left, right = i + 1, n - 1
+        while left < right:
+            total = nums[i] + nums[left] + nums[right]
+            if total < 0:
+                left += 1
+            elif total > 0:
+                right -= 1
+            else:
+                result.append([nums[i], nums[left], nums[right]])
+                left += 1
+                right -= 1
+                while left < right and nums[left] == nums[left - 1]:
+                    left += 1
+                while left < right and nums[right] == nums[right + 1]:
+                    right -= 1
+
+    return result
+```
+
+**Follow-Up Questions:**
+1. Generalize to `k`-Sum → recurse: reduce `kSum` to `(k-1)Sum` on a fixed element, bottoming out at
+   `2Sum` via two pointers on the sorted array.
+2. Return the *count* of triplets rather than the triplets themselves, at very large `n` → the two-pointer
+   approach still works, just accumulate a count instead of materializing triplets (careful to count
+   duplicate-value groups combinatorially rather than iterating each one).
+
+---
+
+## 7. Longest Increasing Subarray / Subsequence
+
+**Problem Statement:**
+A reported Google question; the exact wording (contiguous "subarray" vs. non-contiguous "subsequence")
+varies by source, so both are covered here — clarify which one is meant with the interviewer up front,
+since they have very different solutions.
+
+**Longest Increasing *Subarray*** (contiguous): return the length of the longest contiguous run of
+strictly increasing elements.
+```
+Input:  [1, 3, 5, 4, 7]
+Output: 3   # [1, 3, 5]
+```
+
+**Longest Increasing *Subsequence*** (not necessarily contiguous, classic LIS): return the length of the
+longest strictly increasing subsequence.
+```
+Input:  [10, 9, 2, 5, 3, 7, 101, 18]
+Output: 4   # [2, 3, 7, 101] (or [2, 3, 7, 18])
+```
+
+**Test Cases:**
+
+| Input | Subarray answer | Subsequence answer |
+|---|---|---|
+| `[1,3,5,4,7]` | `3` | `4` (`1,3,5,7` or `1,3,4,7`) |
+| `[5,4,3,2,1]` | `1` | `1` |
+| `[10,9,2,5,3,7,101,18]` | `3` (`3,7,101`) | `4` |
+| `[]` | `0` | `0` |
+
+**Key Insights:**
+1. The subarray version is a single `O(n)` linear scan tracking a running streak length — no DP needed,
+   since a contiguous run can't "skip back" to extend an earlier one.
+2. The subsequence version is the classic `O(n^2)` DP (`dp[i]` = length of the longest increasing
+   subsequence ending at `i`) — but the interview bar is usually the `O(n log n)` patience-sorting
+   variant: maintain a `tails` array where `tails[k]` is the smallest possible tail value of an
+   increasing subsequence of length `k+1`, and binary-search each new element's insertion point.
+3. `tails` itself is not a valid subsequence of the input — it's an auxiliary structure; don't try to read
+   the actual LIS elements off it without extra bookkeeping (a follow-up point below).
+
+**Python Solution:**
+```python
+import bisect
+
+
+def longest_increasing_subarray(nums: list[int]) -> int:
+    """
+    Time:  O(n)
+    Space: O(1)
+    """
+    if not nums:
+        return 0
+    best = cur = 1
+    for i in range(1, len(nums)):
+        cur = cur + 1 if nums[i] > nums[i - 1] else 1
+        best = max(best, cur)
+    return best
+
+
+def longest_increasing_subsequence(nums: list[int]) -> int:
+    """
+    Time:  O(n log n)
+    Space: O(n) for the tails array
+    """
+    tails: list[int] = []
+    for x in nums:
+        pos = bisect.bisect_left(tails, x)
+        if pos == len(tails):
+            tails.append(x)
+        else:
+            tails[pos] = x
+    return len(tails)
+```
+
+**Follow-Up Questions:**
+1. Reconstruct the actual longest increasing subsequence, not just its length → track, alongside `tails`,
+   a parent pointer per element pointing at the element it extended; walk parents back from the last
+   element placed at the final `tails` position.
+2. Longest *non-decreasing* subsequence (equal values allowed to extend) → change `bisect_left` to
+   `bisect_right` so equal values are treated as extending the run rather than replacing a tail.
+
+---
+
+## 8. Implement a Queue Using Two Stacks
+
+**Problem Statement:**
+A classic, widely-reported Google question. Implement a FIFO queue (`push`, `pop`, `peek`, `empty`) using
+only two stacks (LIFO structures) as the underlying storage.
+
+**Test Cases:**
+
+| Operations | Result |
+|---|---|
+| `push(1); push(2); peek()` | `1` |
+| `push(1); push(2); pop(); pop()` | `1`, then `2` |
+| `push(1); pop(); push(2); peek()` | `2` |
+| `empty()` on a fresh queue | `True` |
+
+**Key Insights:**
+1. Use an "in" stack for pushes and an "out" stack for pops/peeks. Pushing is always `O(1)` — just push
+   onto "in".
+2. On `pop`/`peek`, if "out" is empty, dump all of "in" onto "out" (reversing order so the oldest pushed
+   element ends up on top of "out") — then pop/peek from "out" as normal.
+3. This gives amortized `O(1)` per operation: each element is moved from "in" to "out" at most once over
+   its lifetime, even though a single dump can be `O(n)` in the worst case.
+
+**Python Solution:**
+```python
+class QueueWithTwoStacks:
+    """
+    push():  O(1)
+    pop()/peek(): O(1) amortized (occasional O(n) dump from in-stack to out-stack)
+    Space: O(n)
+    """
+
+    def __init__(self):
+        self._in: list[int] = []
+        self._out: list[int] = []
+
+    def push(self, x: int) -> None:
+        self._in.append(x)
+
+    def _shift(self) -> None:
+        if not self._out:
+            while self._in:
+                self._out.append(self._in.pop())
+
+    def pop(self) -> int:
+        self._shift()
+        return self._out.pop()
+
+    def peek(self) -> int:
+        self._shift()
+        return self._out[-1]
+
+    def empty(self) -> bool:
+        return not self._in and not self._out
+```
+
+**Follow-Up Questions:**
+1. Do the reverse — implement a stack using two queues → push onto one queue, then rotate all-but-the-last
+   pushed element to the back so the most recent push ends up at the front (making `pop` = dequeue).
+2. Prove the amortized `O(1)` bound formally → an amortized analysis (potential/banker's method) showing
+   each element crosses from "in" to "out" exactly once, so total moves across `n` operations is bounded
+   by `n`, not `n^2`.
+
+---
+
+## 9. System Design — Retrieval-Augmented Generation (RAG)
 
 **Problem Statement:**
 Design a retrieval-augmented generation system: given a large corpus of documents, support low-latency
@@ -380,7 +689,7 @@ vector_index: chunk_id -> embedding vector   # ANN index, sharded by corpus part
 
 ---
 
-## 6. System Design — Distributed Message Queue (Kafka-Style)
+## 10. System Design — Distributed Message Queue (Kafka-Style)
 
 **Problem Statement:**
 Design a distributed message queue (a simplified Kafka) that guarantees at-least-once delivery, supports
@@ -443,7 +752,139 @@ consumer_offsets(consumer_group, topic_name, partition_id, committed_offset)
 
 ---
 
-## 7. Behavioral Themes
+## 11. System Design — URL Shortener
+
+**Problem Statement:**
+A widely-reported, classic Google system design question. Design a service like bit.ly: given a long
+URL, generate a short, unique alias that redirects to it, at very high read (redirect) volume relative to
+writes (shortens).
+
+**Functional Requirements:**
+- `shorten(long_url) -> short_code` — generate a short, unique code for a URL.
+- `redirect(short_code) -> long_url` — resolve a short code back to its original URL with a fast HTTP
+  redirect.
+- Optional: custom aliases, expiration, click analytics.
+
+**Non-Functional Requirements:**
+- Read-heavy: redirects vastly outnumber shortens (often 100:1 or more) — the read path must be very low
+  latency and horizontally scalable.
+- Short codes must be effectively unique with no coordination bottleneck at write time.
+- High availability for redirects — a shortener outage breaks every link using it across the web.
+
+**High-Level Design:**
+1. **Code generation**: two common approaches — (a) hash the long URL (e.g., base62-encode a slice of an
+   MD5/SHA hash) and handle collisions with a retry/salt, or (b) a centralized counter (or pre-allocated
+   ranges of counter values handed out to stateless app servers) base62-encoded into a code, guaranteeing
+   uniqueness without a global lock on every request. Range-based counter allocation is the standard
+   answer for avoiding a single point of write contention.
+2. **Write path**: `shorten` allocates/derives a code, writes `(short_code -> long_url)` to the primary
+   datastore, and returns the code.
+3. **Read path**: `redirect` looks up `short_code` — this is almost entirely a cache-friendly key-value
+   lookup, so put a cache (e.g., Redis) in front of the datastore; a very large fraction of redirect
+   traffic hits a small fraction of popular links (power-law distribution), so cache hit rates are high.
+4. **Storage**: a simple key-value store or a sharded relational table keyed by `short_code` is sufficient
+   — this workload doesn't need complex joins or transactions.
+5. **Redirect mechanic**: use a 301 (permanent) redirect if analytics on each click aren't needed (browsers
+   cache it, reducing load further) or a 302 (temporary) redirect if you need every click to hit your
+   service for analytics — call out this tradeoff explicitly.
+
+**Data Model (sketch):**
+```
+urls(short_code PK, long_url, created_at, expires_at, owner_id)
+click_events(short_code, ts, referrer, user_agent)   # optional, for analytics; write-heavy, separate store
+```
+
+**Scaling & Reliability:**
+- Shard the datastore by `short_code` (e.g., consistent hashing) once it exceeds one machine.
+- Cache aggressively on the read path; a cache miss falls through to the sharded datastore.
+- Pre-allocate counter ranges per app server (e.g., server claims codes 1,000,000-1,999,999) to avoid a
+  shared counter becoming a write bottleneck, at the cost of codes not being generated in strict global
+  order (acceptable, since order doesn't matter here).
+- Replicate the datastore for read availability; a brief window of eventual consistency on a
+  just-created short code is usually acceptable (the creator can tolerate a moment's lag before their own
+  link resolves, but that's a real tradeoff to state explicitly rather than assume away).
+
+**Follow-Up Questions:**
+1. How do you prevent short-code collisions with the hash-based approach? → check-and-retry with a
+   different salt/slice on collision, or just use the counter-based approach, which structurally can't
+   collide.
+2. Support custom user-chosen aliases → same datastore, just skip code generation when a custom alias is
+   supplied and validate uniqueness against the existing table before insert.
+3. Add click analytics without slowing down the redirect path → fire-and-forget the click event onto a
+   queue (Kafka) from the redirect handler rather than writing synchronously; a separate consumer
+   aggregates analytics asynchronously.
+
+---
+
+## 12. System Design — Distributed Cache (Redis-Style)
+
+**Problem Statement:**
+A widely-reported Google system design question. Design a distributed, in-memory key-value cache (think:
+a simplified Redis/Memcached) that scales beyond one machine's memory and supports the standard
+`get`/`set`/`delete` operations plus TTL-based expiration.
+
+**Functional Requirements:**
+- `get(key)`, `set(key, value, ttl=None)`, `delete(key)`.
+- Keys automatically expire after their TTL.
+- Scale to a keyspace and read/write volume far beyond one machine.
+
+**Non-Functional Requirements:**
+- Very low latency (sub-millisecond) reads and writes — this is a cache, not a system of record.
+- High throughput per node, since the whole point of a cache is absorbing load that would otherwise hit a
+  slower backing store.
+- Tunable consistency/durability — a cache is allowed to lose data on a crash (it's re-derivable from the
+  backing store), which is exactly what makes it able to trade durability for speed.
+
+**High-Level Design:**
+1. **Sharding**: partition the keyspace across many cache nodes via consistent hashing (with virtual
+   nodes for load smoothing) — a client or a thin routing layer hashes the key to find its owning node,
+   giving `O(1)` routing without a centralized lookup on the hot path.
+2. **Per-node storage**: an in-memory hashmap per node for `O(1)` get/set; TTL expiration via a
+   combination of lazy expiration (check the timestamp on read, evict if expired) and a periodic active
+   sweep (avoid unbounded memory growth from keys nobody ever reads again).
+3. **Eviction policy**: when a node approaches its memory limit even after TTL expiration, evict under a
+   policy like LRU (approximate LRU via sampling is what real systems like Redis use, since exact LRU
+   bookkeeping on every access is itself overhead).
+4. **Replication (optional, for availability)**: each shard can have a replica; a cache miss due to a
+   crashed primary can be tolerated (it just falls through to the backing store and repopulates the
+   cache) — this is a deliberate contrast with a system-of-record, where losing the replica would be
+   unacceptable.
+5. **Client-side routing vs. proxy layer**: either the client library embeds the consistent-hash ring and
+   talks to nodes directly (lower latency, more client complexity), or a thin proxy layer does the routing
+   (simpler clients, one more network hop) — state this as an explicit tradeoff.
+
+**Data Model (sketch):**
+```
+# per-node, in-memory only:
+store: key -> (value, expires_at)
+# cluster metadata (small, replicated everywhere or in a coordination service):
+ring: hash_position -> node_id
+```
+
+**Scaling & Reliability:**
+- Adding/removing a node only remaps `~1/N` of keys thanks to consistent hashing — the rest of the
+  cluster's cached data stays valid.
+- A cache miss is never a correctness failure — the caller falls through to the backing store and
+  repopulates the cache — which is what allows the cache tier to trade durability for raw speed.
+- Hot-key skew (one key vastly more popular than others) can overwhelm a single shard despite good
+  overall key distribution — mitigate with client-side local caching of the hottest keys, or by
+  replicating just that key across multiple nodes.
+
+**Follow-Up Questions:**
+1. How do you handle a "thundering herd" when a very hot key expires and many clients simultaneously miss
+   and hit the backing store at once? → have the first miss take a lock/lease to repopulate while other
+   concurrent requests wait briefly or serve a slightly-stale value, rather than all of them hitting the
+   backing store simultaneously.
+2. Strong vs. eventual consistency across replicas → most cache use cases accept eventual consistency
+   (a replica might briefly serve a stale value after a write) in exchange for lower write latency; call
+   out when that's unacceptable (e.g., a cache used for rate-limiting counters, where staleness causes
+   incorrect limit enforcement) and what you'd change (synchronous replication, at a latency cost).
+3. Cache stampede on cold-start (cluster restarts with empty caches) → gradual cache warming, or a
+   temporary higher rate limit tolerance on the backing store immediately after a cluster restart.
+
+---
+
+## 13. Behavioral Themes
 
 Google's behavioral round is largely a standardized assessment rather than a single freeform interview —
 see [`behavioral_interview.md`](./behavioral_interview.md) for general STAR-method prep. Themes specific
@@ -467,8 +908,14 @@ to Google's loop:
 
 Sources used for compiling these questions:
 - [Google Interview Questions - 1point3acres](https://www.1point3acres.com/interview/problems/company/google)
+- [Google Software Engineer Interview Questions - Glassdoor](https://www.glassdoor.com/Interview/Google-Software-Engineer-Interview-Questions-EI_IE9079.0,6_KO7,24.htm)
+- [Google Interview questions and preparation - LeetCode Discuss](https://leetcode.com/discuss/interview-question/5547675/Google-Interview-questions-and-preparation/)
+- [Most asked System Design questions - LeetCode Discuss](https://leetcode.com/discuss/interview-question/5806013/Most-asked-System-Design-questions/)
 
-Note: the source page requires forum membership to view full question text/discussion threads; the
-problems above were reconstructed from the publicly visible tags/categories into complete, standard,
-solvable problem statements with original test cases and solutions — they are not verbatim transcripts
-of the reported questions.
+Note: 1point3acres requires forum membership to view full question text/discussion threads — as of this
+writing its public Google page shows only the Google Hiring Assessment (GHA) fully, plus generic tag
+counts (487 total questions, ~66 coding across easy/medium/hard, 4 system design, mostly gated). Problems
+#1-4 and #9-10 are reconstructed from those paywalled tag categories into complete, standard, solvable
+versions (not verbatim transcripts). Problems #5-8 and #11-12 are real, independently-corroborated
+questions pulled from public sources (Glassdoor, LeetCode company-tagged discussions) rather than from
+1point3acres, since its own bank was too gated to expand further on its own.
