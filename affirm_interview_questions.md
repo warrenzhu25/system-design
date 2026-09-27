@@ -67,32 +67,89 @@ group_loans_by_ultimate_parent(loans, parent_of)
 | Two transactions fully paying off one loan | Remaining balance is `0.0`, not negative |
 
 **Key Insights:**
-1. Resolve roots with an explicit **visited list**, not just "follow parent pointers until none" — that's
-   exactly what turns a malformed cyclic feed into an infinite loop instead of a caught error, and the
-   interviewer explicitly asks what happens on bad data.
-2. **Cache resolved roots per company** the first time they're seen — loans commonly cluster under a
-   handful of parents, so memoizing turns what would be O(loans × chain depth) into amortized O(loans +
-   companies).
-3. Keep "aggregate loans" and "apply transactions" as separate passes over separate state (grouped
+1. Two equally-correct shapes for `resolve_root`, same asymptotics, different tradeoffs — pick based on
+   what the interviewer is probing:
+   - **Recursive + `@cache`** (Version A below): fewest lines to get right live, `parent_of` captured for
+     free by the closure, path compression is automatic (every distinct company computed exactly once,
+     no matter how many loans/chains pass through it). Cost: `resolve_root` is nested so it can't be unit
+     tested standalone, and recursion depth is bounded by Python's call-stack limit (~1000 by default).
+   - **Iterative + explicit cache dict** (Version B below): a top-level function, independently unit
+     testable, no recursion-depth ceiling regardless of chain length — better if the interviewer flags
+     "what if the ownership chain is thousands of companies deep" as a constraint. Cost: more lines, and
+     the path-compression writeback (`for node in path: root_cache[node] = root`) is a manual step that's
+     easy to get subtly wrong under time pressure.
+   Default to Version A when writing this live; mention Version B verbally as the answer to a
+   deep-recursion follow-up rather than typing both unless asked.
+2. Either way, **cache resolved roots with path compression**, not just at the loan's starting company —
+   every intermediate node walked on the way to the root gets memoized too (the same trick Union-Find
+   uses). Two loans on siblings of a long chain (`C -> B -> A`, `D -> B -> A`) then share the cached hop
+   at `B` instead of each re-walking to `A` independently, giving true amortized O(loans + companies)
+   instead of just deduping repeat lookups of the same starting company.
+3. Cycle detection is a separate concern from memoization/caching in both versions — don't try to fold it
+   into the cache. Version A tracks a `visiting` set of companies currently on the recursion stack (the
+   classic DFS "gray node" trick) and uses `try/finally` so `visiting` stays correct even when a
+   `ValueError` unwinds the stack. Version B tracks the current call's `path` as an explicit list and
+   checks membership before extending it. Both correctly reject a self-loop (`{"A": "A"}`) as a cycle.
+4. Keep "aggregate loans" and "apply transactions" as separate passes over separate state (grouped
    totals vs. a remaining-balance map) rather than mutating one shared structure — the interviewer's
    follow-up is almost always "now a transaction comes in for a loan that got merged into a different
    parent after the fact," which is far easier to reason about with the two concerns kept apart.
 
-**Python Solution:**
+**Python Solution — Version A (recursive, `@cache`):**
+```python
+from functools import cache
+from collections import defaultdict
+
+
+def group_loans_by_ultimate_parent(loans, parent_of):
+    """
+    loans: list of (loan_id, company, amount)
+    parent_of: dict child -> direct parent
+    Returns: dict root_company -> {"total": float, "loan_ids": [loan_id, ...]}
+    """
+    grouped = defaultdict(lambda: {"total": 0.0, "loan_ids": []})
+    visiting = set()  # companies currently on the recursion stack, for cycle detection
+
+    @cache
+    def resolve_root(company):
+        if company not in parent_of:
+            return company
+        if company in visiting:
+            raise ValueError(f"cycle detected involving {company}")
+        visiting.add(company)
+        try:
+            return resolve_root(parent_of[company])
+        finally:
+            visiting.discard(company)
+
+    for loan_id, company, amount in loans:
+        root = resolve_root(company)
+        grouped[root]["total"] += amount
+        grouped[root]["loan_ids"].append(loan_id)
+    return dict(grouped)
+```
+
+**Python Solution — Version B (iterative, explicit cache — no recursion-depth ceiling, standalone testable):**
 ```python
 from collections import defaultdict
 
 
-def resolve_root(company, parent_of):
-    """Resolve `company` to its topmost ancestor. Raises ValueError on a cycle."""
-    seen = []
+def resolve_root(company, parent_of, root_cache):
+    """
+    Resolve `company` to its topmost ancestor, path-compressing every node walked
+    along the way into `root_cache` (Union-Find style). Raises ValueError on a cycle.
+    """
+    path = []
     current = company
-    while current in parent_of:
-        if current in seen:
+    while current not in root_cache and current in parent_of:
+        if current in path:
             raise ValueError(f"cycle detected involving {current}")
-        seen.append(current)
+        path.append(current)
         current = parent_of[current]
-    return current
+    root = root_cache.get(current, current)
+    for node in path:
+        root_cache[node] = root
+    return root
 
 
 def group_loans_by_ultimate_parent(loans, parent_of):
@@ -104,12 +161,15 @@ def group_loans_by_ultimate_parent(loans, parent_of):
     grouped = defaultdict(lambda: {"total": 0.0, "loan_ids": []})
     root_cache = {}
     for loan_id, company, amount in loans:
-        if company not in root_cache:
-            root_cache[company] = resolve_root(company, parent_of)
-        root = root_cache[company]
+        root = resolve_root(company, parent_of, root_cache)
         grouped[root]["total"] += amount
         grouped[root]["loan_ids"].append(loan_id)
     return dict(grouped)
+```
+
+**`match_transactions_to_loans` (shared by both versions):**
+```python
+from collections import defaultdict
 
 
 def match_transactions_to_loans(loans, transactions):
@@ -198,7 +258,6 @@ def play_war(decks, max_rounds=10000):
         while len(winners) > 1:
             war_pot = list(pot)
             played = {}
-            still_in = []
             for i in winners:
                 burn = min(3, len(decks[i]))
                 for _ in range(burn):
@@ -207,10 +266,10 @@ def play_war(decks, max_rounds=10000):
                     card = decks[i].popleft()
                     war_pot.append(card)
                     played[i] = card
-                    still_in.append(i)
             pot = war_pot
             if not played:
-                winners = still_in or winners[:1]
+                # everyone tied ran out of cards to battle with; the first prior tied player keeps the pot
+                winners = winners[:1]
                 break
             best = max(played.values())
             winners = [i for i in played if played[i] == best]
@@ -508,6 +567,11 @@ typically here — an unguarded status overwrite) and (b) after the fix, add a f
 3. Keep a full `history` list per transaction (not just current `status`) even though the base
    requirements don't ask for it — the "add a feature" follow-up is reported often enough that
    over-throwing-away state on the first pass just means redoing the data model under time pressure.
+4. `average_resolution_time` only counts `WON`/`LOST` transitions as a "resolution" — a `WITHDRAWN`
+   dispute never contributes to the average, even though it's also a terminal state. That's a defensible
+   reading (a withdrawal isn't a resolution the process rendered, it's the customer/merchant pulling out),
+   but it's a scope assumption, not the only self-evidently-correct one — state it out loud rather than
+   silently picking a definition, since an interviewer could just as easily mean for `WITHDRAWN` to count.
 
 **Python Solution:**
 ```python
@@ -585,9 +649,12 @@ shortest_unique_substring("aaaa")    # -> "aaaa" — every substring shorter tha
    here is the correct, simpler thing to *code live* in the time given — call out the trie/suffix-automaton
    approach verbally as the scalable alternative rather than trying to implement a suffix trie under
    interview time pressure.
-3. Worst case (e.g. `"aaaa...a"`) is O(n²) substrings to hash — flag that complexity explicitly rather
-   than letting it pass unmentioned; it's exactly the kind of tradeoff Affirm's fintech-pragmatic framing
-   rewards naming.
+3. Worst case (e.g. `"aaaa...a"`) touches O(n²) substrings total across all lengths — but each substring
+   of length `L` costs O(L) to slice and hash, so total worst-case **time** is Θ(n³) (Σ L·(n−L+1) for
+   L=1..n, not just the O(n²) substring count). Flag that explicitly rather than letting it pass
+   unmentioned; it's exactly the kind of tradeoff Affirm's fintech-pragmatic framing rewards naming, and
+   it's the concrete reason the trie/suffix-automaton alternative in Key Insight #2 is worth mentioning
+   verbally, not just a nice-to-have footnote.
 
 **Python Solution:**
 ```python

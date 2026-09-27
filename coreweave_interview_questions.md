@@ -160,7 +160,11 @@ indices of every record that matches, in original order.
    given the infra-adjacent framing.
 2. Centralize the type-safety check in **one** comparison helper that every leaf and every `"in"` check
    funnels through, so "incompatible types don't crash" is enforced in exactly one place instead of
-   re-implemented per operator.
+   re-implemented per operator. Dispatch the range operators (`<`,`<=`,`>`,`>=`) with a plain `if/elif`
+   ladder inside that single `try/except`, not a dict literal like `{"<": a < b, ">": a > b, ...}[cmp]` —
+   a dict literal evaluates every branch's value before indexing into it, so it silently does 4x the
+   comparisons needed and can raise from an operator nobody asked for; an `if/elif` only ever evaluates
+   the one operator actually requested.
 3. `and`/`or` should short-circuit (stop evaluating children once the result is determined) — not a
    performance requirement at small scale, but worth naming since a filter tree over a large record set is
    evaluated per-record, and short-circuiting is free correctness-preserving cleanup once the recursive
@@ -179,8 +183,13 @@ def _safe_compare(cmp: str, actual, expected) -> bool:
     if cmp == "!=":
         return actual != expected
     try:
-        return {"<": actual < expected, "<=": actual <= expected,
-                ">": actual > expected, ">=": actual >= expected}[cmp]
+        if cmp == "<":
+            return actual < expected
+        if cmp == "<=":
+            return actual <= expected
+        if cmp == ">":
+            return actual > expected
+        return actual >= expected  # cmp == ">="
     except TypeError:
         return False
 
@@ -248,10 +257,11 @@ You're given an `HttpClient` with `post(path: str) -> HttpResponse`, where `Http
 | Scenario | Expectation |
 |---|---|
 | All servers return `200` on first call | All `"success"`, results present for every input id |
-| One server returns `429` with `Retry-After: 1`, then `200` | `"success"`, and the `429` did not consume a retry attempt |
+| One server returns `429` with `Retry-After: 1`, then `200` | `"success"`, and the `429` did not consume the `5xx` retry counter |
 | One server returns `503` twice then `200` | `"success"` after 3 total attempts, other servers unaffected |
 | One server returns `404` | `"failed: not_found"` immediately, no retry attempted for it |
 | One server returns `500` past `max_retries` | `"failed: transient"` after the last retry, others still complete normally |
+| One server returns `429` forever | `"failed: rate_limited"` once its own rate-limit budget is exhausted — does not hang `reboot_servers` for the other servers |
 | `main(["--ids=s1,s3"], client)` | Prints one JSON object to stdout with exactly those two keys |
 | 50 servers, `max_workers=10` | No more than 10 `post()` calls in flight at any instant (verified via a counting mock) |
 
@@ -263,7 +273,11 @@ You're given an `HttpClient` with `post(path: str) -> HttpResponse`, where `Http
 2. `429` and `5xx` need **different** backoff strategies: `429` means "the server told you exactly how
    long to wait" (respect `Retry-After` literally, don't also apply exponential backoff on top of it),
    while `5xx` means "the server didn't say" (exponential backoff is your own choice to make, and doesn't
-   consume the same budget as a rate-limit wait).
+   consume the same budget as a rate-limit wait). "Doesn't consume the same budget" means **separately
+   tracked**, not **unbounded** — give `429` its own counter capped at `max_retries` too. Without that
+   cap, a server that's persistently (or adversarially) rate-limited loops forever, and since
+   `ThreadPoolExecutor.__exit__` blocks until every submitted future completes, one such server hangs
+   `reboot_servers` for the *entire* batch — every other server's result included — not just its own.
 3. `ThreadPoolExecutor(max_workers=N)` + `as_completed` gives bounded concurrency and independent-failure
    isolation for free — same shape as the reboot-by-exception version of this problem, just with the retry
    classifier reading `response.status_code` instead of catching typed exceptions. The CLI layer (`main`)
@@ -281,6 +295,7 @@ RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 
 def _reboot_with_retry(client: "HttpClient", server_id: str, max_retries: int) -> tuple[str, str]:
     attempt = 0
+    rate_limit_waits = 0  # tracked separately from `attempt` — different budget, still bounded
     while True:
         response = client.post(f"/v1/servers/{server_id}/reboot")
 
@@ -291,8 +306,11 @@ def _reboot_with_retry(client: "HttpClient", server_id: str, max_retries: int) -
             return server_id, f"failed: {response.json().get('error', 'unknown_error')}"
 
         if response.status_code == 429:
+            rate_limit_waits += 1
+            if rate_limit_waits > max_retries:
+                return server_id, f"failed: {response.json().get('error', 'unknown_error')}"
             time.sleep(float(response.headers.get("Retry-After", 1)))
-            continue  # server-given wait, doesn't consume a retry attempt
+            continue  # server-given wait, doesn't consume the 5xx `attempt` counter
 
         attempt += 1
         if attempt > max_retries:
@@ -349,10 +367,11 @@ instead of just a bounded worker pool.
 
 | Scenario | Expectation |
 |---|---|
-| 20 URLs, rate limit 5/sec | Total wall-clock time is bounded below by ~4 seconds (20 / 5), not instantaneous |
+| 20 URLs, rate limit 5/sec | Total wall-clock time is bounded below by ~(20 − 5) / 5 = 3 seconds — the bucket starts full, so the first `rate` requests burst through instantly and only the remainder are throttled |
 | One URL returns 404 | `None` immediately, no retries burned on it |
 | One URL times out twice then succeeds | Content returned, counted as 3 attempts against that URL only |
 | One URL exhausts all retries | `None` for it; other URLs' results unaffected |
+| `fetch(url)` raises (a real socket timeout, connection reset) rather than returning a status | Treated as a retryable failure, not an uncaught exception that crashes `scrape_urls` |
 | Rate limiter shared across worker threads | No burst of more than `N` requests within any 1-second window, verified via timestamped mock calls |
 
 **Key Insights:**
@@ -365,6 +384,19 @@ instead of just a bounded worker pool.
 3. Distinguishing retryable (timeout, 5xx) from non-retryable (4xx) failures up front avoids wasting rate-
    limited request budget hammering a URL that will never succeed — worth calling out as the same "don't
    retry what can't succeed" principle as `PermanentError` in the reboot problem.
+4. A real `fetch` typically signals a timeout or connection failure by **raising**, not by returning a
+   status code (that's how `requests`, `httpx`, and friends actually behave) — wrap the `fetch(url)` call
+   itself in `try/except` and route a raised exception into the same retryable path as a `5xx`. Skipping
+   this means the one failure mode named explicitly in the requirements (timeout) is exactly the one that
+   isn't handled: the exception propagates out of the task, and `future.result()` re-raises it in the
+   collecting thread, crashing `scrape_urls` and losing every already-fetched result, not just the failing
+   URL's.
+5. The bucket is initialized full (`_tokens = rate`), so it grants an initial burst of up to `rate`
+   requests before steady-state throttling kicks in — this is standard, correct token-bucket behavior
+   (bursting is the point of a token bucket over a naive fixed-rate sleep), but it means wall-clock time
+   for a batch is closer to `(len(urls) - rate) / rate` than the naive `len(urls) / rate` — worth being
+   precise about that when asked to justify a timing assertion. Start `_tokens = 0` instead if the
+   interviewer wants strictly no burst, throttled from the very first request.
 
 **Python Solution:**
 ```python
@@ -399,7 +431,10 @@ def _fetch_with_retry(fetch, bucket: TokenBucket, url: str, max_retries: int):
     attempt = 0
     while True:
         bucket.acquire()
-        status, body = fetch(url)
+        try:
+            status, body = fetch(url)
+        except Exception:
+            status, body = 599, None  # network-level failure (timeout, reset): retryable, like a 5xx
         if 200 <= status < 300:
             return url, body
         if 400 <= status < 500:
