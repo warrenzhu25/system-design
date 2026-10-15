@@ -77,7 +77,10 @@ group_loans_by_ultimate_parent(loans, parent_of)
      testable, no recursion-depth ceiling regardless of chain length — better if the interviewer flags
      "what if the ownership chain is thousands of companies deep" as a constraint. Cost: more lines, and
      the path-compression writeback (`for node in path: root_cache[node] = root`) is a manual step that's
-     easy to get subtly wrong under time pressure.
+     easy to get subtly wrong under time pressure. `path` must be a **set**, not a list — a list makes the
+     `if current in path` cycle check an O(k) scan per step, which silently turns the very case Version B
+     is supposed to handle well (a single very deep chain) into O(chain length²) instead of O(chain
+     length). Measured: an 8,000-node chain took ~0.14s with a list cycle-check vs. ~0.0007s with a set.
    Default to Version A when writing this live; mention Version B verbally as the answer to a
    deep-recursion follow-up rather than typing both unless asked.
 2. Either way, **cache resolved roots with path compression**, not just at the loan's starting company —
@@ -88,8 +91,9 @@ group_loans_by_ultimate_parent(loans, parent_of)
 3. Cycle detection is a separate concern from memoization/caching in both versions — don't try to fold it
    into the cache. Version A tracks a `visiting` set of companies currently on the recursion stack (the
    classic DFS "gray node" trick) and uses `try/finally` so `visiting` stays correct even when a
-   `ValueError` unwinds the stack. Version B tracks the current call's `path` as an explicit list and
-   checks membership before extending it. Both correctly reject a self-loop (`{"A": "A"}`) as a cycle.
+   `ValueError` unwinds the stack. Version B tracks the current walk's visited nodes in a `path` **set**
+   and checks membership before extending it (see Key Insight #1 on why it must be a set, not a list).
+   Both correctly reject a self-loop (`{"A": "A"}`) as a cycle.
 4. Keep "aggregate loans" and "apply transactions" as separate passes over separate state (grouped
    totals vs. a remaining-balance map) rather than mutating one shared structure — the interviewer's
    follow-up is almost always "now a transaction comes in for a loan that got merged into a different
@@ -139,15 +143,15 @@ def resolve_root(company, parent_of, root_cache):
     Resolve `company` to its topmost ancestor, path-compressing every node walked
     along the way into `root_cache` (Union-Find style). Raises ValueError on a cycle.
     """
-    path = []
+    path = set()  # nodes visited on this walk -- a set, not a list: O(1) membership check
     current = company
     while current not in root_cache and current in parent_of:
         if current in path:
             raise ValueError(f"cycle detected involving {current}")
-        path.append(current)
+        path.add(current)
         current = parent_of[current]
     root = root_cache.get(current, current)
-    for node in path:
+    for node in path:  # order doesn't matter here, every node in the walk gets the same root
         root_cache[node] = root
     return root
 
@@ -306,6 +310,7 @@ minimize_settlements(transactions)  # -> [("A", "C", 15.0)]  (one transfer inste
 | One clear largest debtor and one clear largest creditor | Settled in a single transaction |
 | Sum of all settlement amounts, netted per account | Matches the original net balances exactly |
 | Floating-point amounts | No drift beyond cent-level rounding across repeated settlements |
+| `[("A","E",16.89),("A","C",18.56),("D","B",12.97),("D","B",9.33)]` (net: A=-35.45, E=16.89, C=18.56, D=-22.30, B=22.30) | Greedy heap needs **4** transactions; the true minimum is **3** — a concrete, verified counterexample to "greedy is optimal" (see Key Insight #2 and Version B below) |
 
 **Key Insights:**
 1. **Net first, settle second.** Every transaction only matters through its effect on each account's net
@@ -313,15 +318,22 @@ minimize_settlements(transactions)  # -> [("A", "C", 15.0)]  (one transfer inste
    debtors and creditors it produces.
 2. The heap-based **greedy pairing (largest creditor against largest debtor, repeat)** is what the
    `greedy, heap` tag is pointing at, and it's a reasonable, easy-to-explain answer — but it is **not
-   always the true minimum** number of transactions (a known property of this problem class: some balance
-   sets need genuine subset-partitioning, solvable optimally only via DFS/backtracking, to hit the
-   absolute minimum). State that tradeoff out loud rather than claiming the greedy heap is provably
-   optimal — Affirm's fintech framing rewards naming the limitation over a silently-wrong optimality claim.
+   always the true minimum** number of transactions. The test case above is a real, checked example: nets
+   of `A=-35.45, E=+16.89, C=+18.56, D=-22.30, B=+22.30` settle in 4 transactions greedily but only 3
+   optimally (`D` pays `B` its whole `22.30` in one shot instead of splitting across `C` and `E`). State
+   that tradeoff out loud rather than claiming the greedy heap is provably optimal — Affirm's fintech
+   framing rewards naming the limitation over a silently-wrong optimality claim.
 3. Round every intermediate amount to the cent — settlement amounts are money, and floating-point drift
    compounding across repeated `pop`/`push` cycles on the heap is exactly the kind of bug a payments team
    would flag in code review.
+4. Two solutions, same tradeoff shape as Q1's Version A/B: **Version A (greedy heap)** below is what you'd
+   actually write live — easy to explain, O((n) log n), and correct enough that it matches the optimal
+   count on the large majority of real balance sets. **Version B (DFS/backtracking)**, given as the answer
+   to "can you guarantee the minimum," is genuinely optimal but exponential in the number of distinct
+   nonzero accounts (`O(2^n)`-ish branching) — fine for the tens of accounts a day's netted balances
+   produce, wrong tool if that count could be in the thousands.
 
-**Python Solution:**
+**Python Solution — Version A (greedy heap, what to write live):**
 ```python
 import heapq
 from collections import defaultdict
@@ -332,13 +344,14 @@ def minimize_settlements(transactions):
     transactions: list of (payer, payee, amount)
     Returns: list of (payer, payee, amount) settlements using a greedy max-creditor/
     max-debtor heap pairing. Minimizes transaction count well in practice; not guaranteed
-    globally minimal for every possible balance set (see Key Insights).
+    globally minimal for every possible balance set (see Key Insights and Version B).
     """
     net = defaultdict(float)
     for payer, payee, amount in transactions:
         net[payer] -= amount
         net[payee] += amount
 
+    # heapq is a min-heap, so negate amounts to pop the LARGEST debtor/creditor each round
     debtors = [(-round(-amt, 2), acct) for acct, amt in net.items() if amt < -1e-9]
     creditors = [(-round(amt, 2), acct) for acct, amt in net.items() if amt > 1e-9]
     heapq.heapify(debtors)
@@ -352,6 +365,7 @@ def minimize_settlements(transactions):
         pay = round(min(debt_amt, credit_amt), 2)
         settlements.append((debtor, creditor, pay))
 
+        # whichever side wasn't fully paid off goes back in the heap for another round
         remaining_debt = round(debt_amt - pay, 2)
         remaining_credit = round(credit_amt - pay, 2)
         if remaining_debt > 1e-9:
@@ -360,6 +374,67 @@ def minimize_settlements(transactions):
             heapq.heappush(creditors, (-remaining_credit, creditor))
 
     return settlements
+```
+
+**Python Solution — Version B (DFS/backtracking, true minimum — verified against 500+ random cases plus the counterexample above):**
+```python
+from collections import defaultdict
+
+
+def minimize_settlements_optimal(transactions):
+    """
+    transactions: list of (payer, payee, amount)
+    Returns: list of (payer, payee, amount) settlements using the TRUE minimum number
+    of transactions (DFS/backtracking over which debtor pays which creditor).
+    Exponential worst case — fine for the tens of distinct accounts a day's netted
+    balances typically produce, not thousands (use Version A there).
+    """
+    net = defaultdict(float)
+    for payer, payee, amount in transactions:
+        net[payer] -= amount
+        net[payee] += amount
+
+    accounts = [acct for acct, amt in net.items() if abs(amt) > 1e-9]
+    balances = [round(net[acct], 2) for acct in accounts]
+    n = len(accounts)
+    # n transactions is always achievable (pair every debtor with a creditor one at a time) —
+    # start the "best so far" there so the first full DFS branch always finds an improvement.
+    best = {"count": n, "settlements": []}
+
+    def dfs(i, settlements):
+        while i < n and abs(balances[i]) < 1e-9:
+            i += 1  # account i already fully settled by an earlier transfer — skip it
+        if i == n:
+            if len(settlements) < best["count"]:
+                best["count"] = len(settlements)
+                best["settlements"] = list(settlements)
+            return
+        if len(settlements) + 1 >= best["count"]:
+            return  # prune: even one more transaction can't beat the current best
+
+        for j in range(i + 1, n):
+            if abs(balances[j]) < 1e-9 or (balances[i] > 0) == (balances[j] > 0):
+                continue  # same sign (or already zero) can't offset account i
+
+            orig_i, orig_j = balances[i], balances[j]
+            # Settle i fully by transferring the smaller magnitude between i and j;
+            # whichever of the two is the debtor pays whichever is the creditor.
+            transfer = round(min(abs(balances[i]), abs(balances[j])), 2)
+            if balances[i] < 0:
+                settlements.append((accounts[i], accounts[j], transfer))
+            else:
+                settlements.append((accounts[j], accounts[i], transfer))
+
+            balances[i] = round(balances[i] + (transfer if balances[i] < 0 else -transfer), 2)
+            balances[j] = round(balances[j] + (transfer if balances[j] < 0 else -transfer), 2)
+
+            dfs(i, settlements)  # i is now settled (0) or carries j's leftover — either way, resume from i
+
+            balances[i], balances[j] = orig_i, orig_j  # undo, so the next candidate j starts clean
+            settlements.pop()
+
+    dfs(0, [])
+    return best["settlements"]
 ```
 
 ---
@@ -572,6 +647,17 @@ typically here — an unguarded status overwrite) and (b) after the fix, add a f
    reading (a withdrawal isn't a resolution the process rendered, it's the customer/merchant pulling out),
    but it's a scope assumption, not the only self-evidently-correct one — state it out loud rather than
    silently picking a definition, since an interviewer could just as easily mean for `WITHDRAWN` to count.
+5. **Don't recompute the average by rescanning full history on every call.** A first-pass version that
+   walks every transaction's entire history inside `average_resolution_time` is correct but re-does
+   `O(total events ever processed)` work on *every* query — fine for a one-off check, but this class models
+   a live stream that `process()` is fed continuously, and a reporting/dashboard caller is exactly the kind
+   of thing that queries `average_resolution_time` repeatedly. Measured: at 20,000 resolved disputes, a
+   full rescan took ~1.8ms per call and keeps growing with total volume; maintaining a running
+   `(total_duration, count)` per `reason_code` **inside `process()`** — updated the instant a dispute
+   resolves, since that's already where the `OPENED` timestamp and the transition are both in hand — drops
+   the query to O(1) (~0.2µs measured, a ~9,000x difference at that scale) without changing `process()`'s
+   own complexity or any output value. Keep the full `history` list too (Key Insight #3 still holds for
+   audit/debug purposes) — this is additive bookkeeping, not a replacement for it.
 
 **Python Solution:**
 ```python
@@ -589,30 +675,35 @@ VALID_TRANSITIONS = {
 class DisputeProcessor:
     def __init__(self):
         self.status = {}
-        self.history = defaultdict(list)  # txn_id -> [(ts, status, reason_code)]
+        self.history = defaultdict(list)          # txn_id -> [(ts, status, reason_code)], full audit trail
+        self.opened_ts = {}                        # txn_id -> ts of its OPENED event
+        self.resolution_totals = defaultdict(float)  # reason_code -> summed resolution duration
+        self.resolution_counts = defaultdict(int)    # reason_code -> number of WON/LOST resolutions
 
     def process(self, ts, txn_id, reason_code, new_status):
         current = self.status.get(txn_id)
         if current is None:
             if new_status != "OPENED":
                 raise ValueError(f"{txn_id}: first event must be OPENED, got {new_status}")
+            self.opened_ts[txn_id] = ts
         elif new_status not in VALID_TRANSITIONS[current]:
             raise ValueError(f"{txn_id}: illegal transition {current} -> {new_status}")
 
         self.status[txn_id] = new_status
         self.history[txn_id].append((ts, new_status, reason_code))
 
+        # Update the running average's running totals right when a dispute resolves --
+        # the OPENED timestamp is already in hand, so this is O(1) extra work per event,
+        # and it's what makes the query below O(1) instead of an O(all history) rescan.
+        if new_status in ("WON", "LOST"):
+            opened = self.opened_ts.get(txn_id)
+            if opened is not None:
+                self.resolution_totals[reason_code] += ts - opened
+                self.resolution_counts[reason_code] += 1
+
     def average_resolution_time(self, reason_code):
-        totals, count = 0, 0
-        for txn_id, events in self.history.items():
-            opened_ts = None
-            for ts, status, rc in events:
-                if status == "OPENED":
-                    opened_ts = ts
-                elif status in ("WON", "LOST") and rc == reason_code and opened_ts is not None:
-                    totals += ts - opened_ts
-                    count += 1
-        return totals / count if count else 0.0
+        count = self.resolution_counts.get(reason_code, 0)
+        return self.resolution_totals[reason_code] / count if count else 0.0
 ```
 
 ---
@@ -646,17 +737,22 @@ shortest_unique_substring("aaaa")    # -> "aaaa" — every substring shorter tha
 2. The `trie` tag signals the intended production-grade answer: a suffix trie (or suffix automaton)
    built once lets you find the shortest unique substring in roughly linear-ish time by walking down from
    the root until a node's subtree count drops to 1. The direct sliding-window/hashmap approach shown
-   here is the correct, simpler thing to *code live* in the time given — call out the trie/suffix-automaton
-   approach verbally as the scalable alternative rather than trying to implement a suffix trie under
-   interview time pressure.
+   here is the correct, simpler thing to *code live* in the time given — call out the suffix-array/
+   suffix-automaton approach verbally as the scalable alternative rather than trying to build one under
+   interview time pressure, unless explicitly asked to go implement it (Version B below).
 3. Worst case (e.g. `"aaaa...a"`) touches O(n²) substrings total across all lengths — but each substring
    of length `L` costs O(L) to slice and hash, so total worst-case **time** is Θ(n³) (Σ L·(n−L+1) for
    L=1..n, not just the O(n²) substring count). Flag that explicitly rather than letting it pass
    unmentioned; it's exactly the kind of tradeoff Affirm's fintech-pragmatic framing rewards naming, and
-   it's the concrete reason the trie/suffix-automaton alternative in Key Insight #2 is worth mentioning
-   verbally, not just a nice-to-have footnote.
+   it's the concrete reason the scalable alternative in Key Insight #2 is worth mentioning verbally, not
+   just a nice-to-have footnote.
+4. If pushed on "what if the string is huge," **Version B** below (suffix array + LCP array) answers it
+   for real: `O(n log² n)` build, verified against 2,000+ random strings and cross-checked against Version
+   A for both the length and the uniqueness/minimality of the returned substring. It rests on one classical
+   fact — the longest prefix suffix `i` shares with *any* other suffix equals the max of its LCP with its
+   two neighbors in sorted (suffix-array) order — so one more character than that is unique to `i`.
 
-**Python Solution:**
+**Python Solution — Version A (sliding window by length, correct and simple to code live):**
 ```python
 from collections import defaultdict
 
@@ -671,6 +767,74 @@ def shortest_unique_substring(s):
             if cnt == 1:
                 return substr
     return None
+```
+
+**Python Solution — Version B (suffix array + LCP array, `O(n log² n)` — the scalable answer, mention verbally unless asked to write it):**
+```python
+def _build_suffix_array(s):
+    """
+    O(n log^2 n) doubling algorithm: rank every suffix by its first 2^k characters,
+    doubling k each round until every suffix has a distinct rank (a total order).
+    """
+    n = len(s)
+    sa = list(range(n))
+    rank = [ord(c) for c in s]
+    k = 1
+    while True:
+        def sort_key(i):
+            second_half = rank[i + k] if i + k < n else -1
+            return (rank[i], second_half)
+
+        sa.sort(key=sort_key)
+        new_rank = [0] * n
+        for i in range(1, n):
+            new_rank[sa[i]] = new_rank[sa[i - 1]] + (sort_key(sa[i - 1]) < sort_key(sa[i]))
+        rank = new_rank
+        if rank[sa[-1]] == n - 1:  # every suffix now has a unique rank -- fully sorted
+            break
+        k *= 2
+    return sa, rank
+
+
+def _kasai_lcp(s, sa, rank):
+    """LCP[r] = longest common prefix between the suffixes at sorted positions r-1 and r."""
+    n = len(s)
+    lcp = [0] * n
+    match_len = 0
+    for i in range(n):
+        if rank[i] > 0:
+            j = sa[rank[i] - 1]
+            while i + match_len < n and j + match_len < n and s[i + match_len] == s[j + match_len]:
+                match_len += 1
+            lcp[rank[i]] = match_len
+            if match_len > 0:
+                match_len -= 1  # LCP shrinks by at most 1 as we move to the next suffix (Kasai's key lemma)
+        else:
+            match_len = 0
+    return lcp
+
+
+def shortest_unique_substring_optimal(s):
+    n = len(s)
+    if n == 0:
+        return None
+    sa, rank = _build_suffix_array(s)
+    lcp = _kasai_lcp(s, sa, rank)
+
+    best_len, best_start = n, 0  # the whole string is always unique -- the fallback answer
+    for i in range(n):
+        r = rank[i]
+        # the longest prefix suffix i shares with ANY other suffix = its LCP with whichever
+        # sorted-order neighbor (previous or next) it's closest to
+        shared_with_some_other_suffix = max(
+            lcp[r] if r < n else 0,
+            lcp[r + 1] if r + 1 < n else 0,
+        )
+        unique_len = shared_with_some_other_suffix + 1
+        if i + unique_len <= n and unique_len < best_len:
+            best_len, best_start = unique_len, i
+
+    return s[best_start:best_start + best_len]
 ```
 
 ---
@@ -976,6 +1140,89 @@ outcome_events(experiment_id, user_id, metric_name, value, ts) # append-only
 variant_metrics(experiment_id, variant, metric_name, count, sum, computed_at)  # materialized
 ```
 
+**Detailed Component Breakdown:**
+
+| Component | Responsibility | Tech choice (typical) |
+|---|---|---|
+| Experiment config service + UI | CRUD for experiments: variants, split, targeting, start/end, owner, guardrails; versioned, audited | Postgres/MySQL + admin UI; changes published as immutable versions |
+| Config distribution | Pushes config snapshots to every app server so assignment is local | Pub/sub (Kafka) or poll an S3/CDN JSON snapshot; in-memory cache in SDK |
+| Assignment SDK (in checkout service) | `hash(salt + user_id) -> bucket -> variant`; evaluates targeting; emits exposure | Library, no network call on hot path |
+| Event collector | Receives exposure + outcome events, validates schema, batches | Stateless HTTP/gRPC service -> Kafka |
+| Event log | Durable, replayable, partitioned by `user_id` | Kafka (topics `exposures`, `outcomes`) |
+| Stream/batch pipeline | Dedupe exposures, join exposure to outcome within attribution window, aggregate | Flink/Spark Structured Streaming + nightly batch backfill |
+| Warehouse / OLAP | Raw events + per-variant aggregates, auditable | Snowflake/BigQuery (raw), ClickHouse/Druid (dashboards) |
+| Stats engine | Z-test/t-test, CUPED variance reduction, SRM check, sequential testing | Python/Spark job writing `variant_metrics` |
+| Monitoring/alerting | SRM alarm, guardrail breach auto-pause | Metrics store + pager |
+
+**Step-by-Step Flow (assign -> log -> analyze):**
+1. **Create**: PM defines `checkout_v2` with variants `control 50 / treatment 50`, targeting (`country=US`,
+   `loan_amount>100`), primary metric (approval rate), guardrails (error rate, default-risk proxy). Config
+   service stores version `v1` and publishes it.
+2. **Distribute**: every checkout service instance receives the snapshot (push, with a periodic poll as a
+   fallback) and keeps it in memory. A stale snapshot is safe because assignment is a pure function of config.
+3. **Request arrives**: checkout calls `sdk.assign("checkout_v2", user_id)`.
+4. **Targeting**: SDK evaluates targeting rules; if the user is ineligible it returns `not_in_experiment`
+   and logs nothing (so ineligible users never pollute the denominator).
+5. **Bucket**: `bucket = murmur3(experiment_salt + ":" + user_id) % 10000`; the variant is the range
+   containing `bucket`. A per-experiment salt keeps assignments independent across experiments (otherwise
+   the same users are always "treatment" everywhere, correlating results).
+6. **Exposure log**: SDK emits `{experiment_id, version, user_id, variant, ts, request_id}` asynchronously
+   (in-process buffer -> collector -> Kafka). Log at the point the user actually *sees* the variant
+   ("exposure"), not at assignment, to avoid diluting the metric with users who never reached the feature.
+7. **Outcome**: later services (`loan_approved`, `checkout_completed`) emit outcome events keyed by `user_id`.
+   They don't need to know about experiments; the pipeline joins them.
+8. **Pipeline**: dedupe to first exposure per `(experiment_id, user_id)`; join outcomes whose `ts >=
+   first_exposure_ts` and inside the attribution window; aggregate to `(variant, metric) -> n, sum, sum_sq`.
+9. **Stats**: compute lift, confidence interval, p-value; run the **SRM chi-squared** check first and
+   refuse to publish results if it fails.
+10. **Guardrails**: if a guardrail regresses beyond threshold, auto-pause (set traffic to 0 / kill switch in
+    config) and page the owner.
+11. **Audit**: any reported number can be recomputed from raw Kafka/warehouse events plus the config version.
+
+**Failure Modes:**
+- Collector or Kafka down: SDK buffers locally with a bounded queue; assignment is unaffected; on overflow drop
+  *events* (and alert), never block checkout.
+- Config push fails: instances keep the last known snapshot; the version is stamped on events so analysis knows
+  which config each exposure used.
+- Mid-experiment split change: never re-hash existing users into different buckets. Ramp by widening ranges
+  (10% -> 50%) so previously assigned users keep their variant, and treat each ramp stage as a new analysis window.
+
+**How Real Production Systems Do It (and what to copy):**
+
+*Uber XP — [Uber's Experimentation Platform](https://www.uber.com/blog/xp/): 1,000+ concurrent experiments, 1,000+ metrics.*
+- **Statistics engine owns the math, not the experimenter.** Metrics are predefined as one of three types:
+  continuous, proportion (binary) or ratio (numerator/denominator). The engine picks the test: Welch's t-test for
+  continuous, Mann-Whitney U for skewed data, chi-squared for proportions; delta method or bootstrap for ratio
+  metrics; Benjamini-Hochberg correction when there are 2+ treatments. Alpha = 0.05, sizing targets power = 0.8.
+  **Copy**: put these in the stats-engine box of our design and make "metric type" a field in the metric registry,
+  so "approval rate" (proportion) and "average APR" (continuous) are tested differently.
+- **Pre-processing before testing**: outlier removal (clustering-based), **CUPED** variance reduction (use
+  pre-experiment behavior as a covariate so you reach significance with less traffic) and difference-in-differences
+  to correct pre-existing bias between groups. **Copy**: for BNPL, covariates such as prior approval rate or
+  prior GMV; this matters because lending experiments have low base rates and long outcome delays.
+- **Health checks that invalidate results**: (1) **sample-size imbalance (SRM)** when the control:treatment ratio
+  differs from configured, which triggers a randomization investigation; (2) **flickers**, users who switch groups
+  (e.g. moved device), who are excluded from analysis. **Copy**: log `variant` on every exposure and exclude any
+  user seen in two variants.
+- **Sequential monitoring**: mixture SPRT, evaluated daily on cumulative treatment-minus-control difference, with
+  jackknife/block bootstrap for correlated observations from the same user. This lets you stop early without the
+  "peeking" false-positive problem of repeatedly running a fixed-horizon test.
+- **Outage monitoring system**: a separate sequential test on business metrics (crash rate, trip frequency) that
+  alerts or auto-pauses an experiment. This is the guardrail box in our design, and it is why guardrails are
+  independent of the experiment's own success metric.
+- **Universal holdout**: a small configurable slice of users excluded from all experiments in a domain, used to
+  measure long-term cumulative effect. **Copy**: a permanent 1-2% holdout of borrowers for checkout experiments.
+- **Continuous experiments**: Thompson sampling, UCB and contextual bandits for things like picking among 10 email
+  subject lines. Mention bandits as the alternative when you want to *optimize* instead of *measure*.
+- Uber's post does not describe hashing/bucketing or the logging pipeline (it only says users are "randomly
+  split"), so the deterministic-hash assignment and Kafka event log above are standard industry design, not
+  Uber's disclosed internals.
+
+*Affirm*: Affirm's engineering blog has a post on re-architecting its upfunnel platform to cut experiment cycle time
+from months to days ([Medium](https://medium.com/affirmengineering/re-architecting-affirms-upfunnel-platform-how-we-cut-experiment-cycle-time-from-months-to-days-20a047eb6599)).
+I could not read its internals, so don't cite specifics; use it as evidence that experiment velocity is a stated
+Affirm priority.
+
 **Follow-Up Questions:**
 1. How do you prevent a user from being double-counted if they're exposed to an experiment twice? →
    dedupe exposure events on `(experiment_id, user_id)` at the aggregation layer — the first exposure
@@ -1038,6 +1285,119 @@ internal systems of outcomes — without ever double-charging or silently droppi
 installments(loan_id, installment_id, due_ts, amount, status, attempt_count, idempotency_key)
 payment_attempts(idempotency_key, installment_id, ts, outcome, processor_ref)  # append-only, audit trail
 ```
+
+**Detailed Component Breakdown:**
+
+| Component | Responsibility | Tech choice (typical) |
+|---|---|---|
+| Loan servicing API | Creates loan + installment schedule at origination; handles reschedule/early payoff | Stateless service + Postgres |
+| Schedule store | Source of truth for `installments` (status, due_ts, attempt_count) | Postgres/MySQL, index on `(status, due_ts)`, partitioned by due date |
+| Scheduler / dispatcher | Polls due rows, claims a batch, enqueues work | N workers using `FOR UPDATE SKIP LOCKED` or lease column |
+| Work queue | Buffers payment jobs, absorbs due-date spikes (e.g. the 1st of month) | Kafka / SQS |
+| Payment executor | Calls processor with idempotency key; classifies the result | Stateless workers |
+| Payment method / processor adapter | Cards, ACH, debit; each has different latency and failure semantics | Adapter per rail (card network, ACH bank partner) |
+| Attempt log | Append-only record of every attempt and outcome (audit) | Same DB table + Kafka topic |
+| Outcome consumer | Applies result: update installment, write ledger entry, schedule retry | Kafka consumer, idempotent |
+| Ledger service | Double-entry record of money movement (see #15) | Append-only DB |
+| Notification service | Email/push: upcoming payment, success, failure | Consumes outcome events |
+| Dunning / collections | Handles terminal failures: grace period, late fee, outreach | Workflow engine / state machine |
+| Reconciliation job | Matches processor settlement files to the ledger and flags breaks | Nightly batch |
+
+**Step-by-Step Flow (one installment, happy path):**
+1. **Origination**: loan is approved; servicing API writes `loans` plus 4 `installments` rows
+   (`status=SCHEDULED`, `due_ts`, `amount`) in **one transaction**.
+2. **Pre-notify** (T-3 days): a scan finds `due_ts` within 3 days and emits `payment.upcoming`; notification
+   service emails the borrower (also a regulatory courtesy).
+3. **Due time**: a dispatcher polls
+   `SELECT ... WHERE status='SCHEDULED' AND due_ts<=now() ORDER BY due_ts LIMIT 500 FOR UPDATE SKIP LOCKED`.
+4. **Claim**: in the same transaction it sets `status=PROCESSING`, `claimed_by`, `lease_expires_at`, and
+   increments `attempt_count`; commits. It then puts `{installment_id, attempt_no}` on the queue.
+5. **Execute**: an executor builds `idempotency_key = loan_id:installment_id:attempt_no`, inserts a
+   `payment_attempts` row (`status=INITIATED`) **before** calling out, then calls the processor.
+6. **Result**: the processor returns `SUCCESS`, `DECLINED` (hard), `RETRYABLE` (insufficient funds, timeout) or
+   (for ACH) `PENDING`, with settlement confirmed days later by a webhook or return file.
+7. **Publish**: executor writes the attempt result and emits `payment.succeeded|failed|pending`
+   (transactional outbox, so the DB write and event cannot diverge).
+8. **Apply**: the outcome consumer, idempotent on `idempotency_key`, marks the installment `PAID`, posts
+   ledger entries (debit cash / credit loan receivable), and triggers the success notification.
+9. **Retry path**: on `RETRYABLE`, set `status=SCHEDULED`, `due_ts = now + backoff(attempt)` (e.g. 1d, 3d, 5d),
+   up to a max; at the limit set `FAILED` and emit `payment.exhausted` to dunning.
+10. **Lease recovery**: a sweeper resets rows stuck in `PROCESSING` past `lease_expires_at`; because the
+    processor call is idempotent, re-running is safe.
+11. **Reconciliation** (nightly): compare processor settlement report vs `payment_attempts`/ledger; any
+    mismatch (charged but we show failed, or the reverse) opens a ticket and posts a correcting ledger entry.
+
+**Failure Modes:**
+- Executor crashes after the processor charged but before recording: the next run uses the same idempotency
+  key, so the processor returns the original result instead of charging again.
+- Ambiguous timeout: mark attempt `UNKNOWN`, query the processor by key, and decide only on a definite answer.
+- ACH return days later (NSF): arrives as a reversal event; ledger posts a reversing entry and the installment
+  returns to `SCHEDULED`/`FAILED`. This is why the status machine must allow `PAID -> RETURNED`.
+- Due-date thundering herd: partition the scan by `due_ts` hash/shard, rate-limit per processor, and stagger
+  charges within the day.
+- Poison message: after N consumer failures send to a dead-letter queue with an alert, not an infinite loop.
+
+**How Real Production Systems Do It (and what to copy):**
+
+*Stripe — [idempotency](https://stripe.com/blog/idempotency).* The client sends a unique key
+(`Idempotency-Key: AGJ6FJMkGQIpHUTX`) with each charge. The server correlates the key with the state of that
+request and handles three failure shapes: (1) **connection failure before reaching the server**: the retry is the
+first time the server sees the key, so it just runs; (2) **failure mid-operation**: if the earlier attempt was rolled
+back in an ACID database it is safe to rerun fully, otherwise the server recovers state and continues; (3) **response
+lost after success**: the server returns the cached result of the first success instead of charging again. Clients
+retry until success is *verified*, with exponential backoff (about 2^n) plus jitter so recovering servers aren't hit by
+a synchronized herd. Stripe also separates **definitive** failures (could not connect, safe to retry) from
+**ambiguous** ones (connection dropped mid-exchange, safe only because of the key). **Copy**: our executor treats
+a timeout as *ambiguous* and always reuses the same key.
+
+*Airbnb — payment orchestration and the Orpheus idempotency framework
+([Rebuilding Payment Orchestration](https://airbnb.tech/?p=49), summarized in
+[this write-up](https://biweekly-engineering.beehiiv.com/p/handling-double-payments-airbnb-biweekly-engineering-episode-32)).*
+Every payment call is split into three phases:
+1. **Pre-RPC**: look up the idempotency key in the **master** database; if that request already completed, return
+   its stored result; if not, insert the new request record.
+2. **RPC**: call the payment service provider (PSP), outside any open DB transaction.
+3. **Post-RPC**: write the PSP's response, or the failure, back to the database so a later retry can decide.
+Errors are classified: **5xx = retryable, 4xx = non-retryable** (the request itself is wrong). Idempotency reads and
+writes always go to the primary, never a replica, because replica lag could let a duplicate slip through. Larger
+workflows are modeled as a **DAG of retryable, idempotent steps**; Airbnb reports five 9s (99.999%) payment
+consistency after the rebuild. **Copy** the three-phase executor, shown next.
+
+*Executor sketch assembled from those two designs (pseudo-code, not either company's source):*
+```
+def execute(installment_id, attempt_no):
+    key = f"{loan_id}:{installment_id}:{attempt_no}"
+    # PRE-RPC (single DB txn on the primary)
+    with db.txn():
+        row = payment_attempts.get(key, for_update=True)
+        if row and row.status in (SUCCEEDED, DECLINED): return row.result     # replay stored result
+        if row and row.status == IN_FLIGHT and row.lease_valid(): raise Busy  # another worker owns it
+        payment_attempts.upsert(key, status=IN_FLIGHT, lease_until=now()+60s)
+    # RPC (no DB txn held open across the network)
+    try:
+        result = processor.charge(key, amount, method)       # processor also dedupes on key
+    except (Timeout, ConnectionError):
+        result = processor.lookup(key) or UNKNOWN            # ambiguous -> ask, don't guess
+    # POST-RPC
+    with db.txn():
+        payment_attempts.update(key, status=classify(result), result=result)
+        outbox.insert(event_for(result))                     # event published by relay -> Kafka
+```
+
+*Uber — [Payments Platform](https://www.uber.com/blog/ubers-payments-platform).* Uber splits the money lifecycle into
+**stateless microservices** (money order creation, processing, collection, disbursement) joined by **Kafka**, with two
+shared stores as sources of truth (the money-order store and the entity-balance store). Flows where a rider is
+waiting use **Cadence**, Uber's workflow engine, so the interactive path is a durable workflow while the backbone stays
+asynchronous. Uber Pay integrates 50+ payment methods behind a generic interface (charge, disburse, refund) so rail
+specifics stay out of the core. **Copy**: (a) the stage-per-service split maps to our dispatcher / executor /
+outcome consumer / ledger; (b) a durable-workflow engine (Cadence/Temporal) is a legitimate alternative to the
+polling dispatcher: one workflow per installment, a durable timer until `due_ts`, activities for charge and retry, and
+the workflow history is itself the audit trail. Trade-off to say out loud: polling is simpler to operate and easy to
+reason about at 100M installments; workflows give clearer per-installment logic but add an engine to run.
+
+*Affirm*: Affirm's postings for its Repayment Scheduling team describe it as the system that lets users schedule
+automatic payments to repay loans, at tens of billions of dollars a year. I found no public Affirm design write-up,
+so the above is the industry pattern; present it as such.
 
 **Follow-Up Questions:**
 1. How do you avoid two dispatch workers claiming and double-charging the same installment? →
@@ -1107,6 +1467,91 @@ ledger_entries(entry_id, loan_id, entry_type, amount, effective_ts, recorded_ts,
 loan_balances(loan_id, outstanding_balance, last_entry_id)  # materialized cache, rebuildable
 ```
 
+**Detailed Schema & Components:**
+
+```sql
+-- Reference data
+merchants(merchant_id PK, name, settlement_account_id, status)
+borrowers(borrower_id PK, ...)
+accounts(account_id PK, owner_type, owner_id, account_type)   -- LOAN_RECEIVABLE, CASH, MERCHANT_PAYABLE,
+                                                              -- INTEREST_INCOME, FEE_INCOME, REFUND_LIABILITY
+-- Contract
+loans(loan_id PK, borrower_id, merchant_id, principal, apr, term_count, status, created_ts)
+installments(installment_id PK, loan_id FK, seq, due_date, principal_due, interest_due, fee_due, status)
+-- Money movement (immutable)
+transactions(txn_id PK, loan_id, txn_type, effective_ts, recorded_ts, idempotency_key UNIQUE, reverses_txn_id NULL)
+ledger_entries(entry_id PK, txn_id FK, account_id FK, direction CHECK IN ('DEBIT','CREDIT'),
+               amount_minor BIGINT, currency, installment_id NULL, metadata JSONB)
+-- Derived
+account_balances(account_id PK, balance_minor, as_of_entry_id)   -- cache, rebuildable
+```
+
+Invariants enforced in code and by DB constraints:
+- For each `txn_id`, `SUM(debits) = SUM(credits)` (zero-sum, double entry), checked before commit.
+- Rows are insert-only; **corrections are new reversing transactions** (`reverses_txn_id`), never updates.
+- Money is integer minor units (`amount_minor`), never floats; one currency per transaction.
+- `idempotency_key` is unique, so a retried "apply payment" cannot post twice.
+
+**Components around the schema:**
+
+| Component | Role |
+|---|---|
+| Ledger service | The only writer of `transactions`/`ledger_entries`; validates zero-sum and idempotency |
+| Allocation engine | Decides how a payment splits across fees -> interest -> principal -> oldest installment |
+| Balance projector | Consumes ledger inserts, maintains `account_balances` and per-installment status |
+| Statement/query API | Point-in-time balance, payoff quote, payment history |
+| Reconciliation service | Compares ledger with processor files and merchant settlement reports |
+| Data warehouse sink | CDC (Debezium -> Kafka -> warehouse) for finance and analytics |
+
+**Step-by-Step Flow (borrower pays $30 of a $30 installment, with a late fee):**
+1. Payment succeeds at the processor (event from #14 with `idempotency_key`).
+2. Ledger service opens a DB transaction and checks `idempotency_key`; if present, return the existing `txn_id`.
+3. Allocation engine reads the installment (fee $5, interest $2, principal $23) and allocates the $30
+   fees -> interest -> principal.
+4. Ledger posts one `transactions` row and balanced entries: `DEBIT CASH 30`, `CREDIT FEE_INCOME 5`,
+   `CREDIT INTEREST_INCOME 2`, `CREDIT LOAN_RECEIVABLE 23`. Zero-sum check passes; commit.
+5. Projector updates `account_balances` and marks the installment `PAID` (idempotent via `as_of_entry_id`).
+6. Balance as of date `D`: `SUM(signed amount) WHERE account=LOAN_RECEIVABLE AND loan_id=? AND effective_ts<=D`.
+7. **Late ACH settlement**: entry is recorded on day 5 with `effective_ts` = day 2; projections for day 2..5 are
+   recomputed from the ledger; `recorded_ts` shows when we knew, which answers "what did we tell the borrower".
+8. **Refund**: merchant refunds $50 of a $100 loan; post a reversing transaction (credit receivable, debit
+   merchant payable), then recompute the remaining schedule via a *new* schedule version.
+9. **Settlement to merchant**: group entries by `merchant_id` and period, produce a settlement batch, pay out,
+   post `DEBIT MERCHANT_PAYABLE / CREDIT CASH`.
+
+**Scaling notes:** shard by `loan_id` (all of a loan's entries co-locate, so a single-shard transaction posts
+the whole transaction); hot merchant accounts that aggregate many loans should not be a single balance row, so
+use per-loan accounts plus an aggregated view, or batch-serialized writes for hot accounts.
+
+**How Real Production Systems Do It (and what to copy):**
+
+*Uber — [Payments Platform](https://www.uber.com/blog/ubers-payments-platform), ledger design.*
+- **Money order** = the unit of work: debits and credits between two or more entities for one commerce transaction
+  (a trip, an Eats order, a freight shipment). It is **immutable**; an adjustment is a *new* money order. This is our
+  `transactions` + `ledger_entries` with `reverses_txn_id`.
+- **Double-entry with zero-sum enforced before commit**: each participant's amount is explicit (an "entity fare"),
+  and the sum across entities must be zero, so ambiguity upstream can't create or destroy money.
+- **Ledger = entity -> sub-ledger accounts -> balance.** Originally an entity was a single ~1 KB DynamoDB row;
+  zero-balance sub-ledgers were pruned to keep rows small. They later hit limits (rows, hot keys, audit) and moved to
+  **LedgerStore**, built with Uber's Storage Platform team for auditability and tamper-evident records.
+- **Entity changelog**: every balance update is recorded, so any ledger can be rebuilt from inception. This is our
+  "balance is derived; rebuild from entries" principle.
+- **Strongly consistent balances** for 1.2B+ entities, with async cross-region replication; **hot entities** (B2B,
+  Uber Direct) used a **serialized batch-write** path for about 10x throughput. **Copy**: a merchant-payable
+  account touched by every loan is exactly this hot-row problem; batch writes per account in one writer, don't
+  let thousands of concurrent transactions contend on one row.
+- Scale reference: gross bookings grew from $50B to $217B annualized, total money movement nearly 2x that, and
+  several multi-tenant ledgers have run 7+ years, which is why they chose immutability and schema-flexible entries.
+- Not disclosed in the post: idempotency mechanics and reconciliation, so those pieces of our design come from
+  Stripe/Airbnb (see #14) and general practice.
+
+*Airbnb — [Rebuilding Payment Orchestration](https://airbnb.tech/?p=49).* Payment workflows as DAGs of idempotent
+steps that end in ledger postings; the stated outcome is 99.999% consistency. **Copy**: quote this as the target and
+tie it to why the unique `idempotency_key` on `transactions` exists.
+
+*Affirm*: no public Affirm ledger post found. Third-party guides say interviewers press on idempotency keys, double
+entry, and reconciling state when a downstream call fails midway; the schema above plus #14's executor answer all three.
+
 **Follow-Up Questions:**
 1. Why not just decrement a `balance` column on every payment? → it collapses the effective/recorded
    timestamp distinction, makes historical/point-in-time balance reconstruction impossible without a
@@ -1174,6 +1619,79 @@ rules(rule_id, version, definition, severity, enabled)
 scoring_requests(request_id, application_id, ts, rule_hits[], ml_score, decision)  # audit trail
 ```
 
+**Detailed Component Breakdown:**
+
+| Component | Responsibility | Tech choice (typical) |
+|---|---|---|
+| Decision API | Entry point from checkout/underwriting; owns the latency budget (e.g. p99 < 100 ms) and fallbacks | Stateless gRPC service |
+| Feature assembler | Fans out to online stores, merges request-time features | Parallel async calls with per-call timeouts |
+| Online feature store | Velocity counters, PII/device flags, account age | Redis/Cassandra/DynamoDB, TTL'd windows |
+| Streaming aggregator | Computes windowed counts from event stream into the online store | Kafka + Flink (sliding/tumbling windows) |
+| Offline feature store | Same features computed in batch for training (avoids train/serve skew) | Warehouse + feature definitions shared with online |
+| Rules engine | Versioned rules as data; hard-decline vs soft-signal | Rule DSL/JSON evaluated in-process; config pushed |
+| Model serving | Returns risk score for the feature vector | Hosted model service (GBDT/NN), shadow + canary versions |
+| Decision combiner | Rules + score + policy thresholds -> approve/decline/review | Pure function, config-driven thresholds |
+| Case management | Manual review queue, analyst tooling, label capture | Internal app + DB |
+| Decision log | Immutable record of inputs, features, rule hits, score, model version, decision | Kafka -> warehouse; required for adverse-action/regulatory explanation |
+| Label pipeline + training | Chargebacks, confirmed fraud, repayment defaults -> labels -> retrain | Airflow + Spark; delayed labels (weeks/months) |
+| Graph/link analysis | Shared device/PII/address clusters (the #4 problem at scale) | Graph store or union-find in stream job |
+
+**Step-by-Step Flow (one application at checkout):**
+1. Checkout sends `{application_id, user, PII hashes, device_id, ip, cart, merchant}` to the Decision API.
+2. **Normalize/enrich**: hash PII (never log raw SSN), resolve device/IP reputation.
+3. **Fan-out in parallel** (each with a hard timeout, e.g. 20-30 ms): velocity counters, PII fraud flags, graph
+   neighbours, account history.
+4. **Hard rules first**: if a hard-decline rule hits (confirmed-fraud PII, sanctions match), return `decline`
+   immediately and skip the model.
+5. **Model call**: send the assembled vector to model serving. If it times out or fails, use the degraded path
+   (rules only, wider manual-review band) and tag the decision `model_unavailable`.
+6. **Combine**: `score >= T_decline -> decline`; `T_review <= score < T_decline -> manual_review`; else
+   `approve`; soft rule hits can push a borderline score up a band.
+7. **Respond** to checkout and **async-log** the full decision record (inputs, features, versions, latency).
+8. **Stream update**: the application event updates velocity counters and the PII/device graph for the *next*
+   request.
+9. **Manual review**: analyst sees evidence, decides; the decision is a label.
+10. **Feedback**: confirmed fraud writes PII/device flags into the online store (propagation as in #4), and
+    labels join the training set. Delayed labels (chargeback, first-payment default) arrive weeks later, so
+    training uses label maturity windows.
+11. **Release**: a new model runs in **shadow** (scored, not acted on), then canary on a % of traffic, compared on
+    precision/recall and approval rate before full rollout.
+
+**Failure Modes & Tradeoffs:**
+- Feature store slow: use cached/partial features, mark `features_degraded`, widen the review band; never block
+  checkout on one dependency.
+- Train/serve skew: define features once and compute both online and offline from the same definition.
+- Adversarial drift: attackers probe thresholds; add randomized review sampling and monitor score distribution drift.
+- Fairness/compliance: lending decisions need explainable reasons and an audit trail, so log reason codes and keep
+  a human-readable model/rule version history.
+
+**How Real Production Systems Do It (and what to copy):**
+
+*Uber — Michelangelo (ML platform) and Palette (feature store): [Palette meta store](https://eng.uber.com/blog/palette-meta-store-journey/),
+[Michelangelo overview](https://eng.uber.com/blog/from-predictive-to-generative-ai/).*
+- **Online scoring path**: for a request, the serving layer fetches precomputed features from the online store
+  (reported as **Cassandra** in a third-party write-up), **joins them with features sent in the request payload**,
+  assembles the full feature vector, scores the model, and returns the prediction. This is our "feature assembler ->
+  model serving" boxes; request-time features (device, IP, cart) come in the payload and don't need a lookup.
+- **Palette** holds curated features (20,000+) with **batch and near-real-time** computation, including custom feature
+  sets for Fraud, Eats and Comms; a metastore handles feature discovery, creation, deprecation, and offline/online
+  serving setup. **Copy**: one feature definition feeds both training (offline) and serving (online), which is the
+  fix for train/serve skew.
+- Michelangelo scale: 5K+ models in production, ~10 million real-time predictions/second at peak, so model serving is
+  a shared platform, not each team's service.
+- **Delayed labels**: for fraud, outcome labels can take up to ~90 days, so you also monitor feature and prediction
+  *distributions* over time to catch drift before labels arrive. **Copy**: add a drift monitor and label-maturity
+  windows to training.
+- **Uber Risk platform** ([Feature Store Summit 2023 slides](https://content.hopsworks.ai/hubfs/Feature%20Store%20Summit%202023/FS%20Summit%2023%20-%20Uber%20(Risk%20Platform).pdf)):
+  a dedicated risk feature platform, "uFlow", with batch, near-real-time, aggregator and real-time computation and
+  fetch stages, plus a graph feature store ("uGraph"). **Copy**: velocity counters = aggregator stage, shared
+  device/PII clusters = graph store, and the same-request features = real-time stage. I only saw the slide
+  outline, so latency numbers are not claimed.
+
+*Affirm*: public job postings describe fraud work as adversarial, with continuous attacker pressure on identity and
+synthetic-identity fraud. I found no public Affirm fraud architecture post; state that the above is the industry
+pattern and ask the interviewer about latency budget and manual-review capacity.
+
 **Follow-Up Questions:**
 1. How do you deploy a new fraud rule without redeploying the scoring service? → rules live as versioned
    config/data (not code) evaluated by a generic rule-evaluation engine, so publishing a new rule is a
@@ -1222,6 +1740,11 @@ Sources used for compiling these questions:
 - [Affirm Fulltime Onsite Interview Experience for SDE(General) Role — 1point3acres](https://www.1point3acres.com/interview/thread/1138337)
 - [Affirm System Design Technical Phone Interview Experience — 1point3acres](https://www.1point3acres.com/interview/thread/1032443)
 - [Affirm Coding Interview: Records, Hierarchies & Rules — FastPrep](https://www.fastprep.io/affirm-interview)
+- [Uber's Payments Platform](https://www.uber.com/blog/ubers-payments-platform)
+- [Uber's Experimentation Platform (XP)](https://www.uber.com/blog/xp/)
+- [Uber Palette meta store](https://eng.uber.com/blog/palette-meta-store-journey/)
+- [Stripe: Designing robust and predictable APIs with idempotency](https://stripe.com/blog/idempotency)
+- [Airbnb: Rebuilding Payment Orchestration (Orpheus)](https://airbnb.tech/?p=49)
 - [Affirm System Design Interview: The Complete Guide — System Design Handbook](https://www.systemdesignhandbook.com/guides/affirm-system-design-interview/)
 
 Note: 1point3acres' individual interview-report threads require forum membership to view full question

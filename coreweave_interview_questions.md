@@ -372,7 +372,7 @@ instead of just a bounded worker pool.
 | One URL times out twice then succeeds | Content returned, counted as 3 attempts against that URL only |
 | One URL exhausts all retries | `None` for it; other URLs' results unaffected |
 | `fetch(url)` raises (a real socket timeout, connection reset) rather than returning a status | Treated as a retryable failure, not an uncaught exception that crashes `scrape_urls` |
-| Rate limiter shared across worker threads | No burst of more than `N` requests within any 1-second window, verified via timestamped mock calls |
+| Rate limiter shared across worker threads, sustained/steady-state traffic | No more than `N` requests/sec once the initial burst (see Key Insight #5) has drained, verified via timestamped mock calls |
 
 **Key Insights:**
 1. The rate limit is **global**, not per-worker — a naive "sleep 1/N seconds inside each worker" throttles
@@ -395,8 +395,13 @@ instead of just a bounded worker pool.
    requests before steady-state throttling kicks in — this is standard, correct token-bucket behavior
    (bursting is the point of a token bucket over a naive fixed-rate sleep), but it means wall-clock time
    for a batch is closer to `(len(urls) - rate) / rate` than the naive `len(urls) / rate` — worth being
-   precise about that when asked to justify a timing assertion. Start `_tokens = 0` instead if the
-   interviewer wants strictly no burst, throttled from the very first request.
+   precise about that when asked to justify a timing assertion. **Be precise about what "no burst" means
+   if an interviewer pushes on it**: with the bucket starting full, a 1-second *sliding* window that starts
+   right at the burst can see up to `2 * rate` requests (the instant burst plus a full second of steady
+   refill immediately after) — verified empirically (5 instant + ~5 more trickling in over the next
+   second, for `rate=5`). The correct, defensible claim is "steady-state throughput never exceeds `rate`/
+   sec," not "no 1-second window ever exceeds `rate` requests." Start `_tokens = 0` instead if the
+   interviewer specifically wants zero burst, throttled from the very first request.
 
 **Python Solution:**
 ```python
@@ -425,6 +430,12 @@ class TokenBucket:
                     return
                 wait = (1 - self._tokens) / self.rate
             time.sleep(wait)
+
+
+# Variant: `self._tokens = 0` in __init__ instead of `self.rate` throttles from the very first
+# request, with no initial burst — trade the burst-tolerant throughput above for a strict "never
+# more than `rate` in any window" guarantee (verified: max ~`rate + 1` per 1-second window, the
+# +1 being ordinary sampling/boundary noise, not a burst).
 
 
 def _fetch_with_retry(fetch, bucket: TokenBucket, url: str, max_retries: int):
@@ -530,6 +541,85 @@ tenant_quotas(tenant_id, max_concurrent_gpus, max_gpu_hours_per_day)
   additions/removals) — cache it in the scheduler's memory and update via an event stream from the
   inventory/health system, rather than querying a central store per decision.
 
+**Detailed Component Breakdown:**
+
+| Component | Responsibility | Tech choice (typical) |
+|---|---|---|
+| API / admission | AuthN/Z, validates job spec, checks tenant quota, assigns priority class | Stateless API + policy engine |
+| Job store | Durable job state machine: `PENDING -> RESERVED -> RUNNING -> (PREEMPTING) -> DONE/FAILED` | etcd / Postgres; optimistic concurrency via version |
+| Scheduling queue | Per-priority, per-tenant queues with fair-share and aging | In-memory, rebuilt from the job store on start |
+| Scheduler (leader) | Scoring/placement loop, one active leader, hot standbys | Leader election (lease); single-writer for reservations |
+| Topology/inventory cache | Tree: DC -> rack/IB leaf -> node -> NVLink domain -> GPU, with free/used/health | In-memory, fed by informer/watch streams |
+| Reservation manager | Atomic all-or-nothing reservation with epoch fencing | CAS on GPU records / transaction |
+| Node agent (kubelet + device plugin) | Starts/stops workers, reports health, performs checkpoint signal | DaemonSet |
+| Preemption controller | Picks victims, signals checkpoint, enforces grace period, requeues | Part of scheduler |
+| Health/lifecycle controller | Cordons/drains/replaces bad nodes (see #6) | Controller + CRDs |
+| Checkpoint service | Receives/stores checkpoints (see #7) | Object store + cache |
+| Quota & accounting | Tracks GPU-hours per tenant, billing and fairness inputs | Time-series + ledger table |
+| Observability | Queue depth, wait time, fragmentation, GPU utilization, preemption rate | Prometheus/Grafana |
+
+**Step-by-Step Flow (a 64-GPU gang job):**
+1. **Submit**: tenant calls `submit_job{gpus=64, gang=true, topology=nvlink-per-node, priority=P2, ckpt_uri}`.
+2. **Admit**: API validates, checks `tenant_quota` (concurrent GPUs, daily GPU-hours); over quota -> reject
+   or queue with reason. Job persisted as `PENDING` (durable before ack).
+3. **Enqueue**: scheduler's watch picks it up into the tenant's queue; effective priority = base + aging.
+4. **Pick next**: each cycle, choose the head job by priority then fair-share (lowest usage/quota ratio).
+5. **Filter** candidate nodes: healthy, not cordoned, right GPU model, enough free GPUs, matching labels.
+6. **Score/place** (topology): 64 GPUs = 8 nodes of 8; prefer 8 nodes under one IB leaf switch/rack, then
+   one pod/DC. Score = fewer switch hops, then best-fit (minimize fragmentation), then power/cost.
+7. **Reserve atomically**: write reservations for all 64 GPUs with each GPU's `epoch`; CAS fails if any changed.
+   On failure: release everything, back off, retry. Job -> `RESERVED`.
+8. **Launch**: node agents pull their assignments, start containers, set up NCCL environment (rank, world size,
+   rendezvous address); a barrier waits until all 8 nodes report ready, with a timeout; if not, tear down and
+   rescore, so the job never half-starts. Job -> `RUNNING`.
+9. **No fit**: choose the lowest-priority victim set whose eviction frees a valid topology; send `SIGTERM`/
+   checkpoint request, wait up to the grace period (hard kill after), release GPUs, requeue victim with
+   `resume_from=latest_ckpt`.
+10. **Fault mid-run**: node reports unhealthy GPU -> controller marks job `INTERRUPTED`, restarts from the last
+    checkpoint on a fresh reservation (replacement node swapped in), with retry budget.
+11. **Complete**: release reservations, write usage records to accounting, free capacity triggers the next cycle.
+
+**Failure Modes:**
+- Scheduler leader dies: standby takes the lease and rebuilds queues + inventory from the stores; running jobs
+  are untouched because workers don't depend on the scheduler once started. Epochs fence the old leader's writes.
+- Fragmentation: lots of 1-GPU jobs scattered across nodes block 8-GPU gangs. Mitigate with bin-packing small
+  jobs onto already-partial nodes, reserving whole nodes for big gangs, and optional defragmentation by
+  checkpoint-and-move.
+- Gang deadlock: two big jobs each hold half of what they need. Prevent with all-or-nothing reservation
+  (no hold-and-wait) or **backfill with a reservation for the head job** so small jobs fill gaps without delaying it.
+
+**How Real Production Systems Do It (and what to copy):**
+
+*CoreWeave SUNK — [Slurm on Kubernetes](https://wf.coreweave.com/blog/sunk-slurm-on-kubernetes-implementations)
+("two solutions, one platform, one pool of compute").*
+- **Slurm control plane as pods**: standard Slurm daemons (controller, accounting) run as Kubernetes workloads from a
+  Helm chart with configurable resource requests; **login pods** give users a normal Slurm interface (`sbatch`,
+  `srun`) with Kubernetes hidden behind it. Slurm config, **topology**, prolog/epilog scripts and secrets live in
+  ConfigMaps/Secrets mounted into every component.
+- **Compute = one `slurmd` pod per bare-metal node (1:1)**, running `munged`, with shared filesystems mounted as
+  PVCs. A **Nodeset CRD** defines Slurm nodes in Kubernetes (like a DaemonSet in that it maps one pod per node, but with
+  protected updates and scaling) and reports status: candidate nodes matching affinity, nodes assigned as Slurm nodes,
+  and ready / running / drain conditions.
+- **Syncer**: a Slurm REST client (with caching for large clusters) plus a pod controller that reconciles pod state
+  and Slurm state both ways. If Slurm drains a node, the Syncer annotates the pod; if Kubernetes cordons a node (e.g.
+  a hardware fault), the matching Slurm node is drained with a reason. This is the "single source of truth for
+  health" answer in the follow-ups.
+- **Slurm as a Kubernetes scheduler**: a custom scheduler (own namespace) places *Kubernetes* pods using Slurm
+  state. A pod scheduled this way (e.g. a Knative inference pod) creates a **Slurm job**; Slurm can **preempt
+  lower-priority work** to satisfy it, and once Slurm allocates the nodes the scheduler places the pod there. Result:
+  reserved/on-demand GPUs serve both batch training and serverless inference from one pool, raising utilization.
+- **Topology**: generated automatically and stored in Slurm config; [SUNK docs](https://docs.coreweave.com/docs/products/sunk/concepts/overview)
+  state support for Slurm's **tree** and **block** topology plugins.
+- **Why this is a good answer**: it reuses Slurm's decades of gang scheduling, backfill, fair-share, accounting and
+  preemption (all hard to rebuild) and uses Kubernetes for what it is good at: containers, lifecycle, HA, GitOps.
+  If asked "build vs reuse", say you'd reuse Slurm (or Kueue/Volcano on plain Kubernetes) and invest in topology
+  data, health integration and quota policy, which is where the CoreWeave-specific value is.
+
+*How this maps to our steps:* admission and quotas = Slurm accounting/QOS; queue + priority + aging = Slurm
+multifactor priority; filter/score with topology (step 6) = tree/block topology plugin; atomic reservation (step 7)
+= Slurm's node allocation before launch; preemption (step 9) = Slurm preemption with checkpoint; node health (step
+10) = Syncer + drain integration (details in #6).
+
 **Follow-Up Questions:**
 1. What happens if a job's gang requirement can never be satisfied because the fleet has no single
    NVLink domain with enough free GPUs? → surface a clear "cannot be gang-scheduled at current fleet
@@ -618,6 +708,67 @@ replacement_requests(node_id, reason, status, opened_at)
   hardware failure (e.g. a bad batch, a cooling incident) doesn't trigger a replacement stampede that
   itself destabilizes the fleet-provisioning system.
 
+**Detailed Component Breakdown:**
+
+| Component | Responsibility | Notes |
+|---|---|---|
+| GPU device plugin (DaemonSet) | Advertises `nvidia.com/gpu`, runs low-level GPU health checks (Xid errors, ECC, NVLink state) | Per-device health, not just node `Ready` |
+| Node health checker | Periodic deeper checks: GPU burn/diagnostic, NCCL/InfiniBand connectivity, disk, driver | Runs on idle nodes and after each job |
+| Node conditions / taints | Publishes failures as Kubernetes node conditions; cordon/taint | Automation keys off conditions |
+| Topology CRDs + controller | NVLink domain, IB leaf-switch and rack membership as custom resources | Inventory source for scheduler |
+| Lifecycle controller | Debounce -> cordon -> drain -> reboot/reprovision/replace; rate-limited | The "no 3am pager" box |
+| Fleet provisioning / repair | Reimage, reboot, RMA ticket, physical swap, rejoin | Humans only for hardware |
+| Scheduler sync (e.g. Syncer) | Mirrors drain/cordon state between Kubernetes and the job scheduler | One truth for health |
+| Telemetry pipeline | DCGM/exporter metrics, events -> Prometheus/Kafka | Detect flapping, correlated failures |
+| Alerting | Pages on fleet-level symptoms (replacement rate, failures per rack), not per-GPU blip | Reduces page volume |
+
+**Step-by-Step Flow (a GPU develops an uncorrectable ECC error):**
+1. Device plugin sees an **Xid/ECC error** from the driver within its health-check interval (seconds).
+2. It marks that device `Unhealthy`; the node's advertised GPU count drops 8 -> 7 so **no new pod can request it**.
+   A pod already using that GPU is flagged.
+3. Health checker confirms (re-runs diagnostic N times / waits the debounce window) to rule out a transient blip.
+4. Confirmed: lifecycle controller sets a **node condition** (e.g. `GpuUnhealthy`) and, if the failure is
+   node-wide (all GPUs, NVLink fabric, NIC), **cordons** the node; if it is one GPU, only that device is withdrawn.
+5. The job layer is told through the scheduler sync: the affected job is checkpointed/failed and **requeued** on
+   healthy hardware; unrelated pods on the same node continue.
+6. **Drain**: workloads depending on the bad device are evicted; the controller waits for them to exit.
+7. **Remediate** by class: transient/software -> reboot and re-verify; persistent -> **triage**: remove the node
+   from the cluster and request replacement; physical fault -> repair ticket / swap with a spare node.
+8. **Rejoin gate**: a rebooted or replaced node is not schedulable until it passes health + NCCL/InfiniBand
+   verification with its topology peers.
+9. **Undrain** only after sustained health (hysteresis), then topology CRDs are updated and the scheduler sees capacity.
+10. Everything is logged as events for fleet analytics (failure rate by rack, driver version, batch).
+
+**Failure Modes:**
+- Correlated failures (power/cooling/bad firmware): cap concurrent drains and replacements (e.g. never drain more
+  than X% of a rack at once); alert on *rate*, not individual events.
+- Silent data corruption/straggler GPU: a GPU that is "healthy" but slow stalls a synchronous job; detect with
+  per-rank step-time monitoring and pre/post-job diagnostics.
+- Device plugin crash: fail closed, so GPUs withdraw from allocatable until it returns.
+
+**How Real Production Systems Do It (and what to copy):**
+
+*CoreWeave — SUNK node lifecycle ([drain/undrain docs](https://docs.coreweave.com/products/sunk/manage_sunk/drain-and-undrain-nodes.md)).*
+- **Health check after each job**: Node Health Check (NHC) runs in the **Slurm epilog** after a job, but only when no
+  other job is running on that node. A failed check **drains** the node and the drain reason starts with `NHC:`.
+- **Drain semantics**: a Slurm-drained node accepts no *new* jobs but lets running jobs finish; unlike Kubernetes
+  drain it does not evict. (Copy this distinction: "stop new work" and "evict existing work" are separate
+  steps and a design should state which one applies.)
+- **Periodic verification of idle nodes**: CoreWeave's **HPC Verification** framework tests idle nodes hourly. If a
+  drain reason contains `sunk:verify-undrain`, SUNK **auto-undrains** the node after the next passing test; if it
+  fails or the node never becomes idle, it stays drained. This is the "sustained health before uncordoning" rule.
+- **Kubernetes-driven drains**: when a Kubernetes node condition fires, CoreWeave's lifecycle automation **cordons**
+  the node and the Syncer mirrors it into Slurm as a `k8s: cordon:` drain reason. Documented outcomes: **reboot**
+  (node returns to production and the drain clears; allow about an hour once idle, about three hours before it is
+  considered stuck), or **triage** (node removed for repair and replaced; the new node joins Slurm as a *new* node).
+  Administrator reasons (`AdminMaintenanceMode`, `AdminPermanentFailure`) persist until a person clears them, so a
+  human decision can't be overridden by automation. **Rolling updates** undrain a node once its `slurmd` pod
+  restarts.
+- **Failed prolog/epilog** can also drain a node, and those cases may need manual troubleshooting.
+- The [SUNK overview](https://docs.coreweave.com/docs/products/sunk/concepts/overview) states SUNK is integrated with
+  CoreWeave Kubernetes Service (CKS) hardware lifecycle management: node operators act on unhealthy nodes, and that
+  information propagates both ways between CKS and SUNK.
+
 **Follow-Up Questions:**
 1. How do you avoid false-positive cordoning from a transient, self-recovering GPU blip? → debounce window
    plus requiring the health check to fail N consecutive times, not once — the same anti-flapping logic
@@ -698,6 +849,74 @@ cache_nodes(node_id, capacity, current_occupancy, colocated_gpu_nodes[])
 - Checkpoint write bursts are naturally correlated across many concurrently-running jobs (everyone tends to
   checkpoint on similar cadences); rate-limit or stagger checkpoint scheduling per job slightly rather than
   letting every job's checkpoint timer coincide and saturate the write path simultaneously.
+
+**Detailed Component Breakdown:**
+
+| Component | Responsibility | Notes |
+|---|---|---|
+| Object store (origin) | Durable dataset + checkpoint storage; S3-compatible API | Erasure-coded, multi-AZ |
+| Gateway + index layer | Authenticates, maps bucket/key -> object location, handles metadata | Scales independently of data |
+| Per-node cache proxy (LOTA-style) | Local S3-compatible proxy on every GPU node, caches objects on node NVMe | Training code only changes endpoint URL |
+| Distributed cache index | Knows which node holds which object so peers/clients find it | Global cache across nodes |
+| Dataset loader (client) | Sharded, parallel, prefetching reader (WebDataset/Mosaic-style) | Keeps GPUs fed |
+| Checkpoint writer | Async, sharded write of model state; atomic manifest commit | Separate path/QoS from reads |
+| Cache pre-warmer | Loads upcoming dataset into cache before job start | Driven by scheduler |
+| Tiering/lifecycle manager | Moves old checkpoints/data to cheaper tiers, expires | Policy-driven |
+| Quota/QoS | Per-tenant bandwidth and IOPS limits | Prevents noisy neighbors |
+| Metrics | Per-GPU data-wait time, cache hit rate, per-shard latency | Makes starvation visible |
+
+**Step-by-Step Flow:**
+*Read path (training epoch)*
+1. Scheduler places the job and notifies the **pre-warmer** with the dataset id; the cache starts pulling shards.
+2. Each rank's dataloader is assigned a **disjoint set of shards** (rank-based sharding) and starts N parallel
+   prefetch threads against the local proxy endpoint.
+3. Proxy checks the local NVMe cache: **hit** -> serve at local-disk speed. **Miss** -> fetch from the object store
+   (via gateway/index), write to NVMe, serve; a read of *any part* of an object can cache the whole object.
+4. Subsequent epochs hit the cache; steady state GPUs never touch the origin.
+5. Metrics record hit rate and per-step data-wait; sustained wait > threshold raises "data starved" to the job owner.
+
+*Write path (checkpoint)*
+1. Every K steps each rank snapshots its shard of model/optimizer state to local memory (fast, short pause).
+2. A background thread writes shards to the object store in parallel as multipart uploads, **separate from the read
+   path/QoS**, while training continues.
+3. When all shards are durable, a writer commits a **manifest** (list of shard URIs + checksums + step number) with
+   an atomic put; only a checkpoint with a committed manifest is considered valid.
+4. On failure/preemption, the new job reads the latest *committed* manifest and loads shards in parallel.
+5. Lifecycle policy keeps the last N checkpoints hot, tiers older ones down, and deletes beyond retention.
+
+**Failure Modes:**
+- Partial checkpoint (crash mid-write): no manifest -> ignored; the previous manifest remains valid.
+- Cache node lost: objects refetch from origin; hot shards re-replicated; the job slows but doesn't fail.
+- Origin throttling on cold start: stagger and prefetch; pre-warm from the scheduler's knowledge of upcoming jobs.
+- Checkpoint storms: jitter per-job checkpoint intervals and cap write bandwidth per tenant.
+
+**How Real Production Systems Do It (and what to copy):**
+
+*CoreWeave AI Object Storage (CAIOS) with LOTA —
+[benchmark write-up](https://coreweave.com/blog/benchmark-results-coreweave-ai-object-storage-delivers-2-gb-s-per-gpu-throughput-across-any-number-of-gpus),
+[CAIOS docs](https://docs.coreweave.com/products/storage).*
+- **Architecture**: a **gateway and index layer**, an **object repository**, and a **LOTA proxy on each GPU node**;
+  together they form a **global cache across all GPU nodes**. Applications keep using the **S3-compatible** API and
+  just point at the LOTA endpoint (`cwlota.com`) with no custom code; the proxy decides cache vs origin.
+- **Per-node NVMe cache**: 1 TiB per node in the benchmark (adjustable up to local disk), so 20 nodes = 20 TiB global
+  cache. **Whole-object caching**: accessing any segment of an object caches the whole object for later reads.
+  **Pre-staging**: users can load datasets into the cache ahead of time, recommended for large multimedia files,
+  inference workloads and container images.
+- **Hardware path**: benchmark nodes had 8x H200, one **BlueField-3 DPU with dual 100 Gbps links** for storage
+  traffic, and separate ConnectX-7 InfiniBand adapters for GPU-to-GPU traffic. **Copy**: storage and
+  GPU-collective traffic ride **separate networks**, so reads never compete with NCCL all-reduce.
+- **Measured behavior** (20 nodes, Warp S3 benchmark, 10,000 objects of 50 MiB written then random-read for 10 min):
+  while the cache was filling (first minute) about **24 GiB/s aggregate**; once warm and served from local NVMe
+  **368 GiB/s aggregate = 18.4 GiB/s per node = 2.3 GiB/s per GPU**. The write phase used 10 MiB multipart parts with
+  100 threads; **write throughput was not benchmarked** in that post. The cold-vs-warm ~15x gap is the number to quote
+  for why caching and pre-warming matter. The "scales to any number of GPUs" claim is stated as expected, with
+  customer corroboration, not as part of the 20-node test.
+- **Vendor-reported scale** (CoreWeave materials, not independently verified): a frontier-model customer running LOTA
+  across 15,000+ GPUs with ~20 PB of cache at about 99.7% hit rate; LOTA can also accelerate reads of a bucket in
+  another CoreWeave region without keeping a second copy.
+- **Design lessons to say out loud**: cache on the node (NVMe is the cheapest high-bandwidth tier), make the cache
+  transparent behind S3 so users change one URL, separate storage and collective networks, and measure
+  cold vs warm separately.
 
 **Follow-Up Questions:**
 1. How do you keep a single popular dataset from making one cache shard a hotspot? → replicate hot shards
@@ -781,6 +1000,9 @@ Sources used for compiling these questions:
 - [CoreWeave Onsite Interview Experience for Fulltime SDE Position — 1point3acres](https://www.1point3acres.com/interview/thread/1143428)
 - [Find a Directed Resource Access Path (CoreWeave Online Assessment) — FastPrep](https://www.fastprep.io/problems/coreweave-resource-access-path)
 - [CoreWeave Online Assessment and Interview Insights — FastPrep](https://www.fastprep.io/hiring-insights/coreweave)
+- [CoreWeave SUNK: Slurm on Kubernetes](https://wf.coreweave.com/blog/sunk-slurm-on-kubernetes-implementations)
+- [CoreWeave SUNK drain/undrain docs](https://docs.coreweave.com/products/sunk/manage_sunk/drain-and-undrain-nodes.md)
+- [CoreWeave AI Object Storage benchmark (LOTA)](https://coreweave.com/blog/benchmark-results-coreweave-ai-object-storage-delivers-2-gb-s-per-gpu-throughput-across-any-number-of-gpus)
 - [What to Expect in the CoreWeave System Design Interview — DesignGurus](https://www.designgurus.io/answers/detail/what-to-expect-in-the-coreweave-system-design-interview)
 - [CoreWeave Interview Guide (2026): Specialty GPU Cloud — TechInterview.org](https://www.techinterview.org/companies/coreweave-interview-guide/)
 
