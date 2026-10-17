@@ -14,10 +14,14 @@
 5. [Multi-Tenant GPU Cluster Scheduler](#5-system-design--multi-tenant-gpu-cluster-scheduler)
 6. [Kubernetes Control Plane for a GPU Fleet](#6-system-design--kubernetes-control-plane-for-a-gpu-fleet)
 7. [High-Throughput Storage for ML Training Data](#7-system-design--high-throughput-storage-for-ml-training-data)
+8. [Notification System](#8-system-design--notification-system)
+
+**Database Design**
+9. [Database Design Interview — Database System](#9-database-design-interview--database-system)
 
 **Process & Behavioral**
-8. [Interview Process Overview](#8-interview-process-overview)
-9. [Behavioral Themes](#9-behavioral-themes)
+10. [Interview Process Overview](#10-interview-process-overview)
+11. [Behavioral Themes](#11-behavioral-themes)
 
 ---
 
@@ -933,7 +937,439 @@ cache_nodes(node_id, capacity, current_occupancy, colocated_gpu_nodes[])
 
 ---
 
-## 8. Interview Process Overview
+## 8. System Design — Notification System
+
+**Problem Statement:**
+From CoreWeave's own interview-prep note for the loop (not a third-party report): *"System Design Interview
+(notification system): review the fundamentals of designing scalable distributed systems. Ask clarifying questions
+before proposing a solution, define your assumptions and key tradeoffs, and discuss how your design addresses
+scalability, reliability, fault tolerance, and varying traffic patterns... explain how components interact and how the
+design can evolve as requirements change. The interview is collaborative."*
+So the grading is on **process**: clarify, state assumptions, justify tradeoffs, handle bursts and failures, and evolve
+the design. The prompt is generic, so frame it for CoreWeave's world: customers (and internal on-call) must be told
+about GPU job events, node and rack failures, maintenance windows, quota and billing thresholds, and incidents.
+
+### Step 0. Clarifying questions to ask (say these out loud first)
+1. **Who are the recipients?** External customers (tenants with many users), internal engineers/on-call, or both?
+2. **What triggers notifications?** System events (job failed, node drained), scheduled (maintenance reminders), user-
+   configured alerts, billing/quota thresholds? Do customers define their own alert rules, or only subscribe?
+3. **Channels?** Email, webhook, Slack/Teams, SMS, PagerDuty, in-app inbox? Is webhook (machine consumption) first-class?
+4. **Priority classes?** Is there a "critical, deliver in seconds" tier (node failure killing a training job) versus
+   "bulk, can wait" (weekly usage report)?
+5. **Delivery guarantee?** At-least-once with dedupe, or best-effort? Is a missed critical alert acceptable? (Never.)
+6. **Latency targets** per priority, **volume**, and **burst** shape (a rack failure produces a storm).
+7. **User controls:** preferences, quiet hours, digests/batching, mute, per-tenant rate caps?
+8. **Compliance/audit:** must we prove a notification was sent (SLA credits, incident records)?
+9. **Multi-region** and data-residency constraints?
+
+### Assumptions (stated, hypothetical, to anchor the math)
+- 5,000 tenants, 100,000 end users; ~2 channels per subscription on average.
+- Steady state 100 events/s ingested -> ~300 deliveries/s after fan-out. **Incident burst**: a rack/power event or a
+  bad rollout raises events 50-100x for 5-10 minutes: ~10,000 events/s, which would fan out to 30,000 deliveries/s
+  if not collapsed.
+- Critical delivery within 10 s (p99); standard within 60 s; bulk/digest within minutes.
+- Retention: delivery records 90 days hot, 1 year archived (audit).
+- Storage back-of-envelope: 100 events/s x 86,400 = 8.6M events/day x ~1 KB = ~9 GB/day of events, ~3x that for
+  delivery records; fits a single sharded relational cluster, not a data-warehouse problem.
+
+**Functional Requirements:**
+- Producers publish events; users subscribe by tenant/project/resource/severity and channel.
+- Route each event to the right recipients and channels, rendering from templates.
+- Support dedupe, aggregation (many events -> one incident message), digests, quiet hours, and escalation.
+- Provide delivery status, retries, in-app inbox, and an audit trail.
+
+**Non-Functional Requirements:**
+- Critical notifications are **not delayed by bulk traffic** (isolation) and **survive failures** of the notification
+  system's own components; no silent loss.
+- Idempotent: the same event never produces duplicate messages (at-least-once internally, effectively-once to users).
+- Elastic under bursts; protects external providers and customer endpoints from overload (rate limits).
+- Observability: end-to-end latency per priority, queue lag, provider error rates.
+
+### Component Breakdown
+
+| Component | Responsibility | Tech choice (typical) |
+|---|---|---|
+| Event producers | Scheduler, node-health controller (see #6), billing, SUNK/Kubernetes events, API | Publish via an **outbox** so the DB write and the event cannot diverge |
+| Ingestion API + schema registry | Validates events (`event_id`, `type`, `tenant_id`, `severity`, `subject`, `dedupe_key`, `ts`) | Stateless gRPC/HTTP; Avro/Protobuf |
+| Event bus | Durable, replayable, partitioned by `tenant_id` (or subject) | Kafka; separate topics per priority tier |
+| Dedupe + aggregation | Drops repeats, groups storms into incidents | Stateful stream job (Flink/Kafka Streams) or Redis with TTL |
+| Subscription / preference service | Who wants what, on which channel, quiet hours, escalation policy | Relational DB (source of truth) + cache |
+| Router / fan-out | Resolves recipients, picks channels, renders template, writes delivery records | Stateless workers consuming per-priority topics |
+| Delivery queues | Per-channel, per-priority queues with delayed-retry topics | Kafka topics (`email.critical`, `webhook.standard`, `retry.1m`...) |
+| Channel workers | Email, webhook, Slack, SMS, PagerDuty adapters; per-destination rate limit, circuit breaker | Worker pools scaled per channel |
+| Scheduler | Digests, quiet-hours release, maintenance reminders, escalation timers | Durable due-time index (poll), not in-memory timers |
+| Delivery store | `deliveries` state machine + audit trail | Sharded relational DB; archive to object storage |
+| In-app inbox | Per-user feed, read/unread | KV/wide-column store keyed by user + WebSocket/SSE push |
+| Template service | Localized templates, versioned | Config store |
+| Observability + meta-monitoring | Metrics, tracing by `event_id`, **dead-man's-switch** | Prometheus + a *separate* alert path |
+
+### Step-by-Step Flow (a rack loses power; 64 nodes go unhealthy)
+1. **Detect/publish**: the node-health controller sees 64 nodes `NotReady` and each affected job fails. It writes
+   events through its outbox: `node.unhealthy` x64 (`subject=node/<id>`, `rack=R12`, `severity=critical`) and
+   `job.failed` per job. The relay publishes them to Kafka (`events.critical`).
+2. **Validate**: ingestion rejects malformed events to a dead-letter topic with an alert; accepted events get a
+   server timestamp.
+3. **Dedupe**: a short-window check on `dedupe_key = type:subject:state` (Redis `SET NX` with TTL ~10 min, or
+   stream-state) drops flapping repeats (a node going NotReady->Ready->NotReady).
+4. **Aggregate**: the stream job groups by `(tenant_id, incident_class, rack)` using a **group-wait** window
+   (e.g. 20-30 s): 64 node events plus 40 job failures for one tenant become **one incident notification** ("rack R12
+   power event: 64 nodes affected, 40 jobs failed, checkpoints available"). The first notification still goes out fast
+   (send at first event, then update); later changes are batched into follow-ups on a **group-interval** (see
+   Alertmanager below). Critical events skip long batching windows.
+5. **Resolve recipients**: the router loads the tenant's subscriptions (cached, invalidated on change), applies
+   severity thresholds, quiet hours (critical bypasses), and the escalation policy (on-call primary, then secondary).
+6. **Fan-out + render**: for each recipient/channel it creates a `deliveries` row (`delivery_id =
+   hash(event_or_incident_id, recipient, channel)`, `status=QUEUED`) in the same transaction as enqueueing (outbox
+   again), renders the template, and publishes to `webhook.critical`, `email.critical`, etc.
+7. **Send**: a channel worker takes the message, checks the **per-destination token bucket** (per customer webhook,
+   per provider), sets `status=SENDING`, and calls out with a timeout, passing the `delivery_id` as the provider
+   idempotency key where supported.
+8. **Outcome**: success -> `DELIVERED` (webhooks: 2xx; email: provider accepted, with bounce/complaint webhooks
+   updating status later). Retryable failure (timeout, 5xx, 429) -> publish to a delayed retry topic with
+   exponential backoff plus jitter (`retry.5s` -> `1m` -> `10m` -> `1h`); non-retryable (4xx, hard bounce) -> `FAILED`
+   and suppress the address.
+9. **Escalate**: if a critical page isn't acknowledged within N minutes, the scheduler's due-time index fires the next
+   step in the escalation policy (secondary on-call, then SMS/phone).
+10. **Customer webhook broken**: a per-endpoint circuit breaker opens after repeated failures; deliveries park with
+    backoff; after days of failure the endpoint is disabled and the tenant is notified through a different channel.
+11. **Audit/inbox**: every state change appends to the audit log; the in-app inbox gets the incident entry and pushes
+    over WebSocket/SSE.
+12. **Resolution**: when nodes recover, a `resolved` event updates the same incident thread and sends one "resolved"
+    message (not 64).
+
+### Data Model (sketch)
+```
+subscriptions(sub_id, tenant_id, user_id, event_filter, min_severity, channel, destination, quiet_hours, escalation_policy_id)
+events(event_id PK, tenant_id, type, subject, severity, payload, dedupe_key, ts)          -- retained 7-30 days, source: Kafka
+incidents(incident_id PK, tenant_id, group_key, status, first_ts, last_ts, event_count)  -- aggregation state
+deliveries(delivery_id PK, incident_or_event_id, recipient, channel, status, attempt, next_attempt_ts, last_error, provider_ref)
+     INDEX (status, next_attempt_ts)      -- retry/sweeper scan
+     PARTITION BY tenant_id hash / time   -- 90 days hot
+inbox(user_id, notif_id, ts, read)         -- wide-column, partitioned by user_id
+```
+
+### Handling Varying Traffic Patterns
+- **Burst absorption**: Kafka buffers; consumers autoscale on lag; critical topic has reserved capacity so bulk lag
+  never delays it (priority isolation by topic and consumer pool, not by in-queue ordering).
+- **Collapse the fan-out**: aggregation turns a 10,000 events/s storm into hundreds of incident updates (the single
+  most effective burst control).
+- **Load shedding**: under sustained overload, drop or delay *bulk* and digests first; never shed critical.
+- **Per-tenant fairness**: tenant rate limits and weighted fair consumption so one noisy tenant (a flapping alert)
+  can't starve the others.
+- **Backpressure to external systems**: token buckets per provider and per customer endpoint; honor `429/Retry-After`.
+- **Retry storms**: jittered backoff and retry topics with their own bounded consumers, so retries don't amplify
+  an outage.
+- **Daily/weekly patterns**: digests and reports scheduled off-peak, spread with jitter, not at 09:00:00 sharp.
+
+### Reliability and Fault Tolerance
+- **At-least-once + idempotency**: producers retry; `event_id`/`delivery_id` uniqueness constraints make duplicates
+  harmless. Exactly-once to a human is approximated, not guaranteed (an email can be sent but the ack lost); say so.
+- **No single points**: stateless services behind load balancers; Kafka replicated (RF=3, `acks=all`,
+  min.insync.replicas=2); DB with synchronous replica for the delivery store (a lost `deliveries` row loses a page).
+- **Crash recovery**: a sweeper requeues deliveries stuck in `SENDING` past a lease; because sends are idempotent, a
+  second attempt is safe.
+- **Circular dependency**: the notification system must not run on the infrastructure it reports on. If GPU clusters
+  or the control plane are down, alerts must still flow: deploy in separate failure domains/regions, use an
+  independent secondary path (e.g. a provider-hosted paging service) for critical alerts, and run a **dead-man's
+  switch**: a heartbeat that pages if the notification pipeline itself goes quiet.
+- **Multi-region**: active-active ingestion; each region delivers its tenants; on failover the idempotency key and
+  delivery store prevent re-sends. Cross-region Kafka replication (or dual-publish) for critical events.
+- **Poison messages**: after N failures send to a DLQ with an alert; never block the partition.
+
+### Evolution Path ("how can the design change as requirements change?")
+1. **MVP**: single Kafka topic, router, email + webhook workers, relational delivery table.
+2. Add priority topics, rate limits, retries, preferences UI.
+3. Add dedupe + aggregation (storm protection) and escalation policies.
+4. Add digests/batching, in-app inbox, more channels via an adapter interface.
+5. Customer-defined alert rules (query-based alerting on metrics) feeding the same bus.
+6. Multi-region active-active, tenant-level SLAs, and per-tenant dedicated capacity for large customers.
+
+### Trade-offs to State Explicitly
+| Decision | Option A | Option B | Our choice |
+|---|---|---|---|
+| Delivery semantic | At-most-once (never duplicate) | At-least-once + dedupe | B, because missing a critical alert is worse than a duplicate |
+| Batching window | Immediate, one message per event | Group over a window | Hybrid: first message immediate, updates batched |
+| Dedupe state | In-memory/Redis (fast, can lose) | Durable in the DB (slower) | Redis for short windows; DB uniqueness as the backstop |
+| Scheduling | In-memory timers | Durable due-time index | Durable index (survives restarts) |
+| Queue per priority | One queue with priorities | Separate topics/pools | Separate topics, because ordering within one queue still lets bulk delay critical |
+
+### How Real Production Systems Do It (and what to copy)
+
+*Prometheus Alertmanager (the open-source standard for alert routing; documented behavior).* It takes alerts from many
+sources and applies, in order: **grouping** (`group_by` labels, so many alerts become one notification), timing knobs
+(`group_wait` to collect the first batch before sending, `group_interval` between updates for the same group,
+`repeat_interval` before re-notifying unresolved alerts), **inhibition** (suppress downstream alerts when a root-cause
+alert is firing, e.g. suppress per-node alerts when the whole-rack alert fires), **silences** (time-boxed mutes), and
+**routing trees** to receivers (email, Slack, PagerDuty, webhook). **Copy**: the rack-power walkthrough above uses
+exactly grouping + inhibition + group timers; name Alertmanager in the interview as the reference design.
+
+*Knock's batched-notification engine ([engineering write-up](https://knock.app/blog/building-a-batched-notification-engine)).*
+A vendor's published design for the digest/batching piece: **batch on write** (as each event arrives, find an open
+batch for `(recipient, batch_key)`; if none, create one with `closes_at = now + window`; attach the event) versus
+**batch on read** (periodically query unsent notifications and group them). Write-time batching costs extra storage but
+keeps flush queries cheap as data grows. Flushing is either a delayed job at window end (risk: the queue drops
+scheduled jobs) or a cron scan for due, unprocessed batches (robust, with up to one polling interval of extra
+latency); `processed_at` records completion so failures can be found and reprocessed. They list the open problems
+too: **race conditions creating duplicate batches**, **exactly-once sends**, **delivery retries**, and **unbounded batch
+size** (cap and flush early, keep a total count separate from displayed items). **Copy**: use the cron/due-time index
+flush with `processed_at`, protect batch creation with a unique constraint on `(recipient, batch_key, open)`, and cap
+batch size.
+
+*Provider and queue practices from public notification-system write-ups (secondary, not one company's design).*
+Separate Kafka topics per priority so a promotional burst cannot block one-time codes; per-channel rate caps set from
+provider limits (email/SMS providers enforce quotas); at-least-once delivery with idempotency keys; and the **outbox
+pattern** because writing straight to Kafka can lose messages during a Kafka outage. I found no primary engineering
+post from Uber/Slack/LinkedIn for their notification internals, so don't attribute these to a named company.
+
+*CoreWeave-specific hook.* CoreWeave's node lifecycle already generates the events this system consumes: SUNK health
+checks drain nodes with reasons (`NHC:`, `k8s: cordon:`), and the lifecycle automation reboots or replaces them (see
+#6). Mention that the notification system should subscribe to these state transitions and **aggregate by rack/job** so
+a customer sees one message about their affected job, with the checkpoint status, not a flood of node events.
+
+### Follow-Up Questions
+1. How do you guarantee a critical alert is never lost if Kafka is down? -> outbox in the producer's DB means the event
+   waits durably and is relayed when Kafka returns; for the pipeline's own failure, an independent secondary path and
+   the dead-man's switch catch silence.
+2. How do you prevent alert fatigue? -> aggregation, inhibition, per-tenant caps, severity thresholds, digests for low
+   severity, and escalation only on non-acknowledgement.
+3. How would you support customer-defined alert rules? -> a rules evaluator reads metrics/events, emits events into
+   the same bus; keep evaluation and delivery decoupled.
+4. How do you test this? -> replay recorded event storms against a staging cluster, chaos-test provider outages and
+   duplicate delivery, and load-test the critical path at 100x steady state.
+5. How do you handle ordering (resolved arriving before firing)? -> carry a monotonic per-subject sequence/state
+   version; the router ignores older states.
+
+---
+
+## 9. Database Design Interview — Database System
+
+**Problem Statement:**
+From CoreWeave's own prep note: *"Database Design Interview (database system): review the fundamentals of database
+system design and distributed data management. Be prepared to discuss how you evaluate different database technologies
+based on workload and requirements, model and organize data effectively, and think through indexing, replication,
+partitioning, consistency, and scalability. We value your reasoning and communication as much as the final solution,
+so explain the tradeoffs behind your design decisions."*
+The prompt doesn't say which database, so prepare **two modes** and ask the interviewer which they want:
+(A) **choose and model data stores** for a described product (most likely, given "evaluate technologies based on
+workload"), and (B) **design a database system** itself (a distributed key-value/relational store). Section A first.
+
+### Step 0. Clarifying questions (always ask)
+1. What are the **entities and access patterns**? List the top reads and writes by frequency and latency target.
+2. **Read/write ratio**, record size, growth rate, and total size in 1 and 3 years.
+3. **Consistency needs**: which operations need strong consistency or transactions (money, quotas, reservations),
+   and which tolerate staleness (dashboards)?
+4. **Query shape**: point lookups, range scans, joins, aggregations, full-text, time-series windows?
+5. **Availability / RPO / RTO**, multi-region, and data residency?
+6. **Retention and compliance**: deletion rights, audit immutability?
+7. **Operational constraints**: team skills, managed vs self-hosted, existing stack?
+
+### Part A. Case study: the data layer for a GPU cloud platform
+
+**Entities and access patterns (stated assumptions):**
+
+| Data | Access pattern | Volume (assumed) | Consistency need |
+|---|---|---|---|
+| Tenants, users, projects, quotas | Point lookups; low write rate; joins with permissions | Millions of rows | Strong; quota updates transactional |
+| Fleet inventory (datacenter, rack, node, GPU, topology, health state) | Frequent reads by scheduler; moderate writes; hierarchical queries | ~10^5-10^6 GPUs | Strong for allocation, cached reads |
+| Jobs and reservations | Create/update state machine; lookups by tenant, state; reservation must be atomic | ~10^5 jobs/day, 10^7 historical | Strong (no double-booking) |
+| Health events and telemetry | Very high-rate append; time-window queries, retention | ~10^6 samples/s (metrics), ~10^3 events/s | Eventual; ordered per source |
+| Usage metering and billing | Append-only usage records, aggregations per tenant per hour, immutable and auditable | ~10^7-10^9 records/day | Exactly-once accounting; strong on invoices |
+| Notifications / deliveries (see #8) | Append + status updates; query by tenant, time | ~10^7/day | Strong per row; eventual across |
+| Checkpoint and dataset metadata (see #7) | Point lookup by job/checkpoint, manifest commits | ~10^6 | Strong, atomic manifest commit |
+
+**Technology choices (decision table):**
+
+| Workload | Good fit | Why | Avoid when |
+|---|---|---|---|
+| Transactional entities with joins, constraints (tenants, quotas, jobs, invoices) | **PostgreSQL / MySQL** (sharded by `tenant_id` when it outgrows one primary) | ACID, indexes, constraints, mature tooling; the working set is modest | Write rate or size exceeds one shard and you can't shard by tenant |
+| Distributed config, leader election, reservations needing linearizable CAS | **etcd / Postgres row locks** | Raft-based linearizable KV with watch | Large data volumes (etcd is for small, critical state) |
+| Massive append + point/range reads by key, high write availability | **Cassandra / ScyllaDB / DynamoDB** | Linear scale-out, tunable consistency, partition-key access | Ad-hoc queries/joins, strong multi-row transactions |
+| Time-series and event analytics (telemetry, usage rollups) | **ClickHouse / TSDB** (e.g. Prometheus for metrics, ClickHouse for events) | Columnar compression, fast aggregates, TTL/downsampling | Frequent row-level updates, strong transactions |
+| Hot cache, rate limiting, ephemeral state | **Redis** | Sub-millisecond reads, atomic ops, TTL | As the only copy of important data |
+| Large blobs (checkpoints, datasets) | **Object store** with metadata in a relational DB | Cheap, durable, parallel throughput (see #7) | Small random updates |
+| Search over logs/job names | **OpenSearch/Elasticsearch** (derived index) | Inverted index | As system of record |
+
+**Principle to say out loud:** *one source of truth per datum*, with derived stores (caches, search indexes, analytics)
+fed by events/CDC and always rebuildable. Don't pick one database for everything, and don't introduce a store without a
+workload that justifies its operational cost.
+
+**Schema sketches and indexes (transactional core):**
+```sql
+tenants(tenant_id PK, name, plan, created_at)
+quotas(tenant_id, resource_type, limit_value, PRIMARY KEY (tenant_id, resource_type))
+
+nodes(node_id PK, rack_id, dc_id, gpu_model, nvlink_domain, state, updated_at)
+  INDEX (rack_id), INDEX (state, gpu_model)                     -- scheduler lists free nodes by model
+gpus(gpu_id PK, node_id FK, slot, health, epoch)                -- epoch fences concurrent reservations
+
+jobs(job_id PK, tenant_id, state, priority, gpu_count, submitted_at, started_at, finished_at)
+  INDEX (tenant_id, state, submitted_at DESC)                   -- "my running jobs" (composite: equality, equality, range)
+  INDEX (state, priority DESC, submitted_at) WHERE state='PENDING'   -- partial index: the scheduler's queue only
+reservations(job_id, gpu_id, epoch, reserved_at, PRIMARY KEY (job_id, gpu_id), UNIQUE (gpu_id) WHERE released_at IS NULL)
+
+usage_records(record_id PK, tenant_id, job_id, gpu_model, start_ts, end_ts, gpu_seconds, source_event_id UNIQUE)
+-- append-only; UNIQUE source_event_id makes metering idempotent
+invoices(invoice_id PK, tenant_id, period, total_minor BIGINT, status)       -- money as integer minor units
+```
+Indexing notes: composite index order is *equality columns first, then range/sort*; use **partial indexes** for hot
+subsets (pending jobs); the `UNIQUE (gpu_id) WHERE released_at IS NULL` constraint makes **double-booking impossible at
+the database level**, not just in application code; avoid over-indexing write-heavy tables (each index taxes writes).
+
+**Partitioning (sharding) strategy:**
+- Transactional core: shard by `tenant_id` (hash). Tenant-scoped queries stay on one shard; cross-tenant admin queries
+  go to a read replica or the analytics store. Large tenants can be given a dedicated shard.
+- `usage_records` and telemetry: **time-partition** (daily/hourly) for cheap retention (drop a partition, don't delete
+  rows) plus hash on tenant to spread writes. Avoid a pure time key for writes because "now" becomes a hot partition.
+- Avoid unbounded partitions: bucket large partitions (see Discord's channel + time bucket below).
+
+**Replication and consistency:**
+- Transactional core: single primary per shard, **synchronous replica** in another zone for zero-loss failover (RPO ~0),
+  asynchronous replicas for reads and DR region. Reads that must not be stale (check quota before admit) use the
+  primary; dashboards use replicas and tolerate lag.
+- Quorum math for leaderless stores: with N=3 replicas, writes W=2 and reads R=2 give R+W>N, so a read overlaps the
+  latest acknowledged write; W=1/R=1 is faster but can return stale data. Choose per query, not globally.
+- Linearizable reservations: rely on the primary's transaction (or etcd CAS) with the epoch/unique constraint;
+  never implement a distributed lock on an eventually consistent store.
+- Cross-shard operations (quota transfer between tenants) are rare; use a saga with idempotent steps and
+  compensations, not distributed two-phase commit.
+
+**Metering pipeline (exactly-once accounting):**
+1. Scheduler/node agents emit `job.started`, `job.stopped`, periodic `heartbeat` usage events with unique `event_id`s.
+2. Kafka -> a metering consumer writes `usage_records` with `INSERT ... ON CONFLICT (source_event_id) DO NOTHING`.
+3. Hourly rollups (ClickHouse or SQL) compute `gpu_hours` per tenant; invoices read from the immutable records.
+4. Late/corrected events create adjustment records (never edit history), mirroring ledger design.
+5. Reconciliation compares billed GPU-hours with scheduler allocation logs and flags drift.
+
+**Failure scenarios:**
+- Primary dies: promote the synchronous replica; fence the old primary (STONITH/lease) to prevent split brain.
+- Hot tenant: per-tenant rate limits, move to a dedicated shard, cache reads.
+- Bad migration: expand/contract schema changes (add nullable column -> backfill -> switch -> drop), online index builds.
+- Region loss: async cross-region replica with a documented RPO; reservations re-reconciled with actual hardware state
+  from the node agents (the hardware is the truth).
+
+### Part B. If asked to design a database system itself (distributed KV store)
+
+**Components:** client/driver, routing layer (partition map), storage nodes (WAL + memtable + SSTables or B-tree pages),
+replication module (Raft or quorum), coordinator/placement service (metadata), compaction/GC, rebalancer,
+backup/restore, monitoring.
+
+**Write path (leader-based, Raft):** (1) client hashes the key to a partition and finds its leader; (2) leader appends
+to its **write-ahead log** and replicates to followers; (3) once a **majority** acknowledges, the entry is committed;
+(4) leader applies to the memtable (LSM) and acknowledges the client; (5) memtable flushes to immutable SSTables,
+background **compaction** merges them, with bloom filters to skip files on reads.
+**Read path:** route to leader (linearizable) or a follower (stale-tolerant, or use read leases / ReadIndex);
+check memtable, then SSTables newest to oldest using bloom filters and block indexes.
+**Partitioning:** consistent hashing with virtual nodes (even spread, cheap rebalancing) or range partitioning (ordered
+scans, risk of hot ranges, automatic split/merge). **Rebalancing:** move partitions by adding a learner replica,
+catching up, then promoting. **Secondary indexes:** local (per partition, scatter-gather reads) vs global (separate
+partitioned index, async or transactional updates). **Transactions:** single-partition ACID via the leader; cross-
+partition via two-phase commit over Raft groups (Spanner-style) or avoided via data modeling.
+**Storage engine trade-off:** LSM trees favor write-heavy workloads (sequential writes, higher read/space amplification
+and compaction cost); B-trees favor read-heavy and in-place updates (write amplification and random I/O).
+**Consistency menu:** linearizable (leader reads), sequential/read-your-writes (session tokens), eventual (any replica).
+
+### Spoken Answers to Likely Questions
+
+**"How do you decide between SQL and NoSQL?"**
+"I start from the access patterns, not the technology. If the data is relational, needs multi-row transactions and
+ad-hoc queries, and fits on a handful of shards, I choose PostgreSQL: ACID, constraints and mature tooling remove whole
+classes of bugs, which matters for things like quotas and invoices. If the pattern is massive append and lookups by a
+known key, with a need for write availability across zones, a partition-key store like Cassandra, Scylla or DynamoDB
+scales linearly, but I give up joins and cross-partition transactions and must design tables around queries. For
+time-series and event analytics a columnar store like ClickHouse beats both. And I keep one source of truth per fact,
+with derived stores fed by events. For this platform: Postgres for tenants, quotas, jobs and invoices; etcd or database
+constraints for reservations; ClickHouse for telemetry and usage rollups; object storage for checkpoints with metadata
+in Postgres."
+
+**"How do you choose indexes?"**
+"I list the top queries, then build the smallest set of indexes that serves them. A composite index puts equality
+columns first and the range or sort column last, so `(tenant_id, state, submitted_at)` serves 'this tenant's running
+jobs, newest first' from one index scan. I add a partial index for hot subsets like pending jobs so the scheduler's
+queue is tiny. A covering index avoids heap lookups for the hottest reads. Every index slows writes and costs storage, so
+on write-heavy tables I keep them minimal and verify with `EXPLAIN`. In LSM stores the equivalent is choosing the
+partition key and clustering order, because you can't index arbitrary columns cheaply."
+
+**"How do you partition, and what about hot partitions?"**
+"I pick a key that matches the access pattern and spreads load: tenant ID for the transactional core, tenant plus time
+bucket for usage data. Hash partitioning spreads evenly but loses range scans; range partitioning keeps ordering but can
+create hot ranges, so I'd rather hash a prefix and cluster by time inside it. The classic failure is one key getting
+disproportionate traffic. Discord's messages are keyed by channel plus a time bucket so no partition grows without
+bound, and when a popular channel still created hot partitions they added a data-service layer that coalesces concurrent
+reads for the same row into one database query and routes by channel ID so identical requests meet at the same instance.
+The general toolbox: bucketing, caching, request coalescing, rate limits, and splitting or isolating the hot tenant."
+
+**"Explain replication and consistency trade-offs."**
+"Synchronous replication gives zero data loss on failover but adds write latency and ties availability to the replica;
+asynchronous is faster but can lose the last few writes. So I use a synchronous replica in a second zone for the
+transactional core, and async replicas for reads and cross-region DR. With quorum systems, N=3 with W=2 and R=2
+guarantees a read overlaps the latest acknowledged write; I can drop to R=1 for dashboards. For anything that must never
+double-book, like GPU reservations, I use a single-leader linearizable path with a database constraint as the final
+guard, not eventual consistency plus hope. Cross-shard workflows use sagas with idempotent steps. And I state the
+CAP stance per operation: during a partition, billing and reservations choose consistency, telemetry chooses availability."
+
+**"How do you evolve the schema without downtime?"**
+"Expand and contract. Add the new nullable column or table, deploy code that writes both, backfill in batches with
+throttling, switch reads, then drop the old field in a later release. Build indexes online or concurrently, and test
+migrations on a production-sized copy. For wide-column stores I add new columns freely and version the payload. Rollback
+must stay possible until the contract step."
+
+**"How would you migrate a live database to a new one?"** (Discord is the reference.)
+"Dual-write new data to both systems, backfill history behind it with a checkpointed, resumable migrator, then validate
+by sending a small share of reads to both and comparing results, and only then cut over with a rollback path. Discord
+did this to move trillions of messages from Cassandra to ScyllaDB."
+
+### How Real Production Systems Do It (and what to copy)
+
+*Discord: messages on Cassandra then ScyllaDB ([Discord engineering post](https://discord.com/blog/how-discord-stores-trillions-of-messages)).*
+- **Data model**: messages are partitioned by **channel ID plus a bucket (static time window)**, replicated across three
+  nodes by default; IDs are Snowflakes, so they sort chronologically. The bucket keeps any one partition from growing
+  without bound while keeping a channel's recent messages together for fast reads. (The exact bucket size and clustering
+  key were not in the text I read.)
+- **Why it hurt**: by early 2022 the Cassandra cluster had **177 nodes** and was high-toil. Concurrent reads of one
+  hot channel-bucket raised latency across the node and, through quorum reads/writes, across the cluster; falling behind
+  on **compaction** made reads costlier; JVM GC tuning and a manual "gossip dance" consumed on-call time; uncompacted
+  **tombstones** caused migration timeouts.
+- **Mitigation**: Rust **data services** between the API monolith and the databases, with about one gRPC endpoint per
+  query and no business logic. They **coalesce** concurrent requests for the same row (the first spawns a worker, later
+  requests subscribe to its result) and use **consistent-hash routing** by channel ID so identical requests reach the same
+  instance. This reduced spikes but did not eliminate hot partitions; it bought time.
+- **Migration**: new ScyllaDB cluster; **dual writes**; a Rust migrator that reads token ranges, **checkpoints progress**,
+  and writes up to 3.2 million messages/second (estimate cut from ~3 months with a Spark migrator to ~9 days); validate by
+  sending a small share of reads to both and comparing; cut over in May 2022.
+- **Result**: **177 -> 72 nodes** (9 TB per node vs ~4 TB), historical-fetch p99 from 40-125 ms to ~15 ms, insert p99
+  from 5-70 ms to a steady ~5 ms. These are Discord's reported numbers.
+- **Copy**: bucket by time to bound partitions; put a thin coalescing layer in front of hot rows; migrate with dual
+  write + backfill + shadow-read validation + cutover.
+
+*Uber payments ledger ([Uber's Payments Platform](https://www.uber.com/blog/ubers-payments-platform)).* Immutable,
+append-only money records with a changelog that can rebuild any balance; started on DynamoDB and moved to a custom
+tamper-evident store (LedgerStore) as audit needs grew; hot entities needed a serialized batch-write path. **Copy**:
+for GPU billing use immutable usage records, adjustments instead of edits, and idempotent ingestion
+(`UNIQUE source_event_id`). See the Affirm ledger section in `affirm_interview_questions.md` (#15) for the full pattern.
+
+*Postgres to ClickHouse for telemetry ([Trigger.dev case on ClickHouse's blog](https://clickhouse.com/blog/trigger-dev-scaling-observability), vendor-hosted).*
+A team that began with Postgres moved high-volume telemetry to ClickHouse because Postgres wasn't scaling for larger
+customers; reported P95 queries around 200 ms and a much smaller storage footprint. **Copy**: separate analytical from
+operational workloads. Treat the numbers as vendor-reported.
+
+*CoreWeave's own stack.* I found no public CoreWeave engineering post describing its databases, so don't claim what
+CoreWeave uses; frame choices from workload and say you'd want to learn their current stack.
+
+### Follow-Up Questions
+1. Why not put everything in one Postgres? -> works early; at scale telemetry and usage volume (10^6 samples/s)
+   overwhelm row-store write and storage costs, and analytics queries hurt OLTP latency, so split by workload.
+2. How do you prevent two schedulers double-booking a GPU? -> a unique partial index on active reservations plus
+   epoch-based CAS; the application check alone isn't enough.
+3. How do you keep the search index/cache consistent with the source of truth? -> CDC/outbox events update derived
+   stores; they are rebuildable; reads tolerate bounded staleness.
+4. What changes at 100x scale? -> shard the core by tenant with a routing layer, move more reads to replicas/caches,
+   adopt partitioned log + stream processing for metering, and automate rebalancing.
+5. How would you back up and test restores? -> continuous WAL archiving plus periodic snapshots, restore drills in a
+   scratch environment with measured RTO, and checksums on backups.
+
+---
+
+## 10. Interview Process Overview
 
 Reports converge on a loop that's fairly consistent for software-engineering roles, with some variation by
 level and by track (Production Engineer loops run a slightly different shape than core Software Engineer
@@ -943,6 +1379,10 @@ loops):
   Python in reports), typically a medium-difficulty data-structures/algorithms problem framed around
   CoreWeave's actual domain — scheduling, resource access graphs, log/telemetry parsing — rather than a
   generic LeetCode-style prompt with no context.
+- **CoreWeave's own prep note** for the loop names two design-flavored rounds: a **System Design** interview on a
+  **notification system** (clarify, state assumptions and tradeoffs, cover scalability/reliability/fault tolerance/varying
+  traffic; see #8) and a **Database Design** interview on a **database system** (evaluate technologies by workload, data
+  modeling, indexing, replication, partitioning, consistency; see #9). Both stress collaboration and explaining reasoning.
 - **Virtual onsite**, commonly structured as: **two coding rounds**, **one system design round** (usually
   distributed-systems- or infrastructure-flavored, per the problems above), **one "craft"/technical
   deep-dive round**, and **one behavioral round** — though individual reports describe anywhere from four
@@ -960,7 +1400,7 @@ loops):
 
 ---
 
-## 9. Behavioral Themes
+## 11. Behavioral Themes
 
 CoreWeave's behavioral and leadership rounds lean heavily on the operational reality of running GPU
 infrastructure that customers' expensive, time-sensitive training jobs depend on — see
@@ -1003,6 +1443,10 @@ Sources used for compiling these questions:
 - [CoreWeave SUNK: Slurm on Kubernetes](https://wf.coreweave.com/blog/sunk-slurm-on-kubernetes-implementations)
 - [CoreWeave SUNK drain/undrain docs](https://docs.coreweave.com/products/sunk/manage_sunk/drain-and-undrain-nodes.md)
 - [CoreWeave AI Object Storage benchmark (LOTA)](https://coreweave.com/blog/benchmark-results-coreweave-ai-object-storage-delivers-2-gb-s-per-gpu-throughput-across-any-number-of-gpus)
+- [How Discord Stores Trillions of Messages — Discord Engineering](https://discord.com/blog/how-discord-stores-trillions-of-messages)
+- [Building a batched notification engine — Knock](https://knock.app/blog/building-a-batched-notification-engine)
+- [Prometheus Alertmanager docs](https://prometheus.io/docs/alerting/latest/alertmanager/)
+- [Trigger.dev: scaling observability with ClickHouse](https://clickhouse.com/blog/trigger-dev-scaling-observability)
 - [What to Expect in the CoreWeave System Design Interview — DesignGurus](https://www.designgurus.io/answers/detail/what-to-expect-in-the-coreweave-system-design-interview)
 - [CoreWeave Interview Guide (2026): Specialty GPU Cloud — TechInterview.org](https://www.techinterview.org/companies/coreweave-interview-guide/)
 
