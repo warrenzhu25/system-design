@@ -583,14 +583,47 @@ tenant_quotas(tenant_id, max_concurrent_gpus, max_gpu_hours_per_day)
     checkpoint on a fresh reservation (replacement node swapped in), with retry budget.
 11. **Complete**: release reservations, write usage records to accounting, free capacity triggers the next cycle.
 
-**Failure Modes:**
-- Scheduler leader dies: standby takes the lease and rebuilds queues + inventory from the stores; running jobs
-  are untouched because workers don't depend on the scheduler once started. Epochs fence the old leader's writes.
-- Fragmentation: lots of 1-GPU jobs scattered across nodes block 8-GPU gangs. Mitigate with bin-packing small
-  jobs onto already-partial nodes, reserving whole nodes for big gangs, and optional defragmentation by
-  checkpoint-and-move.
-- Gang deadlock: two big jobs each hold half of what they need. Prevent with all-or-nothing reservation
-  (no hold-and-wait) or **backfill with a reservation for the head job** so small jobs fill gaps without delaying it.
+**Safety Rules Added After Failure Analysis:**
+1. **S1 — Fence zombies before reusing GPUs.** Node agents hold a lease from the control plane. If an agent cannot
+   renew, it **self-fences** (kills the workers) after the lease timeout. The scheduler waits `lease TTL + skew
+   margin` before declaring the job lost and reusing its GPUs, so two copies of the same training job never run (and
+   never write the same checkpoint).
+2. **S2 — Idempotent launch.** Launch and kill RPCs carry `(job_id, epoch, rank)`; agents ignore stale epochs and repeat
+   calls.
+3. **S3 — Reservations expire.** A reservation row has a TTL until the job confirms launch, so a scheduler that dies
+   mid-reservation cannot leak GPUs forever; a reconciler releases reservations with no live job.
+4. **S4 — Actual state is the source of truth.** On recovery the scheduler reconciles its records against what node
+   agents report is actually running ("the hardware is the truth").
+5. **S5 — Bounded retries and node blame.** A job restarted by infrastructure faults gets a retry budget separate from
+   user-code failures, and nodes implicated repeatedly are blocklisted for that job and flagged to the health system.
+
+**Detailed Failure Scenarios:**
+
+| # | Failure | Impact | Handling |
+|---|---|---|---|
+| 1 | Scheduler leader crashes | No new placements | Standby takes the lease within seconds; rebuilds queues/inventory from the stores; running jobs unaffected (workers don't depend on the scheduler); epoch fencing rejects the old leader's late writes |
+| 2 | Two scheduler passes race | Double-booking | CAS on per-GPU `epoch`; loser rolls back and retries |
+| 3 | Partial reservation (63 of 64 GPUs) | Stranded capacity | All-or-nothing rollback; S3 TTL cleans up if the scheduler dies mid-way |
+| 4 | **Network partition: node agent unreachable** | Job state unknown | Do not assume dead. S1: agent self-fences after lease timeout; scheduler waits TTL+skew, then marks `INTERRUPTED` and reschedules. Avoids two live copies |
+| 5 | Launch RPC retried or duplicated | Duplicate workers | S2: idempotent on `(job_id, epoch, rank)` |
+| 6 | One node slow to start (image pull, driver) in a gang | Gang stalls | Barrier with timeout; tear down the whole gang, mark the slow node, reschedule elsewhere; image pre-pull/caching on nodes |
+| 7 | One rank dies, others hang in NCCL | GPUs burn idle | Step-progress watchdog and heartbeats; kill the gang and restart from the last checkpoint; optionally elastic resize if the framework supports it |
+| 8 | GPU fails mid-run (Xid/ECC) | Job interrupted | Health controller flags the device; job restarted from checkpoint on a replacement set; S5 retry budget; avoid the bad node |
+| 9 | Preemption: victim doesn't checkpoint within grace | Lost progress | Hard-kill after the grace period and restart from the last *committed* checkpoint; the preemption cost model avoids victims far from their next checkpoint; cap preemptions per job (then immune) |
+| 10 | Checkpoint incomplete or corrupt on restart | Resume fails | Manifest-commit protocol with checksums (#7); fall back to the previous valid checkpoint |
+| 11 | Rack or power failure takes out many gangs | Mass requeue and restart storm | Requeue by priority/age with staggered restarts (also protects checkpoint storage from a read stampede); capacity-aware admission; notify tenants (#8) |
+| 12 | Stale topology/inventory cache | Bad placement choices | CAS validates against authoritative GPU records; on conflict refresh and retry; periodic full resync; watch bookmarks to detect missed events |
+| 13 | Inventory/health feed down | Unsafe placement | Fail closed for *new* placements on nodes whose health data is older than a bound; running jobs continue |
+| 14 | Job-store database outage | Control plane stalled | Pause new placements; reads served from replicas/caches; on recovery S4 reconciliation |
+| 15 | Quota accounting drift (missed release, double count) | Tenants blocked or over-allocated | Usage derived from idempotent reservation events; nightly reconcile with running jobs; leak detector for reservations with no job |
+| 16 | Starvation / priority inversion | Low-priority job never runs | Age-based priority boost; backfill that never delays the head-of-line job's reservation; preemption cap |
+| 17 | Submission storm (client bug submits 10k jobs) | Queue floods | Per-tenant admission rate limits and queue-depth caps |
+| 18 | Clock skew between control plane and agents | Lease misjudged | Leases measured as durations by the grantor, plus an explicit skew margin (S1) |
+| 19 | Impossible job spec (topology can never fit) | Queued forever | Admission validation against fleet shape; reject with a clear reason or offer a relaxed placement |
+| 20 | "Black hole" node (fails jobs fast and looks free) | Jobs repeatedly fail | Per-node failure-rate tracking; auto-drain; scoring penalty |
+| 21 | Scheduler overloaded by 100k pending jobs | Latency spikes | Bounded scheduling window per cycle, equivalence-class caching of feasibility, hierarchical queues, a time budget per cycle |
+| 22 | Fragmentation: many 1-GPU jobs scattered across nodes block 8-GPU gangs | Big jobs wait while GPUs sit idle | Bin-pack small jobs onto partially used nodes, keep whole nodes/leaf groups for gangs, optional defragmentation by checkpoint-and-move; track a fragmentation metric |
+| 23 | Gang deadlock (two big jobs each hold half) | Neither starts | All-or-nothing reservation (no hold-and-wait); backfill with a reservation for the head-of-line job so small jobs fill gaps without delaying it |
 
 **How Real Production Systems Do It (and what to copy):**
 
@@ -743,12 +776,43 @@ replacement_requests(node_id, reason, status, opened_at)
 9. **Undrain** only after sustained health (hysteresis), then topology CRDs are updated and the scheduler sees capacity.
 10. Everything is logged as events for fleet analytics (failure rate by rack, driver version, batch).
 
-**Failure Modes:**
-- Correlated failures (power/cooling/bad firmware): cap concurrent drains and replacements (e.g. never drain more
-  than X% of a rack at once); alert on *rate*, not individual events.
-- Silent data corruption/straggler GPU: a GPU that is "healthy" but slow stalls a synchronous job; detect with
-  per-rank step-time monitoring and pre/post-job diagnostics.
-- Device plugin crash: fail closed, so GPUs withdraw from allocatable until it returns.
+**Safety Rules Added After Failure Analysis:**
+1. **K1 — Blast-radius limits on automation.** The lifecycle controller may automatically cordon/drain at most X% of a
+   rack and Y% of the fleet at once. Beyond the limit it stops and pages a human, so a buggy health check cannot
+   delete capacity.
+2. **K2 — New checks start in report-only mode** on a small cohort, then enforce.
+3. **K3 — Unknown is not healthy.** Missing or stale telemetry for a node marks it `unknown` (not schedulable for new
+   gangs), never `healthy`.
+4. **K4 — Humans outrank automation.** Administrator drain reasons persist until a person clears them; automation never
+   overrides them (SUNK models this with `AdminMaintenanceMode` and `AdminPermanentFailure`).
+5. **K5 — Disruption budget shared by faults and maintenance.** Planned rollouts (drivers, firmware, Kubernetes
+   upgrades) and fault-driven drains draw from one budget.
+6. **K6 — Rejoin gate.** A rebooted or replaced node must pass health, topology validation and NCCL/InfiniBand
+   verification before it is schedulable.
+
+**Detailed Failure Scenarios:**
+
+| # | Failure | Impact | Handling |
+|---|---|---|---|
+| 1 | Transient GPU error (self-recovering blip) | Needless cordon and pod churn | Classify error severity; require N consecutive failures or a persistence window; uncordon only after sustained health (hysteresis) |
+| 2 | **Health checker itself is wrong** (bad release, bad threshold) | Mass false failures, capacity collapse | K1 limits, K2 report-only rollout, circuit breaker that halts automation and pages on an abnormal cordon rate |
+| 3 | Device plugin crashes or hangs | GPUs unmonitored but still schedulable | Fail closed: withdraw advertised resources on loss of the plugin's liveness (kubelet sees zero allocatable); alert |
+| 4 | Node network blip makes kubelet `NotReady` | Spurious evictions | Tolerations with sensible `tolerationSeconds`; distinguish node-unreachable from GPU-unhealthy; don't evict training pods on a short blip |
+| 5 | Drain stuck (PDB violations, finalizers, ignoring SIGTERM) | Node never freed | Drain timeout, then policy: checkpoint signal -> grace -> force. Slurm-style drain (stop new work, let jobs finish) for non-urgent faults, immediate kill for urgent ones |
+| 6 | Reboot loop | Node flaps in and out | Cap reboot attempts (e.g. 2), then triage/replace; record reasons |
+| 7 | Replacement stampede; spare pool exhausted | Provisioning overload or no capacity | Cap concurrent replacements; prioritize by capacity impact; if no spare, keep the node cordoned and surface reduced capacity to the scheduler honestly |
+| 8 | NCCL/IB verification gives false pass/fail | Bad node admitted or good node rejected | Pairwise tests chosen by topology; retry flaky results; feed job-level failures back to mark a node suspect |
+| 9 | Slurm and Kubernetes state diverge | Scheduler places on a node Kubernetes considers bad | Two-way sync with a defined source of truth (Kubernetes node condition drives Slurm drain, as in SUNK's Syncer); drift detector; periodic full reconcile |
+| 10 | Power event produces an event storm | API server overload | API priority and fairness, batched status updates, controller work queues with rate limits and backoff, event aggregation |
+| 11 | Telemetry pipeline loss | Blind | K3; node-local fallback checks; dead-man's switch on the pipeline |
+| 12 | Driver/firmware rollout regresses health | Fleet-wide failures | Canary, maximum-unavailable budget (K5), automatic halt and rollback when health regresses |
+| 13 | Planned maintenance collides with fault drains | Too much capacity offline | K5 shared budget; maintenance windows coordinated with the job scheduler |
+| 14 | "Healthy" but slow GPU (silent degradation, straggler) | Synchronous jobs slow down | Per-rank step-time anomaly detection; periodic diagnostics on idle nodes; quarantine suspects |
+| 15 | Automation vs administrator conflict | Surprising reversals | K4; audit trail of who drained what and why |
+| 16 | Wrong topology metadata (mislabeled rack/leaf) | Silent poor placement | Validate declared topology against discovered topology (IB fabric discovery, link-layer neighbors); alert on mismatch |
+| 17 | Partial NVLink/fabric failure with GPUs individually healthy | Gangs fail or run slowly | Treat as a domain-level fault: remove the whole NVLink domain from the gang-capable pool; still usable for single-GPU jobs |
+| 18 | Replacement node joins misconfigured | Bad node enters service | K6 acceptance tests |
+| 19 | Cordoning shrinks capacity so much that jobs get preempted | Cascade | Capacity-aware controller: before draining, check headroom and the disruption budget |
 
 **How Real Production Systems Do It (and what to copy):**
 
@@ -888,11 +952,45 @@ cache_nodes(node_id, capacity, current_occupancy, colocated_gpu_nodes[])
 4. On failure/preemption, the new job reads the latest *committed* manifest and loads shards in parallel.
 5. Lifecycle policy keeps the last N checkpoints hot, tiers older ones down, and deletes beyond retention.
 
-**Failure Modes:**
-- Partial checkpoint (crash mid-write): no manifest -> ignored; the previous manifest remains valid.
-- Cache node lost: objects refetch from origin; hot shards re-replicated; the job slows but doesn't fail.
-- Origin throttling on cold start: stagger and prefetch; pre-warm from the scheduler's knowledge of upcoming jobs.
-- Checkpoint storms: jitter per-job checkpoint intervals and cap write bandwidth per tenant.
+**Safety Rules Added After Failure Analysis:**
+1. **D1 — Immutable, versioned datasets.** Dataset paths include a version (or the cache key includes the object ETag), so
+   a dataset update can never be served from a stale cache entry.
+2. **D2 — Checkpoint commit protocol.** Write shards under `job/epoch/checkpoint_id/`, verify existence, size and
+   checksum, then commit the manifest with a **conditional write** (put-if-absent, scoped to the job's current
+   epoch). Only manifests are trusted. A zombie job from an old epoch cannot commit.
+3. **D3 — Garbage collection is two-phase and conservative.** GC works from manifests: keep the latest committed
+   checkpoint plus N predecessors, never touch shards of an in-progress checkpoint (grace period), and soft-delete
+   (e.g. 7 days) before physical delete.
+4. **D4 — Single-flight cold misses.** Concurrent misses for the same object share one origin fetch.
+5. **D5 — Write-through for checkpoints.** The cache must never hold the only copy of a checkpoint; loss of a cache node
+   costs speed, not data.
+6. **D6 — Integrity end to end.** Per-shard checksums are verified at read; the manifest carries a hash over its
+   contents; a periodic scrubber verifies stored objects.
+
+**Detailed Failure Scenarios:**
+
+| # | Failure | Impact | Handling |
+|---|---|---|---|
+| 1 | A rank crashes mid-checkpoint | Partial checkpoint | No manifest, so it is ignored; previous manifest stays valid; orphaned shards removed later by D3 |
+| 2 | Manifest committed but a shard is missing or corrupt | Resume fails or loads bad state | D2 verification before commit, D6 checksums at load; fall back to the previous checkpoint; scrubber and replication/erasure coding repair |
+| 3 | Zombie job from an old epoch keeps writing | Overwrites or competing checkpoints | D2 epoch-scoped conditional commit; paired with scheduler fencing (#5 S1) |
+| 4 | Restore with a different world size/topology | Cannot load | Store layout metadata; support resharding on load; test resume at different scales |
+| 5 | Checkpoint write slower than the interval | Training stalls or backlog | Asynchronous write from a snapshot, bounded buffer, skip or stretch the interval with an alert; compression |
+| 6 | Many jobs checkpoint simultaneously | Write saturation | Per-job jitter, per-tenant bandwidth QoS, separate write path from reads |
+| 7 | Cache node or NVMe failure | Reads fall back to origin | D5 means no data loss; re-fetch; re-replicate hot shards; health-check the cache tier |
+| 8 | Cold start from many nodes at once | Origin overwhelmed | D4 single-flight, scheduler-driven pre-warm, staggered shard assignment, backoff on 429/503 |
+| 9 | Origin throttling or brief outage | Reads fail | Jittered exponential backoff; warm-cache jobs keep running; surface "data starved"; optional read from a replica region |
+| 10 | Stale cache after dataset change | Training on the wrong data | D1 versioned paths/ETag keys; for mutable data use conditional GETs with a TTL |
+| 11 | Working set exceeds cache | Thrashing, hit ratio collapses | Detect via hit-ratio drop; use scan-resistant eviction and shard-to-node assignment that maximizes locality; accept the origin path and size the tier |
+| 12 | Hot object (everyone reads it) | One cache node saturated | Replicate hot shards, serve peer-to-peer between nodes, load-balance across replicas |
+| 13 | Partition between GPU nodes and storage | Reads/writes time out | Fail fast with clear errors; repeated checkpoint failures are a critical alert and a configurable policy (continue vs pause) so progress isn't silently unprotected |
+| 14 | Noisy neighbor tenant | Throughput drops for others | Per-tenant IOPS/bandwidth quotas and fair queuing |
+| 15 | Silent corruption in dataset shards | Training on bad samples | D6 checksums; quarantine the shard and alert; optionally skip with a recorded count |
+| 16 | Storage or cache full | Writes fail, evictions cascade | Quotas and alerts; evict oldest non-latest first; never evict the last committed checkpoint |
+| 17 | Metadata/manifest service down | New commits fail | Cached data keeps serving reads; retry commits; replicate the metadata service |
+| 18 | GC bug deletes needed objects | Data loss | D3 two-phase delete with retention window and tests; delete requires a manifest-based proof of unreachability |
+| 19 | Credentials expire mid-job | Sudden I/O failures | Short-lived credentials refreshed ahead of expiry; alert on refresh failure |
+| 20 | One slow shard fetch stalls a synchronous step | Straggler | Prefetch depth, hedged reads to an alternate replica, per-read timeouts |
 
 **How Real Production Systems Do It (and what to copy):**
 
@@ -1075,6 +1173,38 @@ inbox(user_id, notif_id, ts, read)         -- wide-column, partitioned by user_i
 - **Multi-region**: active-active ingestion; each region delivers its tenants; on failover the idempotency key and
   delivery store prevent re-sends. Cross-region Kafka replication (or dual-publish) for critical events.
 - **Poison messages**: after N failures send to a DLQ with an alert; never block the partition.
+
+### Detailed Failure Scenarios
+
+| # | Failure | Impact | Handling |
+|---|---|---|---|
+| 1 | Kafka (or the bus) unavailable | Events can't be published | **Outbox** in the producer's database holds events until the relay can publish; critical paths also have an independent secondary alert path |
+| 2 | Outbox relay lags or crashes | Delayed notifications | Alert on oldest unpublished age; relay is stateless and resumable; publishes in order per aggregate |
+| 3 | Duplicate events from at-least-once publishing | Duplicate messages | Consumers dedupe on `event_id`; deliveries have `UNIQUE (delivery_id)` |
+| 4 | Dedupe cache (Redis) flushed or lost | Burst of duplicates | Database uniqueness on `delivery_id` is the backstop; rebuild the cache lazily; accept a brief duplicate window for non-critical messages |
+| 5 | Aggregation job restarts | Lost grouping state | State checkpointed (stream-processor checkpoints); worst case emits a repeated incident message that carries the same incident id so clients can collapse it |
+| 6 | Router crashes mid fan-out | Some deliveries created, some not | `delivery_id = hash(incident_or_event, recipient, channel)`; re-processing creates only missing rows; fan-out is resumable |
+| 7 | Preference/subscription service down | Can't resolve recipients | Serve from a cache; if cache miss on a critical event, fall back to the tenant's default contacts and on-call; never drop |
+| 8 | Template render error (bad variable) | Poison message | Fall back to a minimal plain-text template; DLQ plus alert; templates validated and previewed on deploy |
+| 9 | Email/SMS provider outage | Channel dead | Circuit breaker; fail over to a secondary provider using the same `delivery_id` (providers don't share dedupe, so accept possible duplicates for critical alerts); critical alerts fan out over more than one channel |
+| 10 | Provider "accepted" but delivery uncertain | False sense of delivery | Track bounces/complaints through provider webhooks; critical alerts require acknowledgment and escalate when unacknowledged |
+| 11 | Slow customer webhook endpoint | Worker threads tied up | Short timeouts, bulkheads (bounded concurrency per destination and per tenant), separate pools per channel |
+| 12 | Customer endpoint down for days | Retry waste | Exponential backoff with jitter, circuit breaker, then disable the endpoint after N days and notify the tenant on another channel; manual replay API |
+| 13 | Endpoint returns 2xx but drops the message | Lost on the customer side | Document at-least-once, include `delivery_id` and signature headers so customers can dedupe and verify; offer a pull API/inbox for reconciliation |
+| 14 | Retry storm after an outage | Amplified load | Retry topics with bounded consumers, jitter, rate limits per destination |
+| 15 | DLQ grows | Silent failures | Alert on DLQ depth/age; replay tooling with rate limits and idempotent delivery |
+| 16 | Suppression/unsubscribe store unavailable | Might send what the user opted out of | Fail **closed** for marketing/non-critical, fail **open** for safety-critical operational alerts (documented policy) |
+| 17 | Quiet hours / time zone / DST bugs | Wrong-time delivery | Store time zones with IANA names; use a tested library; critical bypasses quiet hours |
+| 18 | Escalation timer lost on scheduler restart | Unacknowledged page never escalates | Durable due-time index (poll), not in-memory timers |
+| 19 | Ack arrives as escalation fires | Duplicate page | Compare-and-set on incident state/version; an acknowledged incident cancels pending escalation |
+| 20 | Out-of-order `resolved` before `firing` | Wrong final state | Per-subject version/sequence; the router ignores older states |
+| 21 | A tenant with 10,000 subscribers | Fan-out spike | Paginated fan-out, per-tenant rate limits, dedicated lanes for very large tenants |
+| 22 | Flapping alert source | Alert fatigue | Hysteresis/flap detection, per-tenant caps, aggregation |
+| 23 | Region failover | Duplicates or gaps | Replicated delivery store and idempotent `delivery_id`; replay from the last committed offset |
+| 24 | Clock skew | Out-of-order timestamps | Server-assigned timestamps and watermarks; sequence numbers for ordering |
+| 25 | **The notification pipeline is down during the incident it should report** | Silent failure | Separate failure domain, independent secondary path, dead-man's switch |
+| 26 | Customer-supplied webhook URLs used for SSRF | Internal network exposure | Egress proxy that blocks private/link-local ranges, DNS-rebinding protection, no redirects to internal hosts, allow-listed schemes/ports |
+| 27 | Sensitive data in payloads | Leakage | Redaction rules, minimal payloads with links to authenticated views, signed webhooks |
 
 ### Evolution Path ("how can the design change as requirements change?")
 1. **MVP**: single Kafka topic, router, email + webhook workers, relational delivery table.
@@ -1267,6 +1397,52 @@ partition via two-phase commit over Raft groups (Spanner-style) or avoided via d
 **Storage engine trade-off:** LSM trees favor write-heavy workloads (sequential writes, higher read/space amplification
 and compaction cost); B-trees favor read-heavy and in-place updates (write amplification and random I/O).
 **Consistency menu:** linearizable (leader reads), sequential/read-your-writes (session tokens), eventual (any replica).
+
+### Detailed Failure Scenarios
+
+**Part A (transactional core, stores, pipeline):**
+
+| # | Failure | Impact | Handling |
+|---|---|---|---|
+| 1 | Primary crashes | Writes unavailable | Promote the synchronous replica (RPO ~0); fence the old primary (lease/STONITH); clients retry idempotent writes with backoff |
+| 2 | Split brain (two primaries) | Divergent data | Single-writer enforced by leases/consensus; writes carry fencing tokens or `version`; stale primaries' writes fail |
+| 3 | Replica lag, stale read | Quota/admission decisions on old data | Decisions that must be current go to the primary; read-your-writes via LSN/session tokens; dashboards tolerate lag |
+| 4 | Hot tenant or hot partition | One shard saturated | Per-tenant rate limits, caching, request coalescing (as in Discord's data services), move the tenant to a dedicated shard, bucket large keys |
+| 5 | Missing index or query-plan regression | Latency spikes, CPU saturation | `EXPLAIN` in CI against production-sized data, statement timeouts, slow-query alerts, plan baselines, safe rollback of the offending change |
+| 6 | Long transactions / lock contention (job state updates) | Queueing, deadlocks | Short transactions, optimistic `version` checks, `SKIP LOCKED` for queue-like access, `lock_timeout`, consistent lock ordering |
+| 7 | Connection pool exhaustion | Cascading outages | Pooler (e.g. PgBouncer), per-service connection limits, backpressure and load shedding |
+| 8 | Schema migration locks a hot table | Downtime | Expand/contract, online/concurrent index builds, `lock_timeout`, rehearse on a production-sized copy |
+| 9 | Disk full or WAL growth (stuck replication slot) | Primary stops | Alert on disk and slot lag, cap slot retention, auto-archive, capacity forecasting |
+| 10 | Backup is corrupt or restore untested | Unrecoverable data loss | Continuous WAL archiving + snapshots, scheduled restore drills with measured RTO, backup checksums |
+| 11 | Accidental delete or bad deploy corrupts data | Data loss | Point-in-time recovery, soft deletes, least-privilege roles, a delayed replica as a safety net |
+| 12 | Cache stampede on a hot key | DB overload | Single-flight, jittered TTLs, serve-stale-while-revalidate |
+| 13 | Shard rebalance fails midway | Data in two places or lost | Versioned routing table; dual-write, verify, then cut over, with a rollback path |
+| 14 | Cross-shard operation partially fails | Inconsistent state | Saga with idempotent steps and compensations; reconciliation job |
+| 15 | Leaderless store uses last-write-wins and clocks drift | Lost updates | Avoid LWW for critical data; use server-assigned monotonic versions or conditional writes; reserve eventual stores for data that tolerates it |
+| 16 | Quorum unavailable (leaderless store) | Writes/reads fail | Tune `W`/`R` per query, hinted handoff, degrade consistency only for non-critical paths |
+| 17 | Tombstone buildup or compaction backlog (LSM stores) | Read latency climbs, timeouts (Discord hit this) | Avoid delete-heavy patterns, use TTL/bucketed partitions, monitor pending compactions and tombstone counts, repair/compact on a schedule |
+| 18 | Duplicate or late metering events | Wrong invoices | `UNIQUE source_event_id`, adjustment records, watermarking for late data, reconciliation vs scheduler logs |
+| 19 | High-cardinality labels explode a time-series store | Memory/disk blowup | Cardinality limits, drop `job_id` from metric labels (use event tables instead), rollups |
+| 20 | Heavy analytical query hurts OLTP | Latency for customers | Analytics on replicas or ClickHouse, resource groups, query timeouts |
+| 21 | Silent data corruption | Wrong answers | Checksums, periodic scrubs, replica comparison |
+| 22 | Region loss | Outage | Async cross-region replica with a documented RPO; runbooks; reservations re-reconciled with actual hardware state |
+| 23 | CDC/ETL lag or loss | Stale derived stores | Lag alerts, row-count/checksum audits, replay from the log; derived stores rebuildable |
+| 24 | Retention/deletion requirements | Legal exposure | Partition-drop retention, tokenized PII, tested deletion workflow |
+
+**Part B (replicated database internals):**
+
+| # | Failure | Handling |
+|---|---|---|
+| R1 | Leader fails | Followers time out and elect a new leader (randomized timeouts, pre-vote to avoid disruptive elections); committed entries survive because a majority had them |
+| R2 | Network partition isolates the old leader | The minority side can't commit (no majority); reads need a lease or ReadIndex round to avoid serving stale data |
+| R3 | Slow follower | A quorum commit doesn't wait for it; lagging followers catch up by log replay or snapshot; monitor and replace chronic laggards |
+| R4 | Log grows without bound | Periodic snapshots and log compaction; throttle snapshot transfers to avoid saturating the network |
+| R5 | Membership change during failure | One-server-at-a-time or joint consensus; new nodes join as non-voting learners until caught up |
+| R6 | Disk lies about durability (fsync issues) or corrupts data | Checksums on log entries and pages, fail-stop on corruption, rebuild the replica from peers |
+| R7 | Clock drift with leader leases | Bounded drift assumption, conservative lease margins, or avoid leases and use quorum reads |
+| R8 | Leader overload | Rate limit, shed load, split hot ranges, follower reads where staleness is acceptable |
+| R9 | Rebalancing during failure | Move one replica at a time with learner catch-up; abort and retry safely |
+| R10 | Compaction falling behind (LSM) | Throttle writes (stall) before reads degrade; monitor read/space amplification; add capacity |
 
 ### Spoken Answers to Likely Questions
 
