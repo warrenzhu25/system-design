@@ -1179,13 +1179,44 @@ variant_metrics(experiment_id, variant, metric_name, count, sum, computed_at)  #
     config) and page the owner.
 11. **Audit**: any reported number can be recomputed from raw Kafka/warehouse events plus the config version.
 
-**Failure Modes:**
-- Collector or Kafka down: SDK buffers locally with a bounded queue; assignment is unaffected; on overflow drop
-  *events* (and alert), never block checkout.
-- Config push fails: instances keep the last known snapshot; the version is stamped on events so analysis knows
-  which config each exposure used.
-- Mid-experiment split change: never re-hash existing users into different buckets. Ramp by widening ranges
-  (10% -> 50%) so previously assigned users keep their variant, and treat each ramp stage as a new analysis window.
+**Design Rules Added After Failure Analysis (what keeps results trustworthy):**
+1. **X1 — Declared randomization unit.** Each experiment declares its unit (user, device, merchant). Pre-login traffic
+   buckets on device ID, post-login on account ID, with an identity-merge table; users seen in two variants
+   ("flickers") are excluded from analysis, never silently reassigned.
+2. **X2 — Immutable salt and ranges.** The experiment salt never changes after launch, and ramp-ups only *widen*
+   bucket ranges (10% -> 50%) so already-assigned users keep their variant. Config validation rejects any edit that
+   would move an assigned bucket.
+3. **X3 — Sticky eligibility.** If targeting uses a mutable attribute (loan amount, country), a user could drift in or
+   out. Evaluate targeting at first exposure and persist `(experiment, unit) -> variant` in a small exposure store; analysis
+   uses the **first** exposure. Pure-hash assignment remains the default when targeting uses immutable attributes.
+4. **X4 — Log exposure at render, stamp the config version.** Log when the user actually *sees* the variant, with
+   `config_version`, so analysis knows exactly which rules produced each exposure.
+5. **X5 — Fail safe to control.** If the SDK has no valid config, or the config is staler than a bounded age (e.g.
+   5 minutes), it serves control and logs `config_missing`/`config_stale`, never an arbitrary variant.
+6. **X6 — Kill switch is tested.** Emergency disable travels on a fast path (push plus short TTL), and is exercised
+   regularly, since a kill switch that has never been used is an assumption.
+
+**Detailed Failure Scenarios:**
+
+| # | Failure | Effect on results | Detection | Handling |
+|---|---|---|---|---|
+| 1 | SDK cannot load config at startup | Users get no/unknown variant | `config_missing` rate | Serve control; exclude from analysis; alert; keep last-known-good on disk |
+| 2 | Config push partly fails (instances on old/new versions) | Mixed split, SRM | `config_version` distribution in events; SRM check | Max-staleness SLO (X5); stamp version on events; analysis can filter by version |
+| 3 | Hash salt or bucket range changed mid-experiment | Users reshuffle, contaminating both arms | Flicker rate spikes; SRM | Reject at config validation (X2); if it happened, restart the experiment, don't "fix" the analysis |
+| 4 | Treatment code crashes or is slower, so exposures aren't logged | **Differential event loss**: SRM that looks like a real effect | SRM; compare server-side vs client-side exposure counts | Log exposure server-side where possible; client beacons with sequence numbers to estimate loss; treat SRM as invalid result |
+| 5 | Collector or Kafka outage | Lost events, possibly asymmetric | Gaps in per-client sequence numbers; producer error metrics | Bounded local buffer, drop *events* never requests; backfill from service logs; mark the affected window |
+| 6 | At-least-once duplicates | Inflated counts | Duplicate `event_id` rate | Dedupe on `event_id`; exposures deduped to first per `(experiment, unit)` |
+| 7 | Late-arriving outcomes (approval decisions, repayments, defaults) | Premature readout | Metric maturity flag | Attribution windows with maturity; short-horizon proxy metrics for early read, delayed metrics (default rate) for final; never call a result before maturity |
+| 8 | Bots, internal/test users | Noise, bias if filtered unevenly | Traffic-source breakdown | Apply the same filter to all arms, defined by attributes not by outcomes |
+| 9 | Overlapping experiments interact | Confounded effects | Interaction test between concurrent experiments | Layers for mutually exclusive features; independent salts otherwise |
+| 10 | Identity changes (anonymous to logged in) | Flickers; unit double counted | Flicker report | X1 unit rules; merge table; exclude flickers |
+| 11 | Stats job fails or runs on partial data | Wrong lift shown | Row-count/completeness checks vs expected | Results marked stale, never display a partial day; reruns idempotent from raw events |
+| 12 | Peeking / multiple comparisons | False positives | n/a | Sequential tests (mSPRT-style) or fixed horizon; correction across metrics (Benjamini-Hochberg) |
+| 13 | Guardrail breach but alert pipeline lags | Harm continues | Guardrail latency SLO | Key guardrails computed on the streaming path; auto-pause at hard thresholds |
+| 14 | Kill switch ineffective (cache TTL too long) | Bad variant keeps serving | Kill-switch drill | X6: fast-path push, short TTL for emergency flags, regular drills |
+| 15 | Experiment ended but code still reads config | Unclear behavior | Stale-flag report | Defined end state (ship winner / revert to control); cleanup ticket required to close |
+| 16 | Experiment affects credit decisions | Fair-lending/compliance exposure | n/a | Pre-launch compliance review gate in the config service; decision reason codes logged; no experiments on protected-class proxies without sign-off (coordinate with the compliance team) |
+| 17 | Audit asks "recompute this number" | Irreproducible result | Reproducibility test | Raw events immutable; config versions retained; analysis job parameterized and versioned |
 
 **How Real Production Systems Do It (and what to copy):**
 
@@ -1262,42 +1293,83 @@ internal systems of outcomes — without ever double-charging or silently droppi
 
 **High-Level Design:**
 1. **Durable schedule store**: each installment is a row (`loan_id, installment_id, due_ts, status,
-   attempt_count`) in a database, not just an in-memory timer — a scheduler process that only holds
+   attempt_no`) in a database, not just an in-memory timer — a scheduler process that only holds
    timers in memory loses every pending payment on crash.
 2. **Polling/dispatch loop with a due-time index**: a worker polls `WHERE status = 'PENDING' AND due_ts
    <= now()` (indexed on `due_ts`), claims a batch (e.g., via `SELECT ... FOR UPDATE SKIP LOCKED` or an
    equivalent claim mechanism), and dispatches each to the payment-execution path.
 3. **Idempotent payment execution**: every attempt carries an idempotency key
-   (`loan_id:installment_id:attempt_count`) passed through to the payment processor, so a retried request
+   (`loan_id:installment_id:attempt_no`) passed through to the payment processor, so a retried request
    after an ambiguous failure (timeout, not an explicit decline) can't double-charge — the processor itself
-   de-dupes on that key.
-4. **Outcome as an event, state transition as a side effect**: a successful/failed charge publishes an
-   outcome event to a durable log; the schedule store's `status` is updated by a consumer of that event
-   (not synchronously in the dispatch path), so downstream systems and the schedule store stay
-   consistent even if one of them is temporarily down.
-5. **Retry with backoff, bounded**: on a retryable failure (processor timeout, insufficient funds
-   flagged as "try later"), re-enqueue with an incremented `attempt_count` and a pushed-out `due_ts`; past
-   the configured max attempts, transition to a terminal `FAILED` status and hand off to dunning rather
-   than retrying forever.
+   de-dupes on that key. **`attempt_no` is a logical attempt**: it advances *only* after the previous attempt
+   reached a definitive "no money moved" outcome. A worker crash, a lease expiry or a redelivered message
+   must **never** produce a new key (see "Attempt Rules" below — getting this wrong is the classic
+   double-charge bug).
+4. **Atomic state transition, events for everything downstream**: the executor records the attempt result
+   *and* the installment's state transition in **one transaction** together with an outbox row, so there is
+   no window where the attempt is terminal but the installment still says `PROCESSING`. Ledger,
+   notifications and dunning consume the outbox event asynchronously and idempotently, so they can lag or be
+   down without affecting charging correctness.
+5. **Retry with backoff, bounded**: on a *definitive* retryable failure (insufficient funds flagged as
+   "try later"), set `due_ts` to a later time and advance `attempt_no`; past the configured max attempts,
+   transition to a terminal `FAILED` status and hand off to dunning rather than retrying forever. Our own
+   infrastructure failures (processor outage, open circuit breaker) use a separate counter and do not consume
+   the borrower's attempts.
 
 **Data Model (sketch):**
 ```
-installments(loan_id, installment_id, due_ts, amount, status, attempt_count, idempotency_key)
-payment_attempts(idempotency_key, installment_id, ts, outcome, processor_ref)  # append-only, audit trail
+installments(installment_id PK, loan_id, seq, due_ts, amount_due, status, attempt_no, infra_retry_count,
+             claim_token, lease_expires_at, version, UNIQUE (loan_id, seq))
+payment_attempts(idempotency_key PK, installment_id, attempt_no, status, request_fingerprint,
+                 processor_ref, created_at, lease_until, result_code, UNIQUE (installment_id, attempt_no))
+outbox(event_id PK, aggregate_id, type, payload, published_at NULL)
 ```
+State machines:
+- Installment: `SCHEDULED -> PROCESSING -> PAID | SCHEDULED (retry, later due_ts) | FAILED | PENDING_SETTLEMENT`;
+  `PENDING_SETTLEMENT -> PAID | RETURNED`; `PAID -> RETURNED` (ACH return / chargeback).
+- Attempt: `IN_FLIGHT -> SUCCEEDED | DECLINED_HARD | FAILED_RETRYABLE | PENDING_SETTLEMENT | UNKNOWN`;
+  `UNKNOWN -> (resolved to one of the above)`. Transitions are monotonic and guarded by `WHERE status IN (...)`
+  so a late or duplicate writer can't move state backwards.
+
+**Attempt Rules (the invariants that make double-charging impossible):**
+1. **R1 — Key stability.** The idempotency key is derived from `(loan_id, installment_id, attempt_no)`. `attempt_no`
+   advances only when the current attempt is `FAILED_RETRYABLE` (the processor definitively said
+   no money moved).
+2. **R2 — Claiming never changes the key.** The dispatcher sets `PROCESSING`, `claim_token` and a lease; it does
+   **not** increment `attempt_no`. Redelivery and lease recovery therefore reuse the same key.
+3. **R3 — Resolve before re-driving.** If the current attempt is `IN_FLIGHT`, `UNKNOWN` or terminal-but-not-applied,
+   recovery first **resolves** it (look up the key at the processor / replay the stored result). It never starts a
+   fresh charge under a new key.
+4. **R4 — Never "retry" an UNKNOWN with a new key.** An unresolved attempt stays `UNKNOWN`, is escalated, and blocks
+   further charging of that installment.
+5. **R5 — Mind the processor's key-retention window.** Processors remember idempotency keys only for a limited time
+   (often around 24 hours; check your processor's documentation). Resolve `UNKNOWN` attempts well inside the window
+   (e.g. a 4-hour SLA). Past it, do not re-send the same key; resolve through the processor's search by our metadata
+   reference (`installment_id`) or the settlement report first.
+6. **R6 — Request fingerprint.** Store `hash(amount, currency, method)` with the key. Reusing a key with different
+   parameters is rejected locally (and by the processor) instead of silently charging a different amount.
+7. **R7 — Write-ahead intent.** The `IN_FLIGHT` row is committed (and synchronously replicated) **before** the
+   processor call, so a crash can never leave a charge with no local record.
+8. **R8 — Re-validate at execution time.** In the same pre-call transaction, re-read the installment (`version`,
+   `status`, `amount_due`) and the loan state. If the loan was cancelled, refunded, paid off early, rescheduled or the
+   amount changed, abort without calling the processor.
+9. **R9 — Infrastructure failures are not borrower failures.** Processor 5xx/timeouts-with-definitive-no-charge and
+   circuit-breaker rejections increment `infra_retry_count` (own cap and alert), not `attempt_no`.
+10. **R10 — No cross-processor failover mid-attempt.** Failing over to a second processor while the first attempt is
+    unresolved can charge twice, because the two processors share no idempotency state. Resolve first, then route.
 
 **Detailed Component Breakdown:**
 
 | Component | Responsibility | Tech choice (typical) |
 |---|---|---|
 | Loan servicing API | Creates loan + installment schedule at origination; handles reschedule/early payoff | Stateless service + Postgres |
-| Schedule store | Source of truth for `installments` (status, due_ts, attempt_count) | Postgres/MySQL, index on `(status, due_ts)`, partitioned by due date |
+| Schedule store | Source of truth for `installments` (status, due_ts, attempt_no) | Postgres/MySQL, index on `(status, due_ts)`, partitioned by due date |
 | Scheduler / dispatcher | Polls due rows, claims a batch, enqueues work | N workers using `FOR UPDATE SKIP LOCKED` or lease column |
 | Work queue | Buffers payment jobs, absorbs due-date spikes (e.g. the 1st of month) | Kafka / SQS |
 | Payment executor | Calls processor with idempotency key; classifies the result | Stateless workers |
 | Payment method / processor adapter | Cards, ACH, debit; each has different latency and failure semantics | Adapter per rail (card network, ACH bank partner) |
 | Attempt log | Append-only record of every attempt and outcome (audit) | Same DB table + Kafka topic |
-| Outcome consumer | Applies result: update installment, write ledger entry, schedule retry | Kafka consumer, idempotent |
+| Outbox relay + outcome consumers | Publish committed results; ledger/notification/dunning consume idempotently | Relay process + Kafka consumers |
 | Ledger service | Double-entry record of money movement (see #15) | Append-only DB |
 | Notification service | Email/push: upcoming payment, success, failure | Consumes outcome events |
 | Dunning / collections | Handles terminal failures: grace period, late fee, outreach | Workflow engine / state machine |
@@ -1310,32 +1382,115 @@ payment_attempts(idempotency_key, installment_id, ts, outcome, processor_ref)  #
    service emails the borrower (also a regulatory courtesy).
 3. **Due time**: a dispatcher polls
    `SELECT ... WHERE status='SCHEDULED' AND due_ts<=now() ORDER BY due_ts LIMIT 500 FOR UPDATE SKIP LOCKED`.
-4. **Claim**: in the same transaction it sets `status=PROCESSING`, `claimed_by`, `lease_expires_at`, and
-   increments `attempt_count`; commits. It then puts `{installment_id, attempt_no}` on the queue.
-5. **Execute**: an executor builds `idempotency_key = loan_id:installment_id:attempt_no`, inserts a
-   `payment_attempts` row (`status=INITIATED`) **before** calling out, then calls the processor.
-6. **Result**: the processor returns `SUCCESS`, `DECLINED` (hard), `RETRYABLE` (insufficient funds, timeout) or
-   (for ACH) `PENDING`, with settlement confirmed days later by a webhook or return file.
-7. **Publish**: executor writes the attempt result and emits `payment.succeeded|failed|pending`
-   (transactional outbox, so the DB write and event cannot diverge).
-8. **Apply**: the outcome consumer, idempotent on `idempotency_key`, marks the installment `PAID`, posts
-   ledger entries (debit cash / credit loan receivable), and triggers the success notification.
-9. **Retry path**: on `RETRYABLE`, set `status=SCHEDULED`, `due_ts = now + backoff(attempt)` (e.g. 1d, 3d, 5d),
-   up to a max; at the limit set `FAILED` and emit `payment.exhausted` to dunning.
-10. **Lease recovery**: a sweeper resets rows stuck in `PROCESSING` past `lease_expires_at`; because the
-    processor call is idempotent, re-running is safe.
+4. **Claim**: in the same transaction it sets `status=PROCESSING`, a fresh `claim_token` and `lease_expires_at`
+   (using the database clock) and commits. It does **not** touch `attempt_no` (R2). The queue message
+   `{installment_id, claim_token}` is written through the outbox in that same transaction.
+5. **Execute**: the executor re-validates the installment (R8), builds `idempotency_key =
+   loan_id:installment_id:attempt_no` from the *stored* `attempt_no`, inserts the `payment_attempts` row
+   (`IN_FLIGHT`, with fingerprint and lease) and commits durably **before** calling out (R7), then calls the
+   processor.
+6. **Result**: the processor returns `SUCCEEDED`, `DECLINED_HARD`, `FAILED_RETRYABLE` (e.g. insufficient funds) or
+   (for ACH) `PENDING_SETTLEMENT`, with settlement confirmed days later by a webhook or return file. A **timeout is
+   none of these**: it is `UNKNOWN` until resolved (R3-R4).
+7. **Record + transition atomically**: in one transaction the executor updates the attempt (guarded by `WHERE
+   status IN (IN_FLIGHT, UNKNOWN)`), applies the installment transition (`PAID`, `SCHEDULED` with new `due_ts`,
+   `FAILED`, `PENDING_SETTLEMENT`) guarded by `version`, and inserts the outbox event
+   `payment.succeeded|failed|pending`. The outbox relay publishes it (at-least-once).
+8. **Apply downstream**: the ledger consumer (idempotent on `idempotency_key`) posts entries (debit cash / credit loan
+   receivable); notification and dunning consumers react. None of them can change charging state.
+9. **Retry path**: on a definitive `FAILED_RETRYABLE`, set `status=SCHEDULED`, `attempt_no += 1`,
+   `due_ts = now + backoff(attempt_no)` (e.g. 1d, 3d, 5d), up to a max; at the limit set `FAILED` and emit
+   `payment.exhausted` to dunning.
+10. **Lease recovery (the corrected protocol)**: a sweeper selects `PROCESSING` rows with `lease_expires_at < now()`
+    and inspects the *current* attempt: (a) no attempt row -> safe to re-queue with a new `claim_token`, same
+    `attempt_no`; (b) `IN_FLIGHT`/`UNKNOWN` -> enqueue a **resolve** job (R3), never a fresh charge; (c) terminal
+    but installment not transitioned -> apply the stored result. Because the key is unchanged, even a racing
+    original executor is harmless: both hit the same processor key.
 11. **Reconciliation** (nightly): compare processor settlement report vs `payment_attempts`/ledger; any
     mismatch (charged but we show failed, or the reverse) opens a ticket and posts a correcting ledger entry.
 
-**Failure Modes:**
-- Executor crashes after the processor charged but before recording: the next run uses the same idempotency
-  key, so the processor returns the original result instead of charging again.
-- Ambiguous timeout: mark attempt `UNKNOWN`, query the processor by key, and decide only on a definite answer.
-- ACH return days later (NSF): arrives as a reversal event; ledger posts a reversing entry and the installment
-  returns to `SCHEDULED`/`FAILED`. This is why the status machine must allow `PAID -> RETURNED`.
-- Due-date thundering herd: partition the scan by `due_ts` hash/shard, rate-limit per processor, and stagger
-  charges within the day.
-- Poison message: after N consumer failures send to a dead-letter queue with an alert, not an infinite loop.
+**Detailed Failure Scenarios:**
+
+*A. Scheduler worker (dispatcher) and sweeper*
+
+| # | Failure | What state is left behind | Handling | Residual risk |
+|---|---|---|---|---|
+| D1 | Crash before the claim commits | Nothing changed | Next poll by any worker picks the row up | None |
+| D2 | Crash after the claim commits, before the message is delivered | Row `PROCESSING`, no message in flight | Message is written via the **outbox in the claim transaction**, so the relay delivers it after restart; the lease sweeper is the second net | Payment late by at most one lease period |
+| D3 | Message delivered twice (relay retry, queue redelivery) | Two executors for one claim | Executor checks `claim_token` + attempt row; second one sees `IN_FLIGHT`/terminal and exits or replays | None, same key either way |
+| D4 | **Slow executor outlives its lease; sweeper re-drives** | Attempt may be `IN_FLIGHT` with a charge in progress | Sweeper inspects the attempt (rule R3): enqueues **resolve**, not a new charge; any second executor reuses the **same key** (R2) | Needs the processor to honour key dedupe (R5 window) |
+| D5 | Sweeper resets a row whose attempt is terminal but not applied (e.g. relay lag) | Attempt `SUCCEEDED`, installment `PROCESSING` | Atomic record+transition in the executor (step 7) removes this window; if it still occurs, sweeper applies the stored result | None |
+| D6 | Dispatcher reads from a lagging replica | Row looks unclaimed | Claims are done only on the primary; reads for display may use replicas | None if enforced |
+| D7 | Clock skew between workers | Rows appear due too early or late | All due and lease comparisons use the **database clock** (`now()`), never worker clocks | None |
+| D8 | Scheduler outage, then recovery | Large backlog of due rows | Normal poll catches up, ordered by `due_ts`; batch size cap and per-processor rate limit prevent a thundering herd; borrower-facing grace avoids late fees caused by our outage | Charges are late; policy must not penalize borrowers |
+| D9 | Poison row (always fails before reaching the executor) | Retried forever, blocks batch head | Per-row dispatch attempt cap -> quarantine state + alert; claim query skips quarantined rows | Needs a human |
+| D10 | Two sweepers run concurrently | Duplicate recovery work | Sweeper claims rows with `SKIP LOCKED`; recovery actions are idempotent | None |
+| D11 | Hot partition at month start (1st/15th) | Index contention, long scans | Partition schedule by `due_date`; shard claims by `hash(installment_id) % N` worker lanes; jitter charges within the allowed window | Capacity planning |
+
+*B. Executor and processor interaction*
+
+| # | Failure | Money moved? | Handling |
+|---|---|---|---|
+| E1 | Crash before the `IN_FLIGHT` row commits | No | Redelivery starts clean; nothing to undo |
+| E2 | Crash after `IN_FLIGHT` commits, before the processor call | No | Resolve finds "not found" at the processor -> re-send **same key** (within retention window) |
+| E3 | **Crash during or after the processor call, before the result is recorded** | **Maybe** | Resolve: `lookup(key)`; found -> record result; not found within window -> re-send same key; else `UNKNOWN` + escalate (R3-R5) |
+| E4 | Processor call times out | Maybe | Same as E3. Never treat a timeout as failure; never mint a new key (R4) |
+| E5 | Processor returns 5xx / is unreachable (definitive no charge) | No | `infra_retry_count++`, backoff, circuit breaker; borrower attempt not consumed (R9) |
+| E6 | Processor returns a soft decline (insufficient funds) | No | `FAILED_RETRYABLE`: advance `attempt_no`, schedule retry per policy |
+| E7 | Processor returns a hard decline (closed account, fraud) | No | `DECLINED_HARD`: stop retrying, prompt borrower to update payment method, notify |
+| E8 | Decline code misclassified | Depends | Maintain an explicit code->class table with a default of "UNKNOWN: do not retry automatically"; alert on unmapped codes. Misclassifying hard as soft keeps charging a bad instrument; the reverse sends borrowers to collections early |
+| E9 | ACH/bank rail accepts the debit (`PENDING_SETTLEMENT`) | Pending | No retry until a final result; webhook or return file settles it; installment shows pending, not paid |
+| E10 | ACH return arrives days later (NSF, unauthorized) | Reversed | Reversal event -> installment `RETURNED`, reversing ledger entry, retry/dunning per return code (some codes forbid re-presentment) |
+| E11 | Same key sent with different amount/method | n/a | Local fingerprint check (R6) rejects; processor also errors |
+| E12 | Processor key-retention window expires while `UNKNOWN` | Maybe | Do not re-send the old key; search by metadata reference / settlement report; hold until resolved (R5) |
+| E13 | Failover to a second processor while the first is unresolved | Maybe | Forbidden until resolved (R10); only new installments route to the new processor |
+| E14 | Executor crashes after the result is recorded but before downstream effects | Yes | Outbox event already committed with the result; relay publishes it later |
+
+*C. Events, ledger and downstream*
+
+| # | Failure | Handling |
+|---|---|---|
+| C1 | Outbox relay down | Events accumulate in the outbox table; relay resumes and publishes in order per aggregate; alert on outbox age |
+| C2 | Duplicate event delivery | Consumers dedupe on `event_id`/`idempotency_key`; ledger has a unique constraint on the key |
+| C3 | Events arrive out of order (`pending` after `succeeded`) | State transitions are monotonic and version-guarded; stale events are ignored |
+| C4 | Ledger service down | Charging continues; ledger consumer catches up from the topic; reconciliation compares ledger totals to attempts |
+| C5 | Notification provider down | Independent retry with its own DLQ; never blocks charging; a missed "payment failed" notice triggers a re-send job |
+| C6 | Poison event | After N failures -> DLQ + alert; partition keeps moving |
+
+*D. Database, queue and platform*
+
+| # | Failure | Handling |
+|---|---|---|
+| P1 | Primary DB failover | Promote the synchronous replica (no acknowledged `IN_FLIGHT` row is lost, which is why R7 requires sync commit); fence the old primary; executors reconnect and resolve any open attempts |
+| P2 | Split-brain (two primaries) | Fencing tokens/leases at the storage layer; claim and attempt writes carry `version` so a stale primary's writes fail |
+| P3 | Queue/Kafka unavailable | Outbox keeps messages durably; sweeper re-drives due rows; no charge depends on the queue being up |
+| P4 | Executor deployment bug charges wrong amount | Amount is read from the installment in the same transaction as the intent row; invariant alert: `charged_amount != amount_due`; kill switch pauses dispatch; automatic refund workflow for confirmed over-charges |
+| P5 | Replica/analytics lag shows stale status to support | UI labels data freshness; support actions read from the primary |
+| P6 | Region outage | Pending schedule is in a replicated store; failover region resumes polling; all open attempts go through resolve; processor-side keys protect against re-sends |
+
+*E. Business-rule races*
+
+| # | Race | Handling |
+|---|---|---|
+| B1 | Borrower pays early or in full while a debit is in flight | R8 check before the call; if the debit is already in flight, the ledger records an overpayment and an automatic refund/credit is issued |
+| B2 | Loan cancelled or merchant refund processed while due | `version` bump on the installment; executor aborts (R8); refund path posts reversing entries |
+| B3 | Borrower changes payment method between attempts | New method applies to the next `attempt_no` only; the old attempt keeps its key and fingerprint |
+| B4 | Reschedule requests (change due date) | Update `due_ts` with a `version` check; if `PROCESSING`, the request is queued until the attempt resolves |
+| B5 | Due date vs time zone/business days | Store `due_ts` in UTC computed from the borrower's local date; ACH cutoffs and bank holidays adjust the effective date; tests around DST |
+| B6 | Duplicate schedule rows from a retried origination call | `UNIQUE (loan_id, seq)` and idempotent origination |
+| B7 | Regulatory limits on re-presentment/retries | Policy table per rail/return code, enforced in the retry scheduler, with audit |
+
+*F. Safety nets and detection*
+
+- **Invariant monitors** (page on breach): more than one `SUCCEEDED` attempt for an installment; processor settlement
+  with no local attempt row; installment `PROCESSING` longer than 2x the lease; any attempt `UNKNOWN` older than the SLA;
+  outbox oldest unpublished age; charge amount differs from amount due; sudden spike in a decline code.
+- **Reconciliation (nightly, plus intra-day for card rails)**: three-way match of processor settlement files, local
+  attempts and ledger entries. Breaks open tickets; a confirmed **duplicate charge** triggers an automatic refund and
+  an incident review.
+- **Kill switches**: pause dispatch globally, per processor, per merchant, or per rail without redeploying.
+- **Game days**: kill executors mid-call, drop the processor connection after the request is sent, expire leases
+  artificially, and replay duplicate messages; the expected result is zero duplicate settlements.
 
 **How Real Production Systems Do It (and what to copy):**
 
@@ -1363,25 +1518,45 @@ writes always go to the primary, never a replica, because replica lag could let 
 workflows are modeled as a **DAG of retryable, idempotent steps**; Airbnb reports five 9s (99.999%) payment
 consistency after the rebuild. **Copy** the three-phase executor, shown next.
 
-*Executor sketch assembled from those two designs (pseudo-code, not either company's source):*
+*Executor sketch assembled from those two designs, with the Attempt Rules applied (pseudo-code, not either company's source):*
 ```
-def execute(installment_id, attempt_no):
-    key = f"{loan_id}:{installment_id}:{attempt_no}"
-    # PRE-RPC (single DB txn on the primary)
-    with db.txn():
-        row = payment_attempts.get(key, for_update=True)
-        if row and row.status in (SUCCEEDED, DECLINED): return row.result     # replay stored result
-        if row and row.status == IN_FLIGHT and row.lease_valid(): raise Busy  # another worker owns it
-        payment_attempts.upsert(key, status=IN_FLIGHT, lease_until=now()+60s)
-    # RPC (no DB txn held open across the network)
+def execute(msg):                                   # msg = {installment_id, claim_token}
+    # PRE-RPC: one transaction on the primary, committed with synchronous replication (R7)
+    with db.txn(sync_commit=True):
+        inst = installments.get(msg.installment_id, for_update=True)
+        if inst.status != PROCESSING or inst.claim_token != msg.claim_token: return   # stale/duplicate message
+        if loan_changed(inst):                                                         # R8
+            installments.release(inst); return
+        key = f"{inst.loan_id}:{inst.installment_id}:{inst.attempt_no}"                # R1: stored attempt_no
+        row = attempts.get(key, for_update=True)
+        if row and row.status in TERMINAL: return apply_stored_result(inst, row)       # replay, no processor call
+        if row and row.status in (IN_FLIGHT, UNKNOWN): return resolve(inst, row)       # R3: never re-charge blindly
+        attempts.insert(key, status=IN_FLIGHT, fingerprint=hash(inst.amount_due, method),
+                        lease_until=db.now() + 60s)                                    # R6, R7
+
+    # RPC: no DB transaction held open across the network
     try:
-        result = processor.charge(key, amount, method)       # processor also dedupes on key
+        result = processor.charge(key, inst.amount_due, method, metadata={"installment_id": inst.installment_id})
     except (Timeout, ConnectionError):
-        result = processor.lookup(key) or UNKNOWN            # ambiguous -> ask, don't guess
-    # POST-RPC
+        result = resolve_with_lookup(key)           # FOUND(result) | NOT_FOUND | UNKNOWN
+
+    # POST-RPC: attempt result + installment transition + outbox, atomically
     with db.txn():
-        payment_attempts.update(key, status=classify(result), result=result)
-        outbox.insert(event_for(result))                     # event published by relay -> Kafka
+        finalize(inst, key, result)
+
+def resolve(inst, row):
+    r = processor.lookup(row.key)
+    if r.found:                      return finalize(inst, row.key, r.result)
+    if r.not_found and row.age < KEY_RETENTION_SAFE and processor.lookup_is_authoritative:
+        return redo_charge_same_key(inst, row)      # same key => cannot double charge
+    attempts.mark(row.key, UNKNOWN); escalate(row)  # R4/R5: no new key, no new charge
+
+def finalize(inst, key, result):
+    cls = classify(result)                          # unmapped codes -> UNKNOWN (E8)
+    attempts.update(key, status=cls) if attempts.status(key) in (IN_FLIGHT, UNKNOWN)   # monotonic
+    installments.transition(inst, cls, expected_version=inst.version)   # PAID | SCHEDULED(attempt_no+1 on FAILED_RETRYABLE)
+                                                                         # | FAILED | PENDING_SETTLEMENT; infra errors -> infra_retry_count++
+    outbox.insert(event_for(cls))
 ```
 
 *Uber — [Payments Platform](https://www.uber.com/blog/ubers-payments-platform).* Uber splits the money lifecycle into
@@ -1410,7 +1585,15 @@ so the above is the industry pattern; present it as such.
 3. How do you handle a due date landing on a scheduler outage window? → the durable due-time index means
    a recovered scheduler's next poll picks up every installment whose `due_ts` has passed, regardless of
    how long the outage was — the design should explicitly call out that "catch-up" is a normal poll, not
-   a special recovery path.
+   a special recovery path. Borrower-facing policy (grace period, no late fee for our outage) is part of the answer.
+4. A worker is slow and its lease expires while the charge is in flight. How do you avoid a second charge? →
+   the lease only authorizes *re-driving*; recovery inspects the current attempt, never mints a new key (R2-R4),
+   and any second executor reuses the same key, so the processor returns the original result. The unsafe design is
+   the one where claiming increments the attempt number and therefore changes the key.
+5. What if the processor forgets idempotency keys after a day? → resolve `UNKNOWN` attempts inside the retention
+   window, and after that look up by our metadata reference or the settlement file before any new charge (R5).
+6. How do you prove it works? → invariant monitors (one success per installment), three-way reconciliation, and
+   fault-injection tests that kill executors mid-call and expire leases, expecting zero duplicate settlements.
 
 ---
 
@@ -1522,6 +1705,51 @@ Invariants enforced in code and by DB constraints:
 **Scaling notes:** shard by `loan_id` (all of a loan's entries co-locate, so a single-shard transaction posts
 the whole transaction); hot merchant accounts that aggregate many loans should not be a single balance row, so
 use per-loan accounts plus an aggregated view, or batch-serialized writes for hot accounts.
+
+**Posting Rules Added After Failure Analysis:**
+1. **L1 — One transaction posts a whole business event.** `transactions` and all its `ledger_entries` commit together or
+   not at all. A deferred constraint (or trigger) verifies `SUM(debits) = SUM(credits)` per transaction at commit, in
+   addition to the application check.
+2. **L2 — Serialize postings per loan.** Take a row lock on the loan (or route all writes for a `loan_id` to one partition
+   writer) while allocating a payment, so two concurrent payments cannot both allocate to the same installment. Use
+   `version` checks for optimistic retries.
+3. **L3 — Deterministic allocation and rounding.** Money is integer minor units. Allocation order (fees -> interest ->
+   principal -> oldest installment) is code-versioned; remainders use largest-remainder rounding; the engine version
+   is stored with each transaction so results are reproducible.
+4. **L4 — Immutable, insert-only.** The application role has `INSERT`/`SELECT` only. Corrections are reversing
+   transactions that reference `reverses_txn_id`; a constraint forbids reversing more than the original amount.
+5. **L5 — Direction is explicit.** Each entry stores `direction` and `account_id`, so balance sums never depend on
+   inferring sign from `entry_type`; a new entry type cannot silently flip a sign.
+6. **L6 — PII stays out of the ledger.** Entries reference tokens/ids; personal data lives in a separate store so
+   deletion requests can be honored without rewriting financial history.
+7. **L7 — Derived data is rebuildable.** `loan_balances`, installment statuses and merchant settlement batches are
+   projections with `as_of_entry_id`, and a scheduled job recomputes a sample (and periodically everything) from the
+   ledger and compares.
+
+**Detailed Failure Scenarios:**
+
+| # | Failure | Impact | Handling |
+|---|---|---|---|
+| 1 | Duplicate posting request (client or consumer retry) | Double credit | `UNIQUE (idempotency_key)` on `transactions`; the second insert returns the first result |
+| 2 | Two payments land at once for the same installment | Overallocation, wrong paid status | L2 serialization; second payment allocates to the remainder or becomes a credit/refund; both visible in the ledger |
+| 3 | Crash mid-posting | Partial entries | L1: single DB transaction, nothing visible until commit |
+| 4 | A bug produces an unbalanced transaction | Money created/destroyed | L1 commit-time check; nightly global invariant `SUM(debit) = SUM(credit)`; page on violation |
+| 5 | Projector crashes or lags | Stale `loan_balances` | Reads that must be exact compute from entries or check `as_of_entry_id`; the projector is idempotent on `entry_id`; lag alert |
+| 6 | Cache/projection drifts from the ledger | Wrong balance shown | L7 recompute-and-compare; auto-heal by rebuilding from the ledger; drift counter on a dashboard |
+| 7 | Late ACH settlement or backdated entry (`effective_ts` earlier than recorded) | Historical balances, interest and late fees change | Re-derive dependent values deterministically from entries; emit correction events; notify only if the borrower-visible result changes; `recorded_ts` answers "what did we know when" |
+| 8 | Backdated entry lands in a **closed accounting period** | Finance reports change retroactively | Post an adjustment dated in the open period referencing the original; approval workflow; never rewrite closed periods |
+| 9 | Reversal of a reversal / refund after partial payments | Negative or inconsistent balances | Every action is a new linked transaction; constraint caps total reversals; refund allocation rules documented (pro-rata to paid installments) |
+| 10 | Refund larger than amount paid | Merchant owes us | Cap at paid amount; create a merchant receivable; flag for review |
+| 11 | Hot merchant account (many loans) | Row contention | Per-loan accounts plus an aggregated view; batch-serialized writes for the aggregate account (the pattern Uber describes for hot ledger entities) |
+| 12 | Settlement spanning many loans/shards | Partial settlement | Settlement batch derived from the ledger, then executed as a saga with idempotent steps and a reconciliation record |
+| 13 | New entry type breaks an old consumer | Wrong totals downstream | Additive schema only; versioned `metadata`; consumers fail loudly (not silently skip) on unknown types; contract tests |
+| 14 | CDC/warehouse feed lags or loses rows | Finance reports wrong | Per-day row-count and checksum comparison between OLTP and warehouse; replay from the log |
+| 15 | Deletion/privacy request | Conflict with immutability | L6: delete or anonymize the token mapping; ledger rows remain valid |
+| 16 | Accidental or malicious update/delete | Audit failure | L4 permissions; optionally hash-chain entries for tamper evidence (Uber built a custom tamper-evident store for this need); alert on any `UPDATE/DELETE` attempt |
+| 17 | Reconciliation break vs processor/bank | Unknown money | Classify (timing difference, missing, amount); auto-clear timing breaks within tolerance; unresolved breaks open tickets; never plug silently with a manual entry without approval |
+| 18 | Historical loan migration | Opening balances wrong | Dual-run, compare balances loan by loan, cut over only on zero unexplained differences |
+| 19 | Interest/day-count disagreement | Borrower disputes | Versioned calculation engine; store inputs and version with each accrual; replayable |
+| 20 | Shard imbalance or hot loan | Latency | Shard by `loan_id` hash; split hot shards; move heavy merchants' reporting to the warehouse |
 
 **How Real Production Systems Do It (and what to copy):**
 
@@ -1657,13 +1885,48 @@ scoring_requests(request_id, application_id, ts, rule_hits[], ml_score, decision
 11. **Release**: a new model runs in **shadow** (scored, not acted on), then canary on a % of traffic, compared on
     precision/recall and approval rate before full rollout.
 
-**Failure Modes & Tradeoffs:**
-- Feature store slow: use cached/partial features, mark `features_degraded`, widen the review band; never block
-  checkout on one dependency.
-- Train/serve skew: define features once and compute both online and offline from the same definition.
-- Adversarial drift: attackers probe thresholds; add randomized review sampling and monitor score distribution drift.
-- Fairness/compliance: lending decisions need explainable reasons and an audit trail, so log reason codes and keep
-  a human-readable model/rule version history.
+**Safety Rules Added After Failure Analysis:**
+1. **F1 — Every decision is explainable and logged.** Persist inputs (feature snapshot), rule hits, model version, score,
+   thresholds and the final decision synchronously with a decision id; reason codes are needed for adverse-action
+   notices. If the decision log write fails, the request fails closed to manual review rather than proceeding unlogged.
+2. **F2 — Rules and models ship progressively.** shadow (evaluate, don't act) -> canary (a small percentage) -> full,
+   with automatic rollback when decline rate, review rate or score distribution moves beyond a bound.
+3. **F3 — Counters are atomic and idempotent.** Velocity updates use atomic increment-then-compare keyed by
+   `request_id`, so retries don't double count and parallel requests can't both read the same stale count.
+4. **F4 — Propagated signals have confidence, scope and TTL.** A confirmed-fraud flag on a PII value is a hard signal;
+   a flag inherited through a *shared device or address* is only a review-band signal and expires, to avoid punishing
+   family members or shared networks.
+5. **F5 — Learn from unbiased data.** Route a small random sample of approvals and declines to review (or hold out a
+   control policy) so labels are not only from the cases the current policy already flagged.
+6. **F6 — Degraded modes are explicit.** Each dependency (feature store, model, device intelligence, bureau) has a
+   timeout, a fallback and a tag in the decision log; degraded decisions have tighter exposure limits (lower credit
+   limit, step-up verification) instead of blind approval.
+
+**Detailed Failure Scenarios:**
+
+| # | Failure | Impact | Handling |
+|---|---|---|---|
+| 1 | Feature store slow/unavailable | Missing features | Per-feature timeouts; defaults plus explicit "missing" indicators (the model is trained with missingness); wider review band; tag `features_degraded`; limit exposure (F6) |
+| 2 | Streaming aggregates lag | Velocity undercounted, so attackers burst through | Monitor freshness; if lag exceeds a bound, treat velocity as unknown and apply conservative thresholds |
+| 3 | Concurrent requests race on a counter | All requests pass at count=2 | F3: atomic increment-then-check (e.g. a Lua script or conditional write) |
+| 4 | Checkout retries the same request | Double-counted velocity, spurious declines | Idempotent on `request_id`; cached decision returned for the same id |
+| 5 | Model service down or slow | No score | Timeout + circuit breaker -> rules-only decision with widened manual-review band; hedged request to a second replica when latency allows |
+| 6 | Bad model deployment (feature order, scaling bug) | Score distribution shifts, approvals or declines surge | Feature-schema contract tests; shadow then canary (F2); PSI/score-drift and approval-rate alarms with auto-rollback; model registry with signed model+schema |
+| 7 | Bad rule (typo declines everyone) | Revenue loss, customer harm | Rule validation, dry-run against the last 24h of traffic, staged rollout, per-rule hit-rate alarm with auto-disable, per-rule kill switch |
+| 8 | Propagation flags innocent users | Wrongful declines, fairness risk | F4; appeal and manual review path; track false-positive rate of propagated flags |
+| 9 | Feedback-loop bias | Model learns only what the old policy already caught | F5 exploration sample; reject inference; evaluate on the holdout |
+| 10 | Labels arrive late (chargebacks, first-payment default) | Recent cohorts look "good" | Label-maturity windows in training and evaluation; proxy labels for early signal; distribution monitoring until labels arrive |
+| 11 | Attackers probe thresholds | Model/rules reverse engineered | Rate limit decision queries per device/IP, randomize inside the review band, minimize reason detail returned to applicants beyond what regulation requires |
+| 12 | Drift/seasonal spikes (holidays, new merchant) | Precision drops | Drift monitors, champion/challenger, scheduled retraining, per-merchant calibration |
+| 13 | Manual-review queue overwhelmed | Checkout stalls | Prioritize by risk and order value; SLA timeouts with a default action; step-up verification (ID check, micro-deposit) instead of an unbounded queue; capacity alerts |
+| 14 | Decision log write fails | Cannot explain decisions later | F1: fail closed to review; buffer with a durable local queue; reconcile logs vs outcomes daily |
+| 15 | PII exposure in features/logs | Privacy incident | Hash/tokenize at ingress with salted hashing; field-level encryption; log redaction; access audit |
+| 16 | Third-party data (device intelligence, bureau) outage | Missing high-signal features | Per-vendor circuit breaker, short-lived caching, fallbacks, vendor SLAs |
+| 17 | Event-time vs processing-time errors in windows | Wrong velocity | Event-time windows with watermarks; late events update counters but are flagged |
+| 18 | Fair-lending and explainability | Regulatory risk | Feature review excluding protected attributes and close proxies; periodic bias testing; documented reason codes (coordinate with the compliance/legal team) |
+| 19 | New user or device (cold start) | No history | Treat as unknown, not as fraud; rely on other signals; avoid blanket declines |
+| 20 | Config error (wrong merchant threshold) | Systematic mis-decisions | Config validation, review and audit; canary per merchant |
+| 21 | Train/serve skew (online and offline features computed differently) | Model underperforms in production | One feature definition feeds both paths; compare online vs offline values on a sample; alert on divergence |
 
 **How Real Production Systems Do It (and what to copy):**
 
