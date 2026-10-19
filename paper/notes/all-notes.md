@@ -1,6 +1,6 @@
 # Database and Systems Paper Notes
 
-> Combined reading notes for all 17 papers. Study aids, not substitutes for the papers; check claims and benchmark numbers against the linked sources.
+> Combined reading notes for all 19 papers. Study aids, not substitutes for the papers; check claims and benchmark numbers against the linked sources.
 
 ## Contents
 
@@ -13,8 +13,10 @@
 - [FASTER: A Concurrent Key-Value Store with In-Place Updates](#paper-faster-a-concurrent-key-value-store-with-in-place-updates)
 - [FoundationDB Record Layer: A Multi-Tenant Structured Datastore](#paper-foundationdb-record-layer-a-multi-tenant-structured-datastore)
 - [Kora: A Cloud-Native Event Streaming Platform for Kafka](#paper-kora-a-cloud-native-event-streaming-platform-for-kafka)
+- [LMCache: An Efficient KV Cache Layer for Enterprise-Scale LLM Inference](#paper-lmcache-an-efficient-kv-cache-layer-for-enterprise-scale-llm-inference)
 - [Masstree: Cache Craftiness for Fast Multicore Key-Value Storage](#paper-masstree-cache-craftiness-for-fast-multicore-key-value-storage)
 - [MICA: A Holistic Approach to Fast In-Memory Key-Value Storage](#paper-mica-a-holistic-approach-to-fast-in-memory-key-value-storage)
+- [Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving](#paper-mooncake-a-kvcache-centric-disaggregated-architecture-for-llm-serving)
 - [Beyond Legacy NoSQL: 7 Design Principles Behind ScyllaDB](#paper-beyond-legacy-nosql-7-design-principles-behind-scylladb)
 - [Silo: Speedy Transactions in Multicore In-Memory Databases](#paper-silo-speedy-transactions-in-multicore-in-memory-databases)
 - [Ursa: A Lakehouse-Native Data Streaming Engine for Kafka](#paper-ursa-a-lakehouse-native-data-streaming-engine-for-kafka)
@@ -5332,6 +5334,463 @@ Patterns generalizable well beyond Kafka:
 
 ---
 
+## Paper: LMCache: An Efficient KV Cache Layer for Enterprise-Scale LLM Inference
+
+# LMCache: An Efficient KV Cache Layer for Enterprise-Scale LLM Inference
+
+> arXiv preprint (2025, not peer reviewed), Tensormesh and University of Chicago — structured reading notes
+
+Full paper content: [Markdown conversion](../original/lmcache-arxiv-2025.md)
+
+## Paper information
+
+- **Authors:** Yuhan Liu*, Jiayi Yao*, Yihua Cheng*, Yuwei An, Xiaokun Chen, Shaoting Feng, Yuyang
+  Huang, Samuel Shen, Rui Zhang, Kuntai Du, Junchen Jiang (*equal contribution)
+- **Affiliations:** Tensormesh Inc.; University of Chicago
+- **Venue:** arXiv preprint, [2510.09665](https://arxiv.org/abs/2510.09665). The converted text is
+  the 2025 preprint, version 1 as I downloaded it.
+- **Code:** [LMCache/LMCache](https://github.com/LMCache/LMCache) ·
+  **Docs:** [docs.lmcache.ai](https://docs.lmcache.ai) ·
+  **Blog:** [blog.lmcache.ai](https://blog.lmcache.ai)
+- **Caution:** the authors are the project's creators and company, and the commercial baselines are
+  tested as black boxes. Treat the headline numbers as vendor-reported.
+
+## One-sentence summary
+
+LMCache is an open-source layer that sits between inference engines (vLLM, SGLang) and tiered
+storage and network devices, which extracts KV cache from the engine, stores it in GPU/CPU/disk/
+remote tiers, shares it across queries and engines, and makes this fast with large batched chunk
+transfers, compute/I/O overlap and zero-copy, while exposing a stable connector interface to
+the engines and a control API for routers and operators.
+
+## Vocabulary you need first
+
+| Term | Meaning |
+|---|---|
+| **KV cache** | The K and V attention tensors of every token seen so far, kept so they are not recomputed. "An LLM-native representation of knowledge". |
+| **Page / block** | The fixed-size unit in which vLLM/SGLang allocate KV cache in GPU memory (PagedAttention). One vLLM page is 16 tokens for one layer. |
+| **Prefix caching / context caching** | Reuse a stored KV cache for a later query that starts with the same tokens. |
+| **Cache offloading** | Move KV cache out of GPU memory to CPU, disk or remote storage, and load it back when needed. |
+| **PD disaggregation** | Run prefill and decode on different GPUs/nodes, which requires transferring KV cache from the prefill GPUs to the decode GPUs. |
+| **TTFT / ITL** | Time to first token (prefill delay) / inter-token latency (average gap between output tokens). |
+| **Chunk** | LMCache's transfer and storage unit, larger than a page (default 256 tokens). |
+| **Connector** | The API boundary between an engine (vLLM) and LMCache. |
+| **Controller** | LMCache's centralized metadata/management component. |
+
+## Problem and motivation
+
+### Two reasons KV cache must leave the GPU
+
+1. **Cross-query caching** avoids recomputing shared prefixes (document analysis where the same
+   document is asked about repeatedly, multi-turn chat with a fixed system prompt or long preamble).
+   This needs the cache to be persisted past the lifetime of one query.
+2. **Prefill-decode disaggregation** keeps latency-sensitive decode from being disturbed by
+   throughput-oriented prefill. This needs KV cache to be shipped from prefill GPUs to decode GPUs.
+
+### Evidence from LMCache's own usage statistics
+
+Collected by a usage tracker that users turn on voluntarily (so not a random sample):
+
+- **Stored KV cache has outgrown GPU memory.** Weekly growth over five weeks shows the share that
+  does not fit in GPU memory rising significantly (Figure 3).
+- **Reuse per token is rising.** Ratio of reused tokens to stored tokens beyond GPU memory grew over
+  several weeks for the top 10 users (Figure 4, left). **More than 19% of users** reuse stored tokens
+  more than 1.5 times on average (right).
+
+Conclusion: cache beyond GPU capacity is growing and is increasingly re-read, so it must be moved
+out and back efficiently. Figure 1 also shows growth in users, stored cache size and Docker image
+pulls (no numbers are given in the text).
+
+### Three systems challenges
+
+1. **I/O inefficiency under paged memory.**
+   - Older approaches (`torch.save`/`torch.load`, primitive tensor copies) reach only sub-1 GB/s and
+     lack zero-copy.
+   - vLLM/SGLang use small pages (typically 16-64 KB; vLLM uses a **62.5 KB** page for
+     Llama-3.1-8B). A KV cache is scattered over many non-contiguous pages, so persisting or sending
+     it means very many small I/Os.
+   - Small transfers underuse bandwidth. Table 1 (RCCL transfer library, two AMD GPU nodes with
+     eight Broadcom Thor-2 400 Gbps NICs):
+
+     | Message size | 64 KB | 256 KB | 1 MB | 10 MB | 16 MB | 100 MB |
+     |---|---|---|---|---|---|---|
+     | Throughput (GB/s) | 4 | 13 | 30 | 46 | 49 | 49 |
+
+     So you need at least ~16 MB per transfer to saturate that network. Also, 1-2 MB transfers reach
+     only 75-80% of theoretical PCIe 5.0 bandwidth.
+2. **Keeping up with fast-moving engines.** 15-20 new open-weight models per week in 2025 (the paper
+   also says one prominent LLM every ~4 days). Engines change attention kernels and memory layouts,
+   which changes the KV format, so an external cache library keeps breaking unless the interface is
+   decoupled.
+3. **No management APIs.** Without a way to locate, evict, pin or compress caches, routers and ops
+   teams can't make cache-aware decisions. Two examples from customers: a financial company asked
+   to *explicitly pin* frequently used financial documents; an agent company asked for APIs to
+   identify the KV cache of a given content, compress it, and move it across nodes.
+
+### Related work as the authors frame it
+
+| Category | Examples | Gap per the authors |
+|---|---|---|
+| Inference stacks | vLLM Production Stack, NVIDIA Dynamo, AIBrix, llm-d, SGLang OME, KServe | They focus on K8s deployment and routing; LMCache is used inside vLLM Production Stack, Dynamo, llm-d and KServe |
+| Engine-native offload | vLLM, SGLang GPU-to-CPU transfer | Single-node only; no cross-node optimization or hierarchical storage |
+| KV storage layers | Mooncake, Redis, InfiniStore, 3FS | Provide distributed storage but lack the glue layer for moving small tensors across tiers, or are tied to one framework |
+| Proprietary | Fireworks AI, Together AI | Closed-source stacks |
+| Research prototypes | Prompt Cache, prefix-caching, PD-disaggregation and KV-compression prototypes | Usually built on research frameworks, not enterprise-ready or maintained alongside vLLM/SGLang |
+
+## Architecture
+
+LMCache sits between inference engines and heterogeneous storage/network devices (Figure 5).
+
+- **Storage tiers:** GPU memory, CPU memory, local disk, remote disk, Redis (and, per Section 9,
+  more, see "Community" below).
+- **Networks:** Ethernet, RDMA, NVLink.
+
+### Components named in the workflows (Figure 6)
+
+| Component | Role |
+|---|---|
+| **KV connector** | Entry point from the engine. Prepares metadata: tokenized prompt, GPU memory addresses of the relevant pages. |
+| **Token processor** | Works out how many tokens of a query are already in the backend (prefix match) and how many are new. |
+| **Storage manager** | Saves new KV to the backend, or looks up addresses of stored KV. |
+| **Transfer channel** | The data-transfer logic. |
+| **Event manager** | Tracks query ids; launches asynchronous layer-wise loading events. |
+| **GPU connector** | Loads KV into GPU memory (into the engine's paged layout). |
+| **LMCache worker** | One per engine instance; does local work and reports to the controller. |
+| **Cache controller (manager)** | Standalone global process holding the **token pool**: a record of all tokens currently stored in the backend, updated whenever a worker stores or evicts. |
+
+### The three workflows
+
+- **Store.** A new query goes through the KV connector (metadata), then the token processor (how
+  many new tokens are not yet in the backend), then the storage manager saves the KV for those new
+  tokens through the transfer channel.
+- **Retrieve.** KV connector prepares metadata; the token processor finds the number of
+  prefix-matched tokens. The event manager checks whether this query id was seen before. If yes, the
+  memory addresses are already tracked and go straight to the GPU connector. It also launches
+  asynchronous, layer-wise loading events. If the query id is new, it goes to the storage manager to
+  look up the CPU-memory addresses of the stored KV.
+- **Lookup.** Higher-level components like routers ask the **cache controller**, which answers from
+  the token pool.
+
+## Performance optimizations (Section 5)
+
+Three observed problems drive this section: pages are too small to saturate bandwidth; transfers
+must run alongside inference without stalling it or burning CPU on CUDA launches; and duplicating KV
+on every storage device wastes space and slows inference.
+
+### 5.1 Batched operations
+
+- **Configurable chunk size.** Group multiple pages from multiple layers into a **chunk, default 256
+  tokens** (configurable to match I/O speed). Mechanism: an intermediate **streaming GPU buffer**.
+  - *Store:* a custom CUDA kernel copies the scattered paged KV into a contiguous buffer, then DMA
+    engines offload the chunk to lower tiers.
+  - *Load:* DMA engines bring chunks into the GPU buffer, then CUDA kernels split them back into
+    paged memory.
+- **Parallel store/load across tiers.** The store/load APIs take multiple source and destination
+  devices, so you can copy a hot context GPU to CPU *while* offloading a cold one CPU to disk. When
+  the link is full-duplex (PCIe), reads and writes run in parallel. Supported targets include local
+  or remote CPU DRAM, local or remote disks, and object storage such as S3.
+- **Delayed decode-time storing.** Don't offload each newly generated token's KV immediately (many
+  tiny writes). Buffer them and write once a chunk's worth of tokens is generated.
+
+### 5.2 Compute-I/O overlap
+
+- **Layer-wise pipelining.** Separate CUDA streams for compute and data movement. Before layer 1
+  runs, its KV is loaded into the GPU buffer and converted to pages. While layer 1 computes, layer 2
+  is fetched and converted; layer 2's load starts only after layer 1's KV has been placed in paged
+  memory. Only a **fixed-size buffer of one layer's KV** is needed on the GPU.
+- **Asynchronous prefetch.** A query admitted while the engine is busy waits in a queue. During that
+  gap LMCache prefetches its KV from slow tiers into faster ones (for example remote disk to local
+  CPU memory or GPU memory). The target tier is user-configurable according to latency SLO and
+  resource limits.
+
+### 5.3 Minimum data copy
+
+- **Zero-copy with a reference counter.** When one buffer is written to several places (CPU memory
+  to local disk *and* remote object storage), LMCache increments a counter on the shared data rather
+  than copying. Each finished read/write decrements it; at zero the buffer is released. The authors
+  compare it to reference counting in operating systems.
+- **Dynamic offloading.** The engine keeps a pool of **free pages** in GPU memory whose KV is not
+  used by an active query. Copying all of them to CPU would waste space, so LMCache duplicates only a
+  window, tracked with three pointers: **start** (beginning of the free-page region), **current**
+  (how many free pages are already offloaded) and **end** (end of the pages scheduled for offload).
+  Four states (Figure 7):
+  1. *Initialization:* start and current coincide; start..end is the pending-duplication region.
+  2. *In progress:* current moves toward end; pages before current are already offloaded.
+  3. *Query arrival:* queries take free pages, so end moves forward by the number allocated, keeping
+     enough duplicated pages ahead for future allocations.
+  4. *Steady state:* current meets end; everything scheduled is duplicated.
+
+  **Trade-off:** if a query wants pages beyond `current`, allocation **stalls** until the copy
+  catches up. A small duplication window saves space but risks stalls. Example from the paper: if only
+  one page is duplicated and a query needs three, it waits for two more; with three duplicated pages
+  it proceeds at once, at a higher duplication ratio. Only GPU to CPU is implemented; extending to
+  other tiers is mentioned but "not supported".
+
+## Standardized connector interface (Section 6)
+
+Why: engines change constantly (sliding-window attention, Multi-Head Latent Attention, new kernels),
+each change can alter how KV is laid out, and ad-hoc patching of LMCache would never keep up.
+LMCache's team initiated the API, and the vLLM team and LMCache team implement and maintain it
+together.
+
+**Design objectives:**
+1. Maximum flexibility: enable as many KV operations as possible.
+2. vLLM-native: keep the strict scheduler/worker separation, prefix caching as a first-class
+   feature, and piece-wise CUDA graphs (vLLM captures graphs only for non-attention operations).
+3. Friendly to **out-of-tree** connectors: no vLLM code changes needed.
+4. Minimum API-level overhead: no inter-process communication at the API level.
+
+**The two sides (Table 2):**
+
+| Side | Function | What it does |
+|---|---|---|
+| Scheduler | `get_num_new_matched_tokens(query)` | Returns the number of tokens that hit in LMCache's backend. May return `None` to tell vLLM to put the request back on the waiting queue and run others first, **overlapping this request's I/O with other requests' compute**. |
+| Scheduler | `update_state_after_alloc(query, blocks, num_external_blocks)` | Decides whether each vLLM page must be loaded from the external backend. |
+| Scheduler | `build_connector_meta(scheduler_output)` | Builds metadata (including GPU addresses of KV pages) for transfers between LMCache and GPU. |
+| Model runner | `start_load_kv(kv_pointers)` | Starts loading KV from lower tiers into GPU before inference. |
+| Model runner | `wait_load_kv(kv_pointers, layer_id)` | Blocks until that layer's data has arrived. |
+| Model runner | `start_store_kv(kv_pointer)` | Starts offloading KV after compute. |
+| Model runner | `wait_store_kv(kv_pointer, layer_id)` | Blocks until that layer's store finished. |
+
+Extra cache hits from the connector are treated by vLLM as ordinary prefix-cached tokens, so they
+directly change scheduling (fewer tokens to prefill).
+
+**End-to-end call sequence for one query:**
+1. Scheduler calls `get_num_new_matched_tokens` (may defer the request).
+2. `update_state_after_alloc` marks which pages need loading.
+3. If matched tokens > 0, `build_connector_meta` prepares transfer metadata.
+4. In the model runner, **layer-wise mode:** `start_load_kv` loads layer 1; before each layer,
+   `wait_load_kv` synchronizes that layer and kicks off the next layer's load; after each layer,
+   `wait_store_kv` waits for the previous layer's store to finish and `start_store_kv` starts
+   storing the newly produced KV.
+5. **Non-layer-wise mode:** `start_load_kv` blocks until the whole KV is in the correct paged
+   addresses, then inference runs, and afterwards `start_store_kv` stores synchronously.
+
+**Impact:** The API had been public in vLLM for over six months at time of writing. Adopters named:
+NVIDIA Dynamo, Red Hat's llm-d, ByteDance's AIBrix and vLLM Production Stack, plus multiple
+proprietary connectors from companies using the same API.
+
+## Controller interfaces (Section 7)
+
+Two layers: a standalone **controller manager** (global coordination, in-memory view of KV cache
+state across all instances) and **per-instance workers** collocated with each LMCache instance.
+External API calls go to the manager, which dispatches to workers when needed; workers also call
+the manager through internal APIs for metadata updates and lookups.
+
+**Internal APIs (used by instances):**
+- `batched_admit` / `batched_evict(hashes, inst_id, device)`: report admissions and evictions to the manager.
+- `batched_p2p_lookup(hashes) -> list[inst_id, device, hit_chunks]`: look up which peers hold chunks.
+
+**External APIs (used by users, operators, routers) (Table 3):**
+- `lookup(tokens) -> list[inst_id, device, hit_tokens]`
+- `move((src_inst, src_device), (dst_inst, dst_device), tokens)`
+- `clear(tokens, inst_id, device)`
+- `pin` / `unpin(tokens, instance, storage_device)`
+- `compress` / `decompress(tokens, instance, device, method)`
+
+**Four uses the paper walks through:**
+1. **KV-cache-aware routing.** Instances report admits and evictions; the manager keeps a global
+   in-memory view; a router calls `lookup(tokens)` and sends the query to the instance with the most hits.
+2. **KV cache migration.** When an instance is scaling down or load needs balancing, the manager
+   dispatches `move(...)` to the source instance, which connects to the destination if no connection
+   exists and transfers the KV.
+3. **P2P sharing.** On a local miss, an instance's worker calls `batched_p2p_lookup`, gets
+   (instance, device, hit chunks), and may fetch from the peer with the most hit chunks.
+4. **Clearance.** On model switch or memory reclaim, `clear` is dispatched to the right instance's
+   worker, which removes those tokens from the given storage device.
+
+`compress`/`pin` have no walkthrough; users call them directly.
+
+## Evaluation (Section 8)
+
+### Setup
+
+| Item | Value |
+|---|---|
+| Models | Llama-3.1-8B-Instruct, Sao10K-L3-8B, Llama-3.1-70B-Instruct, Qwen2.5-Coder-32B-Instruct, Qwen3-Coder-480B-A35B-Instruct-FP8, Qwen2.5-72B-Instruct |
+| Datasets | Emulated multi-round QA; TriviaQA from LongBench (long-context QA); random dataset from vLLM's benchmark script |
+| Hardware | 8x H100 server (GMI Cloud), using the minimum number of GPUs each model needs. Multi-node uses the same GPU count plus a remote storage backend on CPU memory. For PD disaggregation, prefiller and decoder are connected by NVLink |
+| Metrics | TTFT and ITL; per-component breakdowns for CPU offload and PD disaggregation |
+| Baselines | **Basic vLLM** v0.10.2 (prefix caching on, GPU-only). **vLLM CPU offloading** v0.11.0. **Commercial options #1 and #2** (dedicated endpoints reserving GPUs for a user-defined model, accessed September 10). LMCache itself is **v0.3.6** |
+
+Three scenarios (Table 4): single-node CPU offloading, centralized storage server over Ethernet,
+and PD disaggregation over NVLink.
+
+### 8.2 Single-node CPU offloading
+
+Workload: emulated chatbot doing document analysis. Each query ~10K tokens (a ~12-page PDF plus a
+short unique question; **20K tokens for Llama-3.1-8B**), answers at most 100 tokens, 40 initial
+users and more joining at a QPS rate, **500 GB** of CPU memory available for offload.
+
+Results (Figure 8, across five models):
+- At QPS = 1, LMCache has **1.9-8.1x smaller TTFT** than the best baselines.
+- LMCache sustains **2.3-14x higher throughput** at the same TTFT than the strongest baseline.
+- ITL is **7-92% smaller** than the best baseline at QPS = 1. (Slow first token causes queueing that
+  slows later tokens, so ITL also improves.)
+- vLLM's native CPU offloading fails to run Qwen3-Coder-480B; the commercial options don't host it.
+
+Why it wins, per the authors: CPU memory holds far more KV than GPU, so the hit ratio is much higher
+than GPU-only vLLM; and vLLM's native offload moves data per layer and per 16 tokens, which can't
+fill the bandwidth, whereas LMCache moves **chunks** with high-performance CUDA kernels.
+Black-box inference about commercial options: #1 likely lacks KV offloading to secondary storage; #2
+likely has it but is still slower.
+
+### 8.3 Real-trace-driven evaluation
+
+Traces drawn from the token-length distributions of "company F" and "company G". Since company F's
+proprietary models aren't available, five open models are used. The original trace spans several
+days and is stretched to complete in one hour; LMCache uses at most 500 GB CPU DRAM; baseline is
+current vLLM with GPU prefix caching.
+
+Results: at high QPS, LMCache cuts TTFT by **at least 3.7-6.8x** and ITL by **at least 19-58%** across
+the five models. (Figure 9's caption for three models says 4.4-6.6x TTFT and 34-58% ITL; Figure 10's
+says 3.7-6.8x and 19-44%. These are the same range split across figures.)
+
+### 8.4 Centralized storage server
+
+KV cache shared through a remote server connected at **15 Gbps**; TriviaQA from LongBench; Poisson
+arrivals at a given QPS. Result: **1.3-3x higher throughput** at the same TTFT (Figure 11). The gain
+comes from the remote store holding much more than CPU memory, hence higher hit ratios.
+
+**Caveat the authors state:** loading from remote adds more latency than loading from CPU memory
+because of lower bandwidth, so loading can be **slower than prefill** for short contexts or small
+models (prefill is already fast). So the choice between loading and recomputing must be adaptive
+(see sensitivity study).
+
+### 8.5 PD disaggregation
+
+Against vLLM's native PD disaggregation, with the official benchmark script (random data; 8K input,
+200 output tokens). Results over four models: mean TTFT down **1.53-1.84x**, mean ITL down
+**1.12-1.66x**, and better P95 TTFT.
+
+Why: LMCache copies each chunk of the prefiller's KV (produced during chunked prefill) into a
+buffer in prefiller GPU memory, sends it to a matching buffer on the decoder, and the decoder
+copies it into its paged memory. vLLM's native path uses NIXL to copy **page by page** from the
+prefiller's scattered page addresses to the decoder's, so bandwidth is underused.
+
+### 8.6 Component-wise analysis
+
+- **PD disaggregation breakdown (Figure 14):** prefill and decode compute times are identical in
+  both; the difference is purely the KV transmission time, which LMCache cuts through coarser
+  granularity.
+- **CPU load bandwidth (Table 5):**
+
+  | Method | Achieved bandwidth |
+  |---|---|
+  | LMCache | 400 Gbps |
+  | vLLM native CPU offloading | 88 Gbps |
+
+  Reason: each transfer triggers a CUDA memcpy with metadata prep beforehand and a completion signal
+  after; per-page copies pay that fixed cost many times, per-chunk copies pay it rarely.
+- **Async overlap (Figure 13):** overlapping KV loading with inference compute (prefill or decode)
+  reduces end-to-end delay by **1.46x**.
+
+### 8.7 Sensitivity to context length and bandwidth
+
+On B200 machines (Figure 15):
+- At **32 Gbps**, LMCache's loading beats plain prefill only if the input is longer than about
+  **256K tokens**.
+- At **64 or 128 Gbps**, loading beats prefill at **every** context length tested.
+
+Takeaway: make loading **adaptive**. Under low bandwidth, load only above the crossover length.
+
+### 8.8 SGLang
+
+Qwen3-32B on 2 H100s (TP=2) with LMCache CPU offloading: better throughput and lower mean TTFT
+and end-to-end latency than SGLang without offload; **comparable** to SGLang's native CPU offload.
+The authors note SGLang's native offload lacks a distributed, hierarchical backend (local disk, remote CPU/disk).
+
+## Real-world lessons (Section 9)
+
+1. **Remote loading can beat prefill.** The old belief was that remote storage only buys capacity and
+   hit rate at a latency cost, because object stores like S3 once gave ~100 MB/s. S3 Express has
+   raised that to nearly 1 GB/s. A user ("Company C") loading KV caches from its own remote object
+   store reported **22-32% lower TTFT** than full prefill. So remote backends can improve hit rate
+   *and* TTFT.
+2. **Context truncation destroys prefix hits.** Many companies keep only the latest tokens when input
+   exceeds the window (sliding window). Truncated inputs no longer match earlier prefixes. In
+   company F's real trace, hit ratio drops from about **85% to 45%** when only the latest tokens are
+   kept. Lesson: avoid dynamically adding or removing context tokens.
+3. **Containers are the norm.** Production is Kubernetes with Docker images; many users never touch
+   the source, just the official images.
+4. **Hit rates exceed expectations.** Customers expected KV reuse only for fixed system prompts, but
+   company G saw about **50%** hit rate in production. Reusable context is now often *dynamic*:
+   coding assistant conversation histories, chat apps, RAG pipelines.
+5. **Industry vs academia.** LMCache began in May 2024 as a research prototype for the authors' own
+   work. Industry wanted performance, stability and compatibility, so flexible APIs for custom
+   attention (such as selective token dropping) were deprioritized, which made it less popular in
+   academia. They plan more flexible APIs.
+6. **Python over Rust/C++.** Many companies rewrite ML libraries in Rust or C++. LMCache keeps
+   Python with careful optimization, to evolve faster and accept community contributions while
+   keeping comparable performance.
+7. **Community effort.** A year earlier it supported only local CPU, local disk and Redis with vLLM
+   on NVIDIA GPUs. Now it adds **eight more storage backends** (NFS, WEKA, GPU-Direct Storage,
+   Mooncake Store, NIXL, S3, InfiniStore, Valkey), **four processor types** (NVIDIA, AMD, Ascend,
+   TPU) and **two engines** (vLLM and SGLang), upstreamed by industry partners.
+
+The conclusion also mentions KV cache reuse in recommendation systems and lossy compression in
+open-ended chatbots as emerging uses, in trillion-token-scale deployments.
+
+## Limitations, critique and open questions
+
+Stated or implied by the authors:
+- Remote loading can be slower than prefill for short contexts, small models or low bandwidth;
+  adaptivity is required but is shown as a study, not a built-in policy.
+- Dynamic offloading is only implemented for GPU to CPU. Extending it to other tiers is only mentioned.
+- The real-trace evaluation uses substitute open models, and the traces are reshaped (stretched to
+  one hour). Commercial baselines are black boxes and can't be configured the same way.
+- Academic flexibility (custom attention hooks) was deprioritized.
+
+My own observations (not claims from the paper):
+- The largest quantitative claims (up to 15x throughput, 2.3-14x at equal TTFT) come from the
+  authors' own multi-round QA workload with large reusable contexts and a 500 GB CPU budget. Gains
+  depend heavily on how much reuse the workload has.
+- The abstract says "up to 15x" while the body reports 2.3-14x for single-node CPU offload and 1.3-3x
+  for remote storage. The 15x figure isn't reproduced in the body text I read, so quote the
+  body numbers.
+- No failure-handling or consistency discussion: nothing on what happens when a worker dies, when
+  the controller's token pool goes stale, or how conflicting `move`/`clear` operations are ordered.
+- The controller is a single global in-memory service; its scalability and availability are not evaluated.
+
+## Takeaways for interviews and design work
+
+1. **Make transfers big.** Page-sized I/O (20-60 KB) wastes the network; ~16 MB+ is needed to saturate
+   a 400 Gbps NIC. Use a staging buffer with a gather/scatter kernel to turn scattered pages into
+   contiguous chunks.
+2. **Overlap I/O with compute** with per-layer pipelining on separate streams; you then need just one
+   layer of buffer space on the GPU.
+3. **Use idle time.** While a request waits in the queue, prefetch its cache into a faster tier.
+4. **Count copies.** Reference-counted buffers avoid duplicating data when fanning out to several
+   tiers.
+5. **Isolate from engine churn** with a narrow connector API (scheduler side vs model-runner side).
+6. **Expose a control plane** (lookup, move, pin, clear, compress), because routers, autoscalers and
+   operators need to reason about where the cache is.
+7. **Loading vs recomputing is a bandwidth-and-length decision.** There is a crossover context
+   length per bandwidth; make the choice adaptive.
+8. **Truncation and sliding windows kill prefix reuse.** Keep prompts append-only where possible.
+
+### Short answers to likely questions
+
+- *Why is vLLM's native CPU offload slower?* It copies per page and per layer, so fixed per-copy
+  overhead dominates (88 Gbps achieved vs 400 Gbps for chunked copies in Table 5).
+- *How does LMCache keep up with engine changes?* A small connector API with scheduler-side and
+  model-runner-side hooks, co-maintained with the vLLM team and supporting out-of-tree connectors.
+- *How would a router use LMCache?* Query the controller's `lookup(tokens)` for per-instance hit
+  counts and send the request where the hit is largest; use `move` to rebalance.
+- *When is fetching a remote KV cache worse than prefill?* Short contexts, small models, or low
+  bandwidth. At 32 Gbps on B200 the crossover was ~256K tokens; at 64-128 Gbps loading won at all
+  lengths tested.
+- *Why can offloading to CPU stall the engine?* Dynamic offloading mirrors only some free pages; if
+  a query needs pages that haven't been copied yet, allocation waits for the copy to catch up.
+
+## Related notes
+
+- [Mooncake (arXiv 2024)](mooncake-arxiv-2024.md): the system-level design (global KVCache-aware
+  scheduler); Mooncake Store is one of LMCache's backends
+- [vLLM (SOSP 2023)](vllm-sosp-2023.md): PagedAttention, the small-page layout that makes KV transfer inefficient
+
+---
+
 ## Paper: Masstree: Cache Craftiness for Fast Multicore Key-Value Storage
 
 # Masstree: Cache Craftiness for Fast Multicore Key-Value Storage
@@ -6509,6 +6968,482 @@ Look elsewhere when:
   publisher = {USENIX Association}
 }
 ```
+
+---
+
+## Paper: Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving
+
+# Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving
+
+> arXiv technical report (2024), Moonshot AI and Tsinghua University — structured reading notes
+
+Full paper content: [Markdown conversion](../original/mooncake-arxiv-2024.md)
+
+## Paper information
+
+- **Authors:** Ruoyu Qin, Zheming Li, Weiran He, Mingxing Zhang, Yongwei Wu, Weimin Zheng, Xinran Xu
+- **Affiliations:** Moonshot AI; MadSys group at Tsinghua University
+- **Venue:** arXiv preprint, [2407.00079](https://arxiv.org/abs/2407.00079). The text converted here
+  is titled "Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving" and calls itself
+  a "Preprint Tech Report".
+- **Which version this is:** a later, revised version of this work was published at FAST 2025 under
+  a different title. I did **not** read that version, and these notes do not cover it. Anything
+  below about the evaluation, numbers or design is from the tech report.
+- **System:** the serving platform behind Kimi, Moonshot AI's chatbot
+- **Code and trace:** [kvcache-ai/Mooncake](https://github.com/kvcache-ai/Mooncake); the request trace
+  is open-sourced there
+
+## One-sentence summary
+
+Mooncake argues that in LLM serving the **KVCache is the thing to schedule around**: it splits
+prefill and decode onto separate node pools, builds a cluster-wide KVCache pool out of the idle CPU
+DRAM, SSD and RDMA bandwidth of the GPU machines, and uses a global scheduler (Conductor) that
+routes each request by *where its cache is* while rejecting requests early, using predicted load,
+when the cluster cannot meet its latency SLOs.
+
+## Vocabulary you need first
+
+| Term | Meaning |
+|---|---|
+| **LLM prefill** | Process all input tokens in parallel; produces the first output token and the **KVCache** (the K and V tensors of every input token at every layer). Compute-bound. |
+| **LLM decode** | Generate one token per step, reusing and appending to the KVCache. Memory-bandwidth-bound; batching more requests raises utilization. |
+| **TTFT** | Time to first token. The latency SLO for prefill. |
+| **TBT** | Time between tokens. The latency SLO for decode. |
+| **MFU** | Model FLOPs utilization: how much of the GPU's peak compute is actually used. |
+| **Continuous batching** | Before each decode iteration the scheduler adds newly arrived requests and removes finished ones. |
+| **Prefix caching** | If a new request starts with the same tokens as an earlier one, reuse that earlier KVCache instead of recomputing it. |
+| **MaaS** | Model as a Service: selling inference to many users under SLOs. |
+| **Goodput / effective throughput** | Throughput counting only requests that finish **within SLO**. |
+| **Conductor** | Mooncake's global scheduler. |
+| **Messenger** | Mooncake's per-node RDMA service that moves KVCache between machines. |
+| **CPP** | Chunked pipeline parallelism, Mooncake's way to run one long prefill across several nodes. |
+
+## Problem and goals
+
+1. **Objective.** Maximize overall *effective* throughput (directly tied to revenue) subject to TTFT
+   and TBT SLOs. The paper frames Kimi's job as a constrained optimization with different SLO levels.
+2. **Two throughput levers conflict with latency.**
+   - *Reuse KVCache* to cut compute. But if the cache lives on a remote or slower tier, fetching it
+     lengthens TTFT.
+   - *Make decode batches bigger* to raise MFU. But bigger batches raise TBT.
+3. **Overload is the normal case.** GPU supply is limited and Kimi's traffic grew very quickly, so
+   the cluster is often overloaded at peak. You cannot just add machines. Most prior work assumes
+   every request will be served. Mooncake has to decide **which requests to refuse**.
+4. **What counts.** A request only contributes to goodput if it fully completes within SLO. If it is
+   dropped halfway, every token already computed is wasted. So a doomed request should be rejected
+   *as early as possible*.
+
+SLO specification used in the paper: `TTFT P90 = 10x` and `TBT P90 = 5x` in the end-to-end
+experiments, meaning 90% of requests must have TTFT within 10 times, and TBT within 5 times, that of
+a single request running alone. In real deployments Kimi uses fixed absolute SLOs; if monitoring
+sees them missed, the options are add capacity (usually impossible) or reject requests.
+
+## Background: why prefill and decode want different treatment
+
+- Prefill computes all input tokens at once. Attention cost grows quadratically with length and the
+  MLP cost grows linearly, so prefill time grows **superlinearly** with input length (Figure 2,
+  left). Except for very short requests, prefill is compute-intensive.
+- Decode processes one token per request per step, so it is memory-bound and its step time grows
+  **sublinearly** with batch size (Figure 2, right). Larger batches improve utilization until VRAM
+  for KVCache runs out or the TBT SLO is hit.
+- Putting both on the same GPU lets long prefills interrupt decode steps and blow TBT. That is the
+  case for **disaggregation**, also argued by Splitwise, DistServe and TetriInfer (cited in the
+  paper).
+
+## Architecture
+
+The paper's Figure 1 is the architecture diagram; the pieces are described here in words.
+Mooncake has two kinds of worker nodes and three supporting pieces:
+
+| Piece | Role |
+|---|---|
+| **Prefill instances / pool** | Nodes that only run prefill. Each machine in the paper's testbed has 8 GPUs. |
+| **Decoding instances / pool** | Nodes that only run decode with continuous batching. |
+| **Disaggregated KVCache pool** | Built from CPU DRAM and SSD of the GPU machines themselves. Paged blocks; eviction can be LRU, LFU or request-aware. Described as "near-GPU prefix caching without additional costs". Also lets Kimi offer a *context caching API* to users. |
+| **Messenger** | A separate (GPUDirect) RDMA-based process on each node. Receives signals and moves KVCache across machines asynchronously. |
+| **Conductor** | Global scheduler. Dispatches requests using current cache distribution and workload, and decides when to **replicate or swap** blocks. |
+
+### KVCache block identity: prefix hashing
+
+KVCache is stored in fixed-size **blocks**. Each block is identified by a hash of *its own tokens
+concatenated with the hash of the previous block*. So the hash identifies "this block **given
+everything before it**". Two requests can share a block only if all earlier blocks are identical
+too, which is exactly the prefix-caching rule. Blocks with identical hashes are stored once.
+
+Worked example from the released trace (block size 512 tokens): two requests both start with hash
+ids 46-57. That is 12 identical blocks, so the first `12 x 512 = 6,144` tokens can be shared, even
+though the requests then diverge (ids 2353, 2354 versus 2366).
+
+### The four-step request workflow (Figure 4)
+
+After tokenizing, Conductor picks **a prefill node (group) and a decoding node**, then:
+
+1. **KVCache reuse.** The prefill node receives the raw input, the block ids of the reusable prefix,
+   and the block ids of the full cache allocated for the request. It loads the prefix cache from
+   *remote CPU memory* into GPU memory. Skipped if there is no prefix hit. The choice of node
+   balances three goals: reuse as much cache as possible, balance prefill load, and meet the TTFT
+   SLO (details in "Scheduling" below).
+2. **Incremental prefill.** The node computes only the tokens not already cached, then stores the new
+   KVCache in CPU memory. If the number of uncached tokens exceeds `prefill_chunk` (typically more
+   than 1,000 tokens, chosen to saturate the GPU), prefill is split into chunks and pipelined (CPP).
+3. **KVCache transfer.** The Messenger streams the KVCache *layer by layer* to the decoding node's
+   CPU memory. This is asynchronous and overlaps with step 2.
+4. **Decoding.** Once all KVCache has arrived in the decode node's DRAM, the request joins the next
+   continuous batch. The decode node was pre-selected by Conductor based on load so as not to break
+   TBT, but the **local scheduler re-checks the TBT SLO**, because load may have changed during
+   prefill. This re-check can reject the request, in which case all the prefill work is wasted. That
+   waste is what the "early rejection" work later in the paper tries to avoid.
+
+Decode-side detail from the Figure 4 caption: on decoding instances, loading KVCache from CPU to GPU
+is asynchronous and concurrent with GPU decoding, so the GPU does not sit idle waiting.
+
+## The sampled real-world trace
+
+The authors release one hour of sampled Kimi traffic. Because users in a session share prefixes,
+they preferentially sampled requests from the same session so cache relationships survive.
+
+- **Size:** 23,608 entries (the evaluation says "23,000 requests" in round numbers)
+- **Fields:** `timestamp` (ms, 0 to 3,600,000), `input_length`, `output_length` (token counts only,
+  no text), and `hash_ids` (remapped prefix-block hashes, block size 512)
+- **Statistics:** average input 8,590 tokens, average output 182 tokens, an input:output ratio of
+  about 720. The authors stress this reflects Kimi's long-context focus and is not universal.
+- **Privacy:** no real text or tokens, only counts and remapped hashes. Evaluations run a *dummy*
+  model with the LLaMA2-70B architecture.
+- **Claim:** the first open-source dataset usable for real-world KVCache reuse analysis.
+
+### What the trace shows about caching
+
+Table 1 simulates a single global cache pool, giving the hit ratio by policy and block capacity:
+
+| Block capacity | Inf | 100000 | 50000 | 30000 | 10000 | 1000 |
+|---|---|---|---|---|---|---|
+| LRU | 0.55 | 0.55 | 0.55 | 0.54 | 0.46 | 0.34 |
+| LFU | 0.55 | 0.55 | 0.55 | 0.50 | 0.40 | 0.34 |
+| LengthAwareCache (LFU that prefers blocks late in a request) | 0.55 | 0.54 | 0.53 | 0.50 | 0.40 | 0.34 |
+
+- Growing capacity from 1,000 to 50,000 blocks lifts hit ratio from 34% to 55%, then it flattens.
+  **Even with infinite capacity the ceiling is 55%.** The authors warn this is a sample and the
+  real required capacity scales up with the real workload.
+- **LRU wins** on this trace, probably because of temporal locality between related requests.
+- **Popularity is heavily skewed:** over 50% of cache blocks are never reused, while some blocks are
+  hit tens of thousands of times (Figure 6). So hot blocks must be replicated or the machines
+  holding them become congested.
+
+## Prefill pool design
+
+### Why keep prefill separate, given chunked prefill exists?
+
+Chunked prefill (Sarathi-Serve) splits prompts into small chunks that ride along in decode batches.
+Benefits: all nodes look the same (simpler scheduling), and mixing prefill chunks into decode
+batches raises the decode batch's compute intensity (better MFU).
+
+Mooncake still disaggregates. A request's prefill is inlined into the decode batch **only if it can
+go without chunking and without hurting TBT**. Two reasons for keeping a prefill pool:
+
+1. Prefill nodes need different cross-node parallelism for long contexts (next section).
+2. It opens a chance to save VRAM (layer-wise prefill, below).
+
+### Multi-node prefill: why CPP instead of TP or SP
+
+Context windows have grown from 8K to 128K to 1M, so a long-context request has 10-100x more input
+tokens than output tokens, and TTFT dominates. One 8-GPU node is not enough, so prefill should span
+nodes.
+
+| Option | Problem |
+|---|---|
+| **Tensor parallelism across nodes** | Two RDMA all-reduces per layer. MFU of prefill nodes drops a lot. |
+| **Sequence parallelism (SP)**, e.g. Ring/Striped Attention, DeepSpeed Ulysses | Splits the sequence across nodes; needs cross-node communication at least once per layer. Better than TP but MFU is still worse than single-node TP. You'd want two groups (TP-only and SP) and route to SP only when TTFT demands it, which leads to hard dynamic resizing. *Elastic* SP (LoongServe) exists but needs a global communication group set up in advance and complicates Conductor's cache- and SLO-aware decisions. SP's per-layer traffic also competes with KVCache transfers for the network. |
+| **Chunked pipeline parallelism (CPP)** (Mooncake's choice) | Group every X prefill nodes into a pipeline. A request's tokens are split into chunks (each at most `prefill_chunk`). Different chunks of the **same request** run at the same time on different pipeline stages. |
+
+CPP exploits the **autoregressive property** of decoder-only models (a chunk only depends on
+earlier chunks' KV). Benefits:
+1. Communication is needed only at pipeline stage boundaries and can overlap with compute, giving
+   better MFU and less network contention with KVCache transfer.
+2. It suits both short and long contexts without a separate configuration, so no frequent dynamic
+   re-partitioning of nodes.
+
+The authors say this is, to their knowledge, the first application of this training-style pipeline
+idea (cf. TeraPipe) to inference.
+
+### Layer-wise prefill: saving VRAM by streaming the cache
+
+Reasoning: if a request's KVCache has size `S` and is held for time `T`, its VRAM occupancy cost is
+`S x T`. Chunked prefill inlined with decode stretches `T`, so it costs more.
+
+Mooncake instead overlaps KVCache movement with computation, layer by layer:
+
+- Before layer *l*'s attention starts, wait for layer *l*'s async load to finish, and trigger the
+  async load of layer *l+1*.
+- After layer *l*'s attention finishes, launch the async **store** of layer *l*'s KVCache.
+- After the last layer, wait for all outstanding stores.
+
+Effect: the prefill instance's execution time is about **max(KVCache load time, normal prefill
+time)**, depending on how large the cached prefix is relative to the input. Figure 7 shows layer-wise
+storing adds little latency even for long contexts.
+
+Consequence: prefill scheduling can **ignore VRAM capacity** as long as VRAM can hold one request.
+Prefill scheduling considers only the KVCache distribution and the available **DRAM** of the node.
+The authors suggest using the freed VRAM later, for example to inline the decode of low-priority
+batch-API requests (no strict TBT) into prefill nodes.
+
+## Scheduling (normal load)
+
+### Cache-aware prefill scheduling (Algorithm 1)
+
+Goal: for each request, pick (prefill instance `p`, decode instance `d`) to minimize TTFT subject to
+SLOs. Steps in plain language:
+
+1. Split the prompt into blocks and compute chained prefix hashes (`block_keys`).
+2. Across all prefill instances, find the **best prefix match** (longest) and who holds it.
+3. For each prefill instance, estimate TTFT:
+   - `T_queue` = estimated wait (sum of predicted prefill times of already queued requests).
+   - **If the best remote match is not much longer than this instance's local match** (the ratio is
+     below `kvcache_balancing_threshold`): use the local prefix. `TTFT = T_queue + T_prefill(len, local_prefix_len)`.
+   - **Otherwise**: consider pulling the best cache from the holder.
+     `TTFT = T_transfer + T_queue + T_prefill(len, best_prefix_len)`.
+   - Keep the instance with the smallest TTFT.
+4. Choose a decode instance by load (`SelectDecodingInstance`), which also yields a predicted TBT.
+5. If predicted TTFT exceeds `TTFT_SLO` **or** predicted TBT exceeds `TBT_SLO`, **reject** (HTTP
+   429 to the upper layer).
+6. If the best match was remote and longer than the threshold, issue a **hot-spot migration**:
+   transfer the KVCache from the holder to the chosen instance.
+
+How the estimates are made:
+- **Prefill time:** an offline-trained predictor on request length and prefix-hit length. Because
+  Transformer computation is regular, the error is small given enough offline data.
+- **Queue time:** sum of the predicted prefill times of everything queued ahead. TTFTs for all
+  candidate instances are computed in parallel, so the scheduling cost is negligible next to
+  inference time.
+- **Transfer time:** the hard one. It depends on data size *and* current network state, especially
+  whether the sender is congested. This is why hot-block replication matters.
+
+Prefix matching like this already exists in vLLM, but the open-source version only caches locally.
+
+### Cache load balancing and hot-spot migration
+
+Each prefill machine owns its own local prefix cache, and usage varies enormously. System prompts are
+touched by nearly every request, while a cache for one user's long document may be used by one user.
+So where copies live determines whether routing can achieve both **high hit rate and low load**.
+
+The "straw man" is to collect global per-block usage, predict future use, and place replicas
+accordingly. The authors reject it: Kimi's workload is highly dynamic and fast-growing, so
+prediction is unreliable. Instead, a **heuristic that replicates as a side effect of routing**:
+
+- If a request goes to an instance that doesn't hold the best cache (because the best holder is
+  busy), Conductor forwards the request **plus the cache's location**. That instance pulls the
+  KVCache from the holder and stores it locally, if the extra prefill time it would otherwise spend
+  is longer than the transfer time.
+- If the best remote prefix is no more than local prefix times a threshold, it just **recomputes**.
+
+Either way popular blocks are copied to more machines over time, without ever predicting
+popularity. The threshold is currently tuned manually (footnote: could be made adaptive).
+
+### Scheduling experiment (Figure 8)
+
+Cluster of 8 prefill + 8 decode instances, built overnight from idle machines, replaying 23,000
+real requests. Compared: random, load-balancing, cache-aware (6.1) and KVCache-centric (6.1 + 6.2).
+Metrics: average TTFT and TTFT SLO attainment. Result: both cache-aware and cache-balancing
+strategies cut TTFT a lot, and the full KVCache-centric policy beats random and load-balancing on
+both metrics. The text gives this **qualitatively** (figure only), without exact numbers.
+
+## Overload-oriented scheduling
+
+Premise: for a fast-growing service the cluster grows slower than demand, so overload is routine.
+The system should accept requests until load hits a threshold and then reject (or defer for retry).
+
+### Defining load by SLO
+
+Mooncake measures load as **predicted SLO satisfaction**: compare the maximum predicted TTFT of a
+prefill instance with `l_ttft`, and maximum predicted TBT of a decode instance with `l_tbt`. This is
+easier than in coupled systems, where prefill and decode interfere and load is just
+"requests in flight / max capacity". Two decisions follow: accept the prefill based on prefill
+load, and proceed to decode based on decode load.
+
+### Early Rejection
+
+A time lag separates the prefill and decode decisions. If a request passes the prefill check, is
+prefilled, and is then rejected by a now-overloaded decode node, the prefill work is wasted, so the
+number of requests really finishing is less than prefill load suggests.
+
+**Early Rejection:** evaluate the *decode* instance's load **before** starting prefill. On arrival,
+Conductor accepts or rejects based on the **greater** load of the prefill and decode pools. This
+cuts wasted prefill computation and improves balance.
+
+### The side effect: load oscillation
+
+Observed on a 20-machine cluster over 20 minutes (Figure 9): prefill and decode load swing in
+**anti-phase**. Worse with fewer prefill machines and longer prefill. The cause is the lag between
+the decode-load observation and its actual execution. The four stages (Figure 10a):
+
+1. Both pools lightly loaded, so Conductor accepts a lot until prefill is full.
+2. Those requests arrive at decode, making decode load high, so Conductor now rejects most requests;
+   prefill load falls.
+3. Nothing new enters decode, so decode load drains; Conductor sees low load and accepts a flood
+   again until prefill is full.
+4. Decode load climbs again, Conductor rejects, prefill sits idle. Repeat.
+
+Net effect: poor utilization of the whole cluster.
+
+### Early Rejection Based on Prediction
+
+Fix: predict the decode load **at the time the request would reach decode**, and use that to decide
+admission. Two ways to predict:
+
+- **Request-level:** predict each request's output length (unknown in advance), then the TBT and
+  completions. Hard: costly or inaccurate, especially in overload. Left to future work.
+- **System-level (used):** don't track individual requests; estimate aggregate load a short time
+  ahead. Assume every request's decode takes a **uniform time `t_d`**. For a future time `t`:
+  1. add requests that prefill will have finished by `t` to the decode pool,
+  2. remove requests whose decode will have finished (running longer than `t_d`) before `t`,
+  3. compute the average ratio of predicted TBT to `l_tbt` across decode instances. That ratio is
+     the predicted load.
+
+This needs less precision, and is better suited to overload where accuracy per request is
+unattainable.
+
+## Evaluation
+
+### Setup
+
+| Item | Value |
+|---|---|
+| Nodes | 8x NVIDIA A800-SXM4-80GB (NVLink), RDMA up to 800 Gbps between nodes |
+| Deployment | Each node runs either a prefill instance or a decode instance |
+| Model | **Dummy** model with LLaMA2-70B architecture |
+| Baseline | vLLM (continuous batching + PagedAttention; prefill and decode coupled) |
+| Metrics | P90 TTFT and P90 TBT, normalized to the SLO limit (1.0 = limit), as a function of RPS |
+| SLO thresholds | Lowest observed value x10 for TTFT, x5 for TBT (see "SLO specification" above) |
+| Arrivals | Poisson for public/simulated data; timestamp replay for the real trace |
+
+| Dataset | Avg input | Avg output | Cache ratio |
+|---|---|---|---|
+| ArXiv Summarization | 8,088 | 229 | ~0% |
+| L-Eval | 19,019 | 72 | >80% |
+| Simulated | 16k / 32k / 64k / 128k | 512 | 50% |
+| Real (Kimi trace) | 7,955 | 194 | ~50% |
+
+Note the real-trace evaluation set (avg input 7,955) differs from the whole released trace's
+statistics (8,590), as sampled in the paper.
+
+### Results
+
+**Public datasets** (vLLM-[4M] = 4 vLLM instances; Mooncake-[3P+1D] and [2P+2D]):
+- Mooncake-[3P+1D] reaches **+20% throughput on ArXiv Summarization and +40% on L-Eval** under SLOs.
+  L-Eval gains more because its high cache ratio makes prefix caching cut prefill time.
+- Mooncake-[2P+2D] has lower TBT but worse TTFT than [3P+1D] and vLLM, because prefill and decode
+  capacity are imbalanced. The authors say real demand for each is stable over a period, so the ratio
+  can be preset, and dynamic conversion between roles is future work.
+
+**Simulated long-context data** (16k-128k prompts, 50% cache):
+- Long prompts disrupt vLLM's decode, so to hold TBT the baseline processes requests individually.
+- Mooncake still batches, because disaggregation shields decode from prefill, and never breaks the
+  TBT SLO.
+- Throughput gains of **50% to 525%** under the same TTFT and TBT limits.
+
+**Real workload** (Mooncake-[10P+10D] vs vLLM-[20M]; TTFT limit 30 s, TBT limit 0.1 s/token):
+- TTFT CDFs are nearly identical; almost 100% of requests meet the TTFT SLO in both.
+- Nearly 100% of Mooncake's requests satisfy TBT, but only **57% of vLLM's** do, with some having
+  extremely high TBT.
+- Mooncake processes about **75% more requests** within SLO.
+
+**Overload** (8P+8D, 23,000 requests replayed at **2x speed**):
+
+| Strategy | Requests rejected |
+|---|---|
+| Baseline (reject by load before each stage, prefill can still be wasted) | 4,183 |
+| Early Rejection | 3,771 |
+| Early Rejection based on Prediction | 3,589 |
+
+Prediction-based rejection rejects 594 fewer requests than baseline (about 14% fewer) and 182 fewer
+than plain early rejection. The paper reports rejection counts here, not throughput or SLO
+attainment, so "fewer rejections" is the proxy for "more useful work done".
+
+## Related work and positioning
+
+- **Engines:** FasterTransformer, TensorRT-LLM, DeepSpeed Inference, Orca (iteration-level
+  scheduling), vLLM (KVCache memory management), FlexGen, Sarathi, FastServe. Mooncake builds on
+  vLLM's open-source community.
+- **Disaggregation:** Splitwise (early motivation), DistServe (resource allocation per phase for
+  goodput), TetriInfer (chunked prefill + disaggregation + predictive scheduling).
+- **Prefix caching:** Prompt Cache, SGLang's RadixAttention (LRU over a radix tree).
+- **AttentionStore** (concurrent): hierarchical KVCache using cheap memory/storage, shares many
+  design choices. The paper's distinction: in long-context inference KVCache is huge, so you need
+  capacity and fast transfer *plus KVCache-centric global scheduling*. **Mooncake is not a
+  standalone cache service**; it couples a cache storage mechanism with a cache-aware scheduler.
+- **Preble** (prompt scheduling) is essentially KVCache-centric scheduling too. Mooncake notes that
+  real reusability in its online trace is much lower than open-source benchmarks suggest: **at most
+  55% theoretical reuse** even with infinite storage and TTFT budget. It can reach **~90%** for
+  some apps, such as Kimi's chat-with-paper service.
+
+## Future work the authors list
+
+- **Heterogeneous accelerators:** use bandwidth-oriented chips for decode (GDDR/LPDDR can be an
+  order of magnitude better per dollar or per watt than flagship HBM parts); processing-in-memory
+  and hybrid bonding for memory-bound decode.
+- **Disaggregate attention from linear operators in decode:** decode attention's arithmetic
+  intensity is proportional to heads divided by KV heads and cannot be raised with batch size. DeepSeek's
+  MLA raises intensity from the other side.
+- **Smaller KVCache** (compression, token selection, cross-layer sharing, hybrid architectures) helps
+  twice: bigger batches and higher cache hit ratio.
+- **Scheduling:** priority-aware, per-request SLO tiers; eviction for partial hits and expiry;
+  dynamic prefill/decode rebalancing; use idle resources for batch jobs.
+
+## Limitations, critique and open questions
+
+Stated by the authors:
+- Dummy model and content-free trace, so results cannot be checked against real outputs.
+- The prefill:decode ratio is preset; dynamic conversion is future work (the [2P+2D] result shows
+  the cost of getting it wrong).
+- Migration threshold is manual; transfer-time prediction suffers from congestion; load prediction
+  assumes uniform decode time; request-level length prediction is not done.
+- Rejection by the decode-side local scheduler after prefill is still possible, so some waste remains.
+
+My own observations (not claims from the paper):
+- Only vLLM is the baseline, and vLLM's coupled design is the weak spot being measured. No direct
+  comparison with Splitwise, DistServe or TetriInfer is shown.
+- Largest cluster tested is 20 machines. The Figure 8 scheduling comparison is only given in a plot.
+- The 55% reuse ceiling is specific to Kimi's sampled traffic. The benefit of the KVCache pool is
+  workload-dependent: ~0% cache (ArXiv) saw only +20%, >80% cache (L-Eval) saw +40%.
+- The architecture trades **network and DRAM capacity for GPU compute**. It assumes a fast RDMA
+  fabric (up to 800 Gbps per node here) and that CPU DRAM is largely idle.
+
+## Takeaways for interviews and design work
+
+1. **Treat the cache as a first-class scheduling input.** Estimate TTFT = queue + transfer + compute
+   for each candidate node and choose the minimum. Compare "pull the cache" against "recompute it".
+2. **Replicate as a by-product of routing,** not through a popularity predictor. When you route away
+   from the cache holder, make the new node fetch and keep a copy.
+3. **Disaggregate by resource profile.** Prefill is compute-bound and long-context-sensitive; decode
+   is memory-bound and latency-sensitive. Each pool gets its own parallelism strategy (CPP for
+   prefill) and its own SLO.
+4. **Overlap data movement with compute** layer by layer, so capacity planning can ignore VRAM
+   beyond one request.
+5. **Under overload, reject early and cheaply,** but beware feedback delay. Admission control driven
+   by a lagging load signal oscillates; predict the load at the time the work will arrive.
+6. **Define goodput strictly:** only completed-within-SLO requests count. Rejecting at the door is
+   better than failing in the middle.
+
+### Short answers to likely questions
+
+- *Why not just use chunked prefill and keep everything colocated?* Long contexts need cross-node
+  parallelism for TTFT, which colocated chunked prefill does not give, and disaggregation lets
+  prefill drop its VRAM constraint via layer-wise streaming. Mooncake still inlines short, unchunked
+  prefills into decode if TBT allows.
+- *Why CPP rather than sequence parallelism?* Less communication (only at stage boundaries,
+  overlappable), no per-layer cross-node traffic competing with KVCache transfers, and no need to
+  dynamically resize groups.
+- *What goes wrong with naive early rejection?* A lag between observing decode load and acting on it
+  makes prefill and decode load oscillate in anti-phase, so utilization is poor.
+- *How does Mooncake avoid hot-spot nodes?* Heuristic migration: when a request is routed away from
+  the best holder, the chosen node copies the cache, so hot blocks spread without prediction.
+- *Where does the throughput gain come from?* Three places: decode never interrupted by prefill
+  (TBT SLO holds with large batches), prefix reuse from a cluster-wide cache (more with higher cache
+  ratio), and wasted work avoided by early, prediction-based rejection.
+
+## Related notes
+
+- [LMCache (arXiv 2025)](lmcache-arxiv-2025.md): a KV cache layer that can use Mooncake Store as a backend
+- [vLLM (SOSP 2023)](vllm-sosp-2023.md): PagedAttention and continuous batching, which Mooncake builds on and compares against
 
 ---
 

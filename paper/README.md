@@ -17,8 +17,10 @@ and award status.
 | **FASTER** | SIGMOD 2018 | Concurrent KV store, hybrid log | [Full text](original/faster-sigmod-2018.md) | [Notes](notes/faster-sigmod-2018.md) |
 | **FoundationDB Record Layer** | SIGMOD 2019, Industrial | Multi-tenant structured store | [Full text](original/foundationdb-record-layer-sigmod-2019.md) | [Notes](notes/foundationdb-record-layer-sigmod-2019.md) |
 | **Kora** | VLDB 2023 | Cloud-native Kafka platform | [Full text](original/kora-vldb-2023.md) | [Notes](notes/kora-vldb-2023.md) |
+| **LMCache** | arXiv 2025 (preprint) | KV cache offload/sharing layer for LLM inference | [Full text](original/lmcache-arxiv-2025.md) | [Notes](notes/lmcache-arxiv-2025.md) |
 | **Masstree** | EuroSys 2012 | Cache-crafty multicore KV index | [Full text](original/masstree-eurosys-2012.md) | [Notes](notes/masstree-eurosys-2012.md) |
 | **MICA** | NSDI 2014 | Kernel-bypass in-memory KV store | [Full text](original/mica-nsdi-2014.md) | [Notes](notes/mica-nsdi-2014.md) |
+| **Mooncake** | arXiv 2024 (tech report) | KVCache-centric disaggregated LLM serving | [Full text](original/mooncake-arxiv-2024.md) | [Notes](notes/mooncake-arxiv-2024.md) |
 | **ScyllaDB** | Vendor whitepaper (not peer reviewed) | Shard-per-core NoSQL design | [Full text](original/scylladb-seven-design-principles.md) | [Notes](notes/scylladb-seven-design-principles.md) |
 | **Silo** | SOSP 2013 | Multicore serializable transactions | [Full text](original/silo-sosp-2013.md) | [Notes](notes/silo-sosp-2013.md) |
 | **Ursa** | **VLDB 2025 Best Industry Paper** | Lakehouse-native Kafka engine | [Full text](original/ursa-vldb-2025.md) | [Notes](notes/ursa-vldb-2025.md) |
@@ -32,7 +34,7 @@ All notes are also available as a single combined volume:
 ```sh
 python3 scripts/merge_markdown_papers.py --source notes --output notes/all-notes.md \
   --title "Database and Systems Paper Notes" \
-  --subtitle "Combined reading notes for all 17 papers. Study aids, not substitutes for the papers; check claims and benchmark numbers against the linked sources."
+  --subtitle "Combined reading notes for all 19 papers. Study aids, not substitutes for the papers; check claims and benchmark numbers against the linked sources."
 ```
 
 Only Ursa is a VLDB Best Industry Paper. The other entries are included for their technical
@@ -71,6 +73,11 @@ over plan-time omniscience.
 [Kora](notes/kora-vldb-2023.md) → [CockroachDB](notes/cockroachdb-sigmod-2020.md) §7. Retrospectives
 rather than designs: admission control, deployment safety, gray-failure detection, and the things
 that turned out to matter more than the algorithms.
+
+**KV cache as storage for LLM serving.** [vLLM](notes/vllm-sosp-2023.md) →
+[Mooncake](notes/mooncake-arxiv-2024.md) → [LMCache](notes/lmcache-arxiv-2025.md). From paging KV cache
+inside one GPU, to a cluster-wide cache with a cache-aware scheduler, to a reusable layer that moves
+KV cache between GPU, CPU, disk and remote storage.
 
 **OS ideas borrowed by data systems.** [vLLM](notes/vllm-sosp-2023.md) (virtual memory and paging) →
 [FASTER](notes/faster-sigmod-2018.md) (epoch protection) →

@@ -22,6 +22,8 @@ if a conversion differs from the published layout or text.
 | [cockroachdb-sigmod-2020.pdf](cockroachdb-sigmod-2020.pdf) | CockroachDB geo-distributed SQL | SIGMOD 2020 Industrial Track | [Cockroach Labs](https://www.cockroachlabs.com/pdf/cockroachdb-the-resilient-geo-distributed-sql-database-sigmod-2020.pdf) |
 | [foundationdb-record-layer-sigmod-2019.pdf](foundationdb-record-layer-sigmod-2019.pdf) | FoundationDB Record Layer | SIGMOD 2019 Industrial Track | [FoundationDB](https://www.foundationdb.org/files/record-layer-paper.pdf) |
 | [vllm-sosp-2023.pdf](vllm-sosp-2023.pdf) | vLLM and PagedAttention | SOSP 2023 | [arXiv author manuscript](https://arxiv.org/pdf/2309.06180) |
+| [mooncake-arxiv-2024.pdf](mooncake-arxiv-2024.pdf) | Mooncake KVCache-centric disaggregated LLM serving | arXiv technical report 2407.00079 (not the later FAST 2025 version) | [arXiv](https://arxiv.org/pdf/2407.00079) |
+| [lmcache-arxiv-2025.pdf](lmcache-arxiv-2025.pdf) | LMCache KV cache layer for LLM inference | arXiv preprint 2510.09665 | [arXiv](https://arxiv.org/pdf/2510.09665) |
 
 Dragonfly and Seastar do not currently have canonical peer-reviewed system papers. Their rows
 are represented by the underlying VLL and Dash research used by Dragonfly and ScyllaDB's
