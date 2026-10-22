@@ -24,6 +24,7 @@ if a conversion differs from the published layout or text.
 | [vllm-sosp-2023.pdf](vllm-sosp-2023.pdf) | vLLM and PagedAttention | SOSP 2023 | [arXiv author manuscript](https://arxiv.org/pdf/2309.06180) |
 | [mooncake-arxiv-2024.pdf](mooncake-arxiv-2024.pdf) | Mooncake KVCache-centric disaggregated LLM serving | arXiv technical report 2407.00079 (not the later FAST 2025 version) | [arXiv](https://arxiv.org/pdf/2407.00079) |
 | [lmcache-arxiv-2025.pdf](lmcache-arxiv-2025.pdf) | LMCache KV cache layer for LLM inference | arXiv preprint 2510.09665 | [arXiv](https://arxiv.org/pdf/2510.09665) |
+| [fire-flyer-sc-2024.pdf](fire-flyer-sc-2024.pdf) | Fire-Flyer AI-HPC and the 3FS file system | SC24 (arXiv 2408.14158) | [arXiv](https://arxiv.org/pdf/2408.14158) |
 
 Dragonfly and Seastar do not currently have canonical peer-reviewed system papers. Their rows
 are represented by the underlying VLL and Dash research used by Dragonfly and ScyllaDB's

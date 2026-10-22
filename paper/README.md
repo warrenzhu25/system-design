@@ -15,6 +15,7 @@ and award status.
 | **DataFusion** | SIGMOD 2024, Industrial | Embeddable modular query engine | [Full text](original/datafusion-sigmod-2024.md) | [Notes](notes/datafusion-sigmod-2024.md) |
 | **DynamoDB** | USENIX ATC 2022 | Managed NoSQL, admission control | [Full text](original/dynamodb-atc-2022.md) | [Notes](notes/dynamodb-atc-2022.md) |
 | **FASTER** | SIGMOD 2018 | Concurrent KV store, hybrid log | [Full text](original/faster-sigmod-2018.md) | [Notes](notes/faster-sigmod-2018.md) |
+| **Fire-Flyer AI-HPC / 3FS** | SC24 | AI training cluster co-design; 3FS all-flash file system | [Full text](original/fire-flyer-sc-2024.md) | [Notes](notes/fire-flyer-3fs-sc-2024.md) |
 | **FoundationDB Record Layer** | SIGMOD 2019, Industrial | Multi-tenant structured store | [Full text](original/foundationdb-record-layer-sigmod-2019.md) | [Notes](notes/foundationdb-record-layer-sigmod-2019.md) |
 | **Kora** | VLDB 2023 | Cloud-native Kafka platform | [Full text](original/kora-vldb-2023.md) | [Notes](notes/kora-vldb-2023.md) |
 | **LMCache** | arXiv 2025 (preprint) | KV cache offload/sharing layer for LLM inference | [Full text](original/lmcache-arxiv-2025.md) | [Notes](notes/lmcache-arxiv-2025.md) |
@@ -34,7 +35,7 @@ All notes are also available as a single combined volume:
 ```sh
 python3 scripts/merge_markdown_papers.py --source notes --output notes/all-notes.md \
   --title "Database and Systems Paper Notes" \
-  --subtitle "Combined reading notes for all 19 papers. Study aids, not substitutes for the papers; check claims and benchmark numbers against the linked sources."
+  --subtitle "Combined reading notes for all 20 papers. Study aids, not substitutes for the papers; check claims and benchmark numbers against the linked sources."
 ```
 
 Only Ursa is a VLDB Best Industry Paper. The other entries are included for their technical
@@ -75,7 +76,8 @@ rather than designs: admission control, deployment safety, gray-failure detectio
 that turned out to matter more than the algorithms.
 
 **KV cache as storage for LLM serving.** [vLLM](notes/vllm-sosp-2023.md) →
-[Mooncake](notes/mooncake-arxiv-2024.md) → [LMCache](notes/lmcache-arxiv-2025.md). From paging KV cache
+[Mooncake](notes/mooncake-arxiv-2024.md) → [LMCache](notes/lmcache-arxiv-2025.md), with [Fire-Flyer/3FS](notes/fire-flyer-3fs-sc-2024.md) as the
+storage layer such systems can sit on. From paging KV cache
 inside one GPU, to a cluster-wide cache with a cache-aware scheduler, to a reusable layer that moves
 KV cache between GPU, CPU, disk and remote storage.
 
