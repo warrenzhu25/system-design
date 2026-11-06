@@ -39,6 +39,15 @@ Source: https://www.1point3acres.com/interview/problems/company/anthropic
 24. [Distributed Map-Reduce Simulation](#24-distributed-map-reduce-simulation)
 25. [Tokenizer with Unknown Merging (Trie-Based Greedy Matching)](#25-tokenizer-with-unknown-merging-trie-based-greedy-matching)
 
+### Coding Problems — November 2026 Refresh
+28. [Bootloader Instruction Simulator: Fix the Loop](#28-bootloader-instruction-simulator-fix-the-loop-low)
+29. [DNS Resolver: Aliases, Fallback, Cycles, Caching](#29-dns-resolver-aliases-fallback-cycles-caching-low-fellows-oa-round-1)
+30. [Weighted Data Batcher with Checkpointing](#30-weighted-data-batcher-with-checkpointing-research-track-medium)
+31. [In-Memory Key-Value Store with Nested Transactions and Value Counts](#31-in-memory-key-value-store-with-nested-transactions-and-value-counts-medium)
+32. [Simulate a Fair Coin from a Biased Coin](#32-simulate-a-fair-coin-from-a-biased-coin-medium)
+33. [Hashtag Autocomplete](#33-hashtag-autocomplete-medium)
+34. [Onsite Design Doc Review](#34-onsite-design-doc-review-newer-round-high)
+
 ### Behavioral
 26. [Culture & Behavioral Interview Questions](#6-culture--behavioral-interview-questions)
 27. [Hiring Manager Interview Questions](#14-hiring-manager-interview-questions)
@@ -796,15 +805,510 @@ class Tokenizer:
 
 ---
 
+## Additions — November 2026 Refresh
+
+Source: the Anthropic bank on 1point3acres (35 questions: 21 coding, 7 system design, 4 behavioral, 3
+other), read on 2026-11-06. The page shows only a summary card per question; full text is member-only. Each
+problem below is restated from its card, so **clarify requirements with the interviewer** — signatures and
+follow-ups are my reconstruction. Every Python block runs and passes its own asserts.
+
+### 28. Bootloader Instruction Simulator: Fix the Loop (low)
+
+Card: a list of `plus` / `next` / `jump` instructions mutates an accumulator and program counter; detect the
+loop, then identify or repair the single bad instruction that makes execution cycle.
+
+Assumed instruction set: `plus n` adds `n` to the accumulator and moves to the next line; `next` does
+nothing and moves to the next line (a no-op that still carries an argument, `next n`); `jump n` moves by
+`n`. The program halts when the counter walks off the end. Part 1: run until an instruction repeats and
+return the accumulator. Part 2: swap exactly one `jump` ↔ `next` so that the program halts.
+
+```python
+def parse(lines):
+    program = []
+    for line in lines:
+        op, arg = line.split()
+        program.append((op, int(arg)))
+    return program
+
+
+def run(program):
+    """Returns (halted, accumulator). halted is False when an instruction repeats."""
+    acc, pc, seen = 0, 0, set()
+    while pc < len(program):
+        if pc in seen:
+            return False, acc
+        seen.add(pc)
+        op, arg = program[pc]
+        if op == "plus":
+            acc += arg
+            pc += 1
+        elif op == "jump":
+            pc += arg
+        else:                       # next
+            pc += 1
+    return True, acc
+
+
+def fix_loop(program):
+    """Try flipping each jump/next; O(n^2) worst case, fine for this size."""
+    swap = {"jump": "next", "next": "jump"}
+    for i, (op, arg) in enumerate(program):
+        if op not in swap:
+            continue
+        patched = program[:i] + [(swap[op], arg)] + program[i + 1:]
+        halted, acc = run(patched)
+        if halted:
+            return i, acc
+    return None
+
+
+code = parse([
+    "next 0",
+    "plus 1",
+    "jump 4",
+    "plus 3",
+    "jump -3",
+    "plus -99",
+    "plus 1",
+    "jump -4",
+    "plus 6",
+])
+assert run(code) == (False, 5)                 # loops; accumulator is 5 when it repeats
+assert fix_loop(code) == (7, 8)                # flipping line 7 lets it fall off the end
+assert run(parse(["plus 2", "plus 3"])) == (True, 5)
+assert fix_loop(parse(["jump 0"])) == (0, 0)   # self-loop fixed by turning it into a next
+```
+
+**Optimisation to mention:** instead of re-simulating per candidate, mark all lines that can reach the end
+by running the graph backwards (reverse edges, BFS from "end"), then only flip an instruction whose changed
+target is in that set — O(n). Follow-up: what if more than one instruction is wrong? (Then it is a
+shortest-path problem over "number of edits used".)
+
+### 29. DNS Resolver: Aliases, Fallback, Cycles, Caching (low, Fellows OA round 1)
+
+Card: simplified DNS resolver built step by step against a unit-test harness; later steps add aliasing,
+fallback, error handling, cycle detection, caching and concurrency.
+
+Model: `records` maps a name to `("A", ip)` or `("CNAME", other_name)`. Resolve follows aliases up to a hop
+limit, detects cycles, caches results with a TTL, and falls back to a secondary resolver on a miss.
+
+```python
+import threading
+
+
+class ResolveError(Exception):
+    pass
+
+
+class Resolver:
+    def __init__(self, records, clock, fallback=None, ttl=60, max_hops=8):
+        self.records = records
+        self.clock = clock
+        self.fallback = fallback            # another Resolver-like object, or None
+        self.ttl = ttl
+        self.max_hops = max_hops
+        self._cache = {}                    # name -> (ip, expires_at)
+        self._lock = threading.Lock()
+
+    def resolve(self, name):
+        now = self.clock()
+        with self._lock:
+            hit = self._cache.get(name)
+            if hit and hit[1] > now:
+                return hit[0]
+        ip = self._resolve_uncached(name)
+        with self._lock:
+            self._cache[name] = (ip, now + self.ttl)
+        return ip
+
+    def _resolve_uncached(self, name):
+        seen = []
+        current = name
+        for _ in range(self.max_hops + 1):
+            if current in seen:
+                raise ResolveError("cycle: " + " -> ".join(seen + [current]))
+            seen.append(current)
+            record = self.records.get(current)
+            if record is None:
+                if self.fallback is not None:
+                    return self.fallback.resolve(current)
+                raise ResolveError("NXDOMAIN " + current)
+            kind, value = record
+            if kind == "A":
+                return value
+            current = value                 # CNAME: keep walking
+        raise ResolveError("too many hops from " + name)
+
+
+class Clock:
+    now = 0
+
+    def __call__(self):
+        return self.now
+
+
+clock = Clock()
+upstream = Resolver({"ext.example": ("A", "9.9.9.9")}, clock)
+r = Resolver({
+    "www": ("CNAME", "web"),
+    "web": ("CNAME", "lb"),
+    "lb": ("A", "10.0.0.1"),
+    "a": ("CNAME", "b"),
+    "b": ("CNAME", "a"),
+}, clock, fallback=upstream, ttl=30, max_hops=3)
+
+assert r.resolve("www") == "10.0.0.1"                 # two-hop alias chain
+assert r.resolve("ext.example") == "9.9.9.9"          # served by the fallback
+for bad, text in (("a", "cycle"), ("nope", "NXDOMAIN")):
+    try:
+        r.resolve(bad)
+        raise AssertionError("expected failure for " + bad)
+    except ResolveError as error:
+        assert text in str(error)
+
+r.records["lb"] = ("A", "10.0.0.2")                   # change the record; cache still serves the old one
+assert r.resolve("www") == "10.0.0.1"
+clock.now = 31                                         # TTL expired
+assert r.resolve("www") == "10.0.0.2"
+
+deep = Resolver({"n0": ("A", "1.1.1.1"), **{f"n{i}": ("CNAME", f"n{i-1}") for i in range(1, 6)}},
+                clock, max_hops=3)
+try:
+    deep.resolve("n5")
+    raise AssertionError("expected hop limit")
+except ResolveError as error:
+    assert "too many hops" in str(error)
+```
+
+Concurrency follow-up: the lock guards the cache only; two threads may resolve the same cold name at once
+(harmless duplicate work). To coalesce them, keep a per-name in-flight future ("single flight"). Cache negative
+answers with a shorter TTL if the interviewer asks about NXDOMAIN storms.
+
+### 30. Weighted Data Batcher with Checkpointing (research track, medium)
+
+Card: a `DataBatcher` samples weighted batches from a `DataRegistry`, supports deterministic save/resume via
+an `offset`, and must handle `batch_size` not divisible by the sum of weights.
+
+Make batch composition a pure function of the batch index so resume is just "continue from index `offset`":
+within every cycle of `sum(weights)` slots each dataset appears `weight` times, so slot `s` maps to a dataset
+by a precomputed schedule. Use largest-remainder allocation for a partial batch.
+
+```python
+from itertools import accumulate
+
+
+class DataBatcher:
+    def __init__(self, datasets, weights, batch_size):
+        # datasets: {name: list of examples}; weights: {name: int}
+        self.names = sorted(datasets)
+        self.data = datasets
+        self.weights = weights
+        self.batch_size = batch_size
+        self.cycle = []                               # one full weight cycle of dataset names
+        for name in self.names:
+            self.cycle += [name] * weights[name]
+        # Interleave rather than block: spread each dataset evenly across the cycle.
+        self.cycle = self._interleave()
+        self.offset = 0                               # number of slots consumed so far
+
+    def _interleave(self):
+        slots = []
+        for name in self.names:
+            w = self.weights[name]
+            for k in range(w):
+                slots.append(((k + 0.5) / w, name))
+        return [name for _, name in sorted(slots)]
+
+    def next_batch(self):
+        batch = []
+        for _ in range(self.batch_size):
+            name = self.cycle[self.offset % len(self.cycle)]
+            # Per-dataset position = how many times this dataset's slot appeared before.
+            full_cycles, within = divmod(self.offset, len(self.cycle))
+            per_cycle = self.weights[name]
+            before = sum(1 for n in self.cycle[:within] if n == name)
+            index = (full_cycles * per_cycle + before) % len(self.data[name])
+            batch.append((name, self.data[name][index]))
+            self.offset += 1
+        return batch
+
+    def state(self):
+        return {"offset": self.offset}
+
+    def load_state(self, state):
+        self.offset = state["offset"]
+
+
+data = {"web": list(range(100)), "code": [f"c{i}" for i in range(50)]}
+batcher = DataBatcher(data, {"web": 3, "code": 1}, batch_size=6)   # 6 is not a multiple of 4
+first = batcher.next_batch()
+names = [n for n, _ in first]
+assert names.count("web") + names.count("code") == 6
+assert names.count("web") in (4, 5)                  # close to the 3:1 ratio inside a partial cycle
+
+saved = batcher.state()
+after = batcher.next_batch()
+replay = DataBatcher(data, {"web": 3, "code": 1}, batch_size=6)
+replay.load_state(saved)
+assert replay.next_batch() == after                  # deterministic resume
+
+long_run = DataBatcher(data, {"web": 3, "code": 1}, batch_size=4)
+counts = {"web": 0, "code": 0}
+for _ in range(25):
+    for n, _ in long_run.next_batch():
+        counts[n] += 1
+assert counts == {"web": 75, "code": 25}             # exact ratio over whole cycles
+```
+
+State to checkpoint: only `offset` (plus the weights and seed if shuffling). If the interviewer wants random
+sampling instead of a fixed schedule, derive each slot from `random.Random(seed + offset)` so it is still
+reproducible. Edge cases to raise: zero-weight datasets, a dataset smaller than its share (wrap or stop?),
+and changing weights mid-run (checkpoint must record the weight version).
+
+### 31. In-Memory Key-Value Store with Nested Transactions and Value Counts (medium)
+
+Card: `set` / `get` / `delete`, nested `begin` / `commit` / `rollback`, and a `count(value)` query.
+
+Keep a base dict and a stack of per-transaction undo logs. Maintain `value → count` incrementally so
+`count` is O(1).
+
+```python
+from collections import Counter
+
+_MISSING = object()
+
+
+class TxnStore:
+    def __init__(self):
+        self.data = {}
+        self.counts = Counter()
+        self.undo = []                      # stack of {key: previous value or _MISSING}
+
+    def _put(self, key, value):
+        if self.undo and key not in self.undo[-1]:
+            self.undo[-1][key] = self.data.get(key, _MISSING)
+        old = self.data.get(key, _MISSING)
+        if old is not _MISSING:
+            self.counts[old] -= 1
+        if value is _MISSING:
+            self.data.pop(key, None)
+        else:
+            self.data[key] = value
+            self.counts[value] += 1
+
+    def set(self, key, value):
+        self._put(key, value)
+
+    def get(self, key):
+        return self.data.get(key)
+
+    def delete(self, key):
+        self._put(key, _MISSING)
+
+    def count(self, value):
+        return self.counts[value]
+
+    def begin(self):
+        self.undo.append({})
+
+    def rollback(self):
+        if not self.undo:
+            return False
+        log = self.undo.pop()
+        for key, previous in log.items():
+            # Restore without recording into an outer log: the outer log already has the
+            # first-seen value from before the whole stack began for keys it touched.
+            old = self.data.get(key, _MISSING)
+            if old is not _MISSING:
+                self.counts[old] -= 1
+            if previous is _MISSING:
+                self.data.pop(key, None)
+            else:
+                self.data[key] = previous
+                self.counts[previous] += 1
+        return True
+
+    def commit(self):
+        if not self.undo:
+            return False
+        log = self.undo.pop()
+        if self.undo:                       # fold into the parent; keep the parent's older value
+            for key, previous in log.items():
+                self.undo[-1].setdefault(key, previous)
+        return True
+
+
+s = TxnStore()
+s.set("a", 10)
+s.set("b", 10)
+assert s.count(10) == 2
+s.begin()
+s.set("a", 20)
+s.begin()
+s.delete("b")
+assert s.get("b") is None and s.count(10) == 0
+s.rollback()                                # undo the inner delete only
+assert s.get("b") == 10 and s.get("a") == 20
+s.commit()                                  # fold the outer transaction in
+assert s.get("a") == 20 and s.count(20) == 1 and s.count(10) == 1
+assert s.rollback() is False                # nothing open
+
+s.begin()
+s.set("a", 30)
+s.begin()
+s.set("a", 40)
+s.commit()                                  # inner commit merges into the outer
+s.rollback()                                # outer rollback must restore a to 20
+assert s.get("a") == 20 and s.count(20) == 1 and s.count(30) == 0 and s.count(40) == 0
+```
+
+The subtle bug candidates hit: on an inner `commit`, the parent must keep **its own** older value for a key
+(`setdefault`), not overwrite it with the inner one — otherwise the outer rollback restores the wrong state
+(the last block above tests exactly that).
+
+### 32. Simulate a Fair Coin from a Biased Coin (medium)
+
+Card (coding-problems list): "Simulate a Fair Coin Using a Biased Coin."
+
+Von Neumann's trick: flip twice; `HT → 0`, `TH → 1`, otherwise retry. Both outcomes have probability
+`p(1−p)` whatever `p` is, so the result is exactly fair.
+
+```python
+import random
+
+
+def fair_bit(biased):
+    """biased() returns 1 with unknown probability p (0 < p < 1)."""
+    while True:
+        a, b = biased(), biased()
+        if a != b:
+            return a                         # (1,0) -> 1, (0,1) -> 0
+
+
+def make_biased(p, seed):
+    rng = random.Random(seed)
+    return lambda: 1 if rng.random() < p else 0
+
+
+coin = make_biased(0.8, seed=7)
+ones = sum(fair_bit(coin) for _ in range(20000))
+assert abs(ones / 20000 - 0.5) < 0.02        # statistical check, ~7 sigma of slack
+
+# Expected flips per output bit is 1 / (p * (1 - p)): 6.25 for p = 0.8, 4 for p = 0.5.
+calls = 0
+
+
+def counting():
+    global calls
+    calls += 1
+    return coin()
+
+
+for _ in range(5000):
+    fair_bit(counting)
+assert 5.0 < calls / 5000 < 7.5
+```
+
+Follow-ups: wasted flips (use the pairs `00`/`11` recursively — Peres' extractor — to approach the entropy
+bound), a fair die from a fair coin (rejection sampling on `ceil(log2 n)` bits), and proving fairness in one
+sentence: `P(HT) = P(TH) = p(1−p)`.
+
+### 33. Hashtag Autocomplete (medium)
+
+Card: "Hashtag Autocomplete" in the coding list. Assumed: given a stream of hashtags with counts, return the
+top-k most frequent completions for a prefix, ties alphabetical.
+
+A trie where each node caches its top-k makes queries O(|prefix|); updates re-rank along the path.
+
+```python
+class TrieNode:
+    __slots__ = ("children", "top")
+
+    def __init__(self):
+        self.children = {}
+        self.top = []                        # up to k (-count, word), sorted ascending
+
+
+class Autocomplete:
+    def __init__(self, k=3):
+        self.k = k
+        self.root = TrieNode()
+        self.counts = {}
+
+    def add(self, word, times=1):
+        self.counts[word] = self.counts.get(word, 0) + times
+        entry = (-self.counts[word], word)
+        node = self.root
+        self._update(node, word, entry)
+        for ch in word:
+            node = node.children.setdefault(ch, TrieNode())
+            self._update(node, word, entry)
+
+    def _update(self, node, word, entry):
+        node.top = [e for e in node.top if e[1] != word]
+        node.top.append(entry)
+        node.top.sort()
+        del node.top[self.k:]
+
+    def suggest(self, prefix):
+        node = self.root
+        for ch in prefix:
+            node = node.children.get(ch)
+            if node is None:
+                return []
+        return [word for _, word in node.top]
+
+
+ac = Autocomplete(k=3)
+for tag, n in [("#python", 5), ("#pytorch", 9), ("#pyspark", 5), ("#java", 7), ("#pyramid", 1)]:
+    ac.add(tag, n)
+assert ac.suggest("#py") == ["#pytorch", "#pyspark", "#python"]      # tie 5/5 broken alphabetically
+assert ac.suggest("#j") == ["#java"]
+assert ac.suggest("#z") == []
+ac.add("#pyramid", 20)                                               # now the top hit
+assert ac.suggest("#py")[0] == "#pyramid" and len(ac.suggest("#py")) == 3
+assert ac.suggest("") [0] == "#pyramid"
+```
+
+Cost: memory is O(total characters × k); each update is O(|word| × k log k). Follow-ups: time-decayed counts,
+a distributed trie (shard by prefix, merge top-k from shards), and updating lazily from a batch job instead of
+on every event.
+
+### 34. Onsite Design Doc Review (newer round, high)
+
+Card: the interviewer hands over a design doc (sometimes from the team's own backlog) and asks for a
+critique — surface risks, propose alternatives, identify gaps. Common for EM and senior IC loops.
+
+This is a reading-and-judgement round, so rehearse a **fixed pass order** rather than reacting to whatever
+you read first [General]:
+
+1. **Restate** the problem and goals in two sentences; ask what is out of scope and which numbers are real
+   versus guessed.
+2. **Requirements vs design:** is every requirement addressed, and does the design add anything nobody asked
+   for?
+3. **Failure modes:** what happens on partial failure, retry, duplicate delivery, region loss, a slow
+   dependency, a bad deploy? Where is the single point of failure?
+4. **Data and consistency:** source of truth, ordering guarantees, migration and backfill, schema evolution.
+5. **Scale and cost:** the first bottleneck, and what breaks at 10×.
+6. **Security, privacy and safety:** access control, abuse, data retention — weigh this for an AI lab.
+7. **Operability:** metrics, alerts, rollout and rollback, on-call burden.
+8. **Alternatives:** name at least one simpler option and say why you would or would not pick it.
+
+Deliver findings ranked by severity ("blocking / should fix / nit") and end with the one question whose answer
+would change your recommendation most. Say what you would test or prototype before committing.
+
+---
+
 ## Summary by Category
 
 | Category | Count | Questions |
 |----------|-------|-----------|
 | System Design | 7 | Chat System, Inference API, Prompt Playground, Model Deployment, LLM Batching, Real-Time Chat Architecture, Large-File Distribution |
 | Online Assessment | 6 | Task Management, Banking, Cloud Storage, Employee Management, Recipe Manager, In-memory DB |
-| Coding Problems | 12 | Web Crawler, LRU Cache, Deduplicate Files, Batch Image Processor, Tokenize, Stack Samples, Distributed Mode/Median, LLM Agent Tool-Use, String Processing & Stack, Memoize Decorator, Distributed Map-Reduce, Trie Tokenizer |
+| Coding Problems | 18 | Web Crawler, LRU Cache, Deduplicate Files, Batch Image Processor, Tokenize, Stack Samples, Distributed Mode/Median, LLM Agent Tool-Use, String Processing & Stack, Memoize Decorator, Distributed Map-Reduce, Trie Tokenizer, Bootloader Fix-the-Loop, DNS Resolver, Weighted Data Batcher, Nested-Transaction KV, Fair Coin from Biased Coin, Hashtag Autocomplete |
 | Behavioral | 2 | Culture & Behavioral, Hiring Manager |
+| Design Review | 1 | Onsite Design Doc Review |
 
 ---
 
-*Last updated: 2026-09-13*
+*Last updated: 2026-11-06*

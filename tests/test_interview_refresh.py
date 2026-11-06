@@ -8,12 +8,13 @@ REFRESH_HEADING = "## Additions — November 2026 Refresh"
 # file -> number of python blocks expected in the refresh section
 EXPECTED_BLOCKS = {
     "openai_interview_questions.md": 6,
+    "anthropic_interview_questions.md": 6,
 }
 
 
 def refresh_section(text):
     start = text.index(REFRESH_HEADING)
-    end = text.find("\n## References", start)
+    end = text.find("\n## ", start + len(REFRESH_HEADING))
     return text[start:end if end != -1 else len(text)]
 
 
