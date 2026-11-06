@@ -2150,5 +2150,444 @@ on someone else's code, separate from raw coding ability.
 
 ---
 
-*Total: 25 questions with Python solutions*
-*Last updated: 2026-04-02*
+## Additions — November 2026 Refresh
+
+Source: the Airbnb bank on 1point3acres (49 questions: 34 coding, 12 system design, 3 behavioral), read on
+2026-11-06. The page shows only a summary card per question; full text is member-only. Each problem below is
+restated from its card, so **clarify requirements with the interviewer** — signatures and later levels are my
+reconstruction. Every Python block runs and passes its own asserts.
+
+The page's guidance: the coding pool is small and reused (split-stay, terrain water drop, KV store, code
+review), the OA is a progressive four-level CodeSignal project, and the standalone core-values round is a real
+gate (see problem 25).
+
+### 26. Parcel Attribute Store OA (single report, 90 min)
+
+Card: four levels on parcels with named attributes. L1: `set` (overwrite), `get`, and compare-and-set
+`updateIfMatch`. L2: sorted `name(value)` listing and a prefix-filtered listing. L3: per-attribute TTL where 0
+means never expire and updates cannot touch expired attributes. L4 unknown. The timestamp argument on the early
+levels is a decoy — no versioned values are needed.
+
+```python
+class ParcelStore:
+    def __init__(self):
+        self.parcels = {}   # parcel -> {attr: (value, expires_at or None)}
+
+    def _live(self, parcel, now):
+        attrs = self.parcels.get(parcel, {})
+        return {k: v for k, (v, exp) in attrs.items() if exp is None or exp > now}
+
+    def set(self, ts, parcel, attr, value, ttl=0):
+        expires = ts + ttl if ttl > 0 else None          # ttl 0 = never expires
+        self.parcels.setdefault(parcel, {})[attr] = (value, expires)
+        return True
+
+    def get(self, ts, parcel, attr):
+        return self._live(parcel, ts).get(attr)
+
+    def update_if_match(self, ts, parcel, attr, expected, new_value):
+        live = self._live(parcel, ts)
+        if live.get(attr) != expected:                  # missing or expired never matches
+            return False
+        _, expires = self.parcels[parcel][attr]
+        self.parcels[parcel][attr] = (new_value, expires)   # keep the existing TTL
+        return True
+
+    def list_attrs(self, ts, parcel, prefix=""):
+        live = self._live(parcel, ts)
+        return [f"{k}({live[k]})" for k in sorted(live) if k.startswith(prefix)]
+
+
+s = ParcelStore()
+s.set(1, "p1", "weight", "5kg")
+s.set(2, "p1", "color", "red")
+s.set(3, "p1", "tag", "fragile", ttl=10)                # expires at 13
+assert s.get(4, "p1", "weight") == "5kg"
+assert s.update_if_match(5, "p1", "weight", "5kg", "6kg") is True
+assert s.update_if_match(5, "p1", "weight", "5kg", "7kg") is False     # stale expectation
+assert s.list_attrs(6, "p1") == ["color(red)", "tag(fragile)", "weight(6kg)"]
+assert s.list_attrs(6, "p1", prefix="t") == ["tag(fragile)"]
+assert s.get(13, "p1", "tag") is None                   # expired exactly at its deadline
+assert s.update_if_match(14, "p1", "tag", "fragile", "x") is False      # cannot touch an expired attribute
+assert s.list_attrs(14, "p1") == ["color(red)", "weight(6kg)"]
+s.set(20, "p1", "tag", "new")                            # re-set after expiry is allowed, no TTL
+assert s.get(10 ** 6, "p1", "tag") == "new"
+```
+
+Clarify before coding: does `update_if_match` refresh the TTL or keep it (kept above), is the expiry boundary
+inclusive, and what does a missing parcel return. For Level 4 guesses (backup / restore, history) keep
+`_live` as the single read path so new features do not fork the TTL logic.
+
+### 27. Chain Booking: Max Cascading Reservations (low)
+
+Card: listings `[x, y, r]`; booking one auto-books every listing within its radius `r`, which then cascades.
+Choose exactly one starting listing and return the maximum number of listings that end up booked.
+
+Build a directed graph `i → j` when `dist(i, j) ≤ r_i`; the answer is the largest reachable set from any single
+node. Compare squared distances to avoid floating point.
+
+```python
+from collections import deque
+
+
+def max_chain(listings):
+    n = len(listings)
+    adj = [[] for _ in range(n)]
+    for i, (xi, yi, ri) in enumerate(listings):
+        for j, (xj, yj, _) in enumerate(listings):
+            if i != j and (xi - xj) ** 2 + (yi - yj) ** 2 <= ri * ri:
+                adj[i].append(j)
+
+    def reach(start):
+        seen = {start}
+        queue = deque([start])
+        while queue:
+            for nxt in adj[queue.popleft()]:
+                if nxt not in seen:
+                    seen.add(nxt)
+                    queue.append(nxt)
+        return len(seen)
+
+    return max((reach(i) for i in range(n)), default=0)
+
+
+assert max_chain([]) == 0
+assert max_chain([[0, 0, 1]]) == 1
+# a(0,0,r=2) reaches b(2,0); b has r=3 and reaches c(5,0); c has r=0 reaches nobody.
+assert max_chain([[0, 0, 2], [2, 0, 3], [5, 0, 0]]) == 3
+# Radius is directional: c cannot start the chain even though it is close to b.
+assert max_chain([[0, 0, 1], [10, 0, 1], [10, 1, 1]]) == 2      # the two close listings reach each other
+assert max_chain([[0, 0, 5], [3, 4, 1]]) == 2                   # exactly on the boundary (distance 5)
+assert max_chain([[0, 0, 1], [100, 100, 1]]) == 1
+```
+
+Complexity: graph build O(n²), BFS from every node O(n·(n+E)) — fine for n ≤ a few thousand. **The
+optimisation the card mentions:** condense strongly connected components (Tarjan), then take the DAG and run
+reachable-set DP; counting reachable *nodes* (not just components) on a DAG needs bitsets or per-component
+sizes with care for diamonds, so say that it is not a plain longest-path DP.
+
+### 28. Key Store with Sum-Dependency Cascades (low)
+
+Card: `set_value(k, v)`, `set_sum(k, [other_keys])`, `get_value(k)`; updating a base key cascades through all
+dependent sum keys.
+
+Store formulas and the reverse edges; on every write recompute dependents in topological order and reject
+cycles before mutating.
+
+```python
+from collections import defaultdict, deque
+
+
+class KeyStore:
+    def __init__(self):
+        self.value = {}
+        self.sum_of = {}                     # key -> list of keys it sums
+        self.dependents = defaultdict(set)   # key -> sum keys that read it
+
+    def set_value(self, key, number):
+        self._detach(key)
+        self.sum_of.pop(key, None)
+        self.value[key] = number
+        self._recompute_from(key)
+
+    def set_sum(self, key, others):
+        if self._reaches(others, key):
+            raise ValueError("cycle through " + key)
+        self._detach(key)
+        self.sum_of[key] = list(others)
+        for o in others:
+            self.dependents[o].add(key)
+        self._recompute_from(key, include_self=True)
+
+    def get_value(self, key):
+        return self.value.get(key, 0)
+
+    def _detach(self, key):
+        for o in self.sum_of.get(key, []):
+            self.dependents[o].discard(key)
+
+    def _reaches(self, starts, target):
+        seen, stack = set(), list(starts)
+        while stack:
+            k = stack.pop()
+            if k == target:
+                return True
+            if k not in seen:
+                seen.add(k)
+                stack.extend(self.sum_of.get(k, ()))
+        return False
+
+    def _recompute_from(self, key, include_self=False):
+        reach, stack = {key}, [key]
+        while stack:
+            for d in self.dependents[stack.pop()]:
+                if d not in reach:
+                    reach.add(d)
+                    stack.append(d)
+        indeg = {k: sum(1 for o in self.sum_of.get(k, ()) if o in reach) for k in reach}
+        queue = deque(k for k, n in indeg.items() if n == 0)
+        while queue:
+            k = queue.popleft()
+            if k in self.sum_of and (include_self or k != key):
+                self.value[k] = sum(self.get_value(o) for o in self.sum_of[k])
+            for d in self.dependents[k]:
+                if d in reach:
+                    indeg[d] -= 1
+                    if indeg[d] == 0:
+                        queue.append(d)
+
+
+ks = KeyStore()
+ks.set_value("a", 1)
+ks.set_value("b", 2)
+ks.set_sum("c", ["a", "b"])
+ks.set_sum("d", ["c", "a"])
+assert (ks.get_value("c"), ks.get_value("d")) == (3, 4)
+ks.set_value("a", 10)                                    # cascades through c and d
+assert (ks.get_value("c"), ks.get_value("d")) == (12, 22)
+try:
+    ks.set_sum("a", ["d"])                               # a -> d -> c -> a
+    raise AssertionError("cycle accepted")
+except ValueError:
+    pass
+assert ks.get_value("a") == 10                           # untouched after the rejected write
+ks.set_value("c", 100)                                   # overriding a sum with a plain value detaches it
+ks.set_value("b", 50)
+assert ks.get_value("c") == 100 and ks.get_value("d") == 110
+assert ks.get_value("missing") == 0
+```
+
+Same shape as the OpenAI spreadsheet problem; if you prepare one, you have both. Mention the lazy alternative
+(compute on read with memoisation + a version counter) and why eager wins when reads dominate.
+
+### 29. Multi-Stream Round-Robin Iterator (single report)
+
+Card: merging iterator over multiple input streams, yielding one element from each in turn and skipping
+exhausted streams; `has_next()` / `next()`; the trap is conforming to a provided base-class interface.
+
+```python
+from abc import ABC, abstractmethod
+from collections import deque
+
+
+class BaseIterator(ABC):
+    @abstractmethod
+    def has_next(self): ...
+    @abstractmethod
+    def next(self): ...
+
+
+class ListIterator(BaseIterator):
+    def __init__(self, items):
+        self.items, self.i = items, 0
+
+    def has_next(self):
+        return self.i < len(self.items)
+
+    def next(self):
+        value = self.items[self.i]
+        self.i += 1
+        return value
+
+
+class RoundRobin(BaseIterator):
+    def __init__(self, iterators):
+        # Only keep iterators that still have data; rotate a deque for O(1) per element.
+        self.ring = deque(it for it in iterators if it.has_next())
+
+    def has_next(self):
+        return bool(self.ring)
+
+    def next(self):
+        if not self.ring:
+            raise StopIteration
+        it = self.ring.popleft()
+        value = it.next()
+        if it.has_next():
+            self.ring.append(it)
+        return value
+
+
+rr = RoundRobin([ListIterator([1, 2, 3]), ListIterator([]), ListIterator([4]), ListIterator([5, 6])])
+out = []
+while rr.has_next():
+    out.append(rr.next())
+assert out == [1, 4, 5, 2, 6, 3]
+assert RoundRobin([]).has_next() is False
+assert RoundRobin([ListIterator([])]).has_next() is False
+try:
+    RoundRobin([]).next()
+    raise AssertionError("expected StopIteration")
+except StopIteration:
+    pass
+nested = RoundRobin([RoundRobin([ListIterator([1, 2]), ListIterator([3])]), ListIterator([9])])
+assert [nested.next() for _ in range(4)] == [1, 9, 3, 2]       # iterators compose
+```
+
+Prune exhausted iterators at construction **and** after each `next()` — that is what makes `has_next()` O(1)
+and correct even when a stream is empty. Lazy inputs (generators) work as long as `has_next()` can peek.
+
+### 30. Maximum Profit in Job Scheduling (low; phone screen and onsite)
+
+Card: jobs `(start, end, profit)`; choose non-overlapping jobs for maximum profit. The senior follow-up pushes
+past the standard `O(n log n)` DP.
+
+Sort by end time; `dp[i]` = best profit using the first `i` jobs; for job `i`, binary-search the last job
+ending at or before its start.
+
+```python
+import bisect
+
+
+def max_profit(jobs):
+    jobs = sorted(jobs, key=lambda j: j[1])
+    ends = [j[1] for j in jobs]
+    dp = [0] * (len(jobs) + 1)
+    take = [None] * (len(jobs) + 1)               # predecessor for reconstruction
+    for i, (s, e, p) in enumerate(jobs, start=1):
+        prev = bisect.bisect_right(ends, s, 0, i - 1)      # jobs ending <= s
+        with_job = dp[prev] + p
+        if with_job > dp[i - 1]:
+            dp[i], take[i] = with_job, prev
+        else:
+            dp[i], take[i] = dp[i - 1], None
+    chosen, i = [], len(jobs)
+    while i > 0:                                   # walk back through the decisions
+        if take[i] is None:
+            i -= 1
+        else:
+            chosen.append(jobs[i - 1])
+            i = take[i]
+    return dp[-1], chosen[::-1]
+
+
+best, picked = max_profit([(1, 3, 50), (3, 5, 20), (6, 19, 100), (2, 100, 200)])
+assert best == 200 and picked == [(2, 100, 200)]      # the long job beats 50 + 20 + 100
+assert max_profit([(1, 2, 50), (3, 5, 20), (6, 19, 100), (2, 100, 200)])[0] == 250
+assert max_profit([(1, 3, 5), (2, 4, 6), (3, 5, 7)])[0] == 12            # (1,3)+(3,5): touching is allowed
+assert max_profit([(1, 5, 1), (1, 5, 2)])[0] == 2
+assert max_profit([]) == (0, [])
+assert max_profit([(1, 2, 3)]) == (3, [(1, 2, 3)])
+```
+
+Touching intervals (`end == start`) are compatible — `bisect_right` on the end times encodes that; say it
+aloud and ask. For the "tighter than `O(n log n)`" follow-up: if start/end are small integers, a time-indexed DP
+is O(T + n); otherwise `O(n log n)` is optimal in the comparison model because the sort dominates.
+
+### 31. Working Hours Register (low, 90 min four levels)
+
+Card: L1 record employee entry and exit; L2 rank employees by accumulated work time; L3 promotions that
+activate on a *later* entry and pay calculated from historical compensation; L4 double-pay grant periods.
+
+Model each completed session as an interval; pay is the integral of the rate over the session, split at rate
+changes and double-pay windows.
+
+```python
+class WorkRegister:
+    def __init__(self):
+        self.open = {}            # employee -> entry time
+        self.sessions = {}        # employee -> [(start, end, rate_at_entry)]
+        self.rate = {}            # employee -> current hourly rate
+        self.pending = {}         # employee -> (new_rate) applied on next entry
+        self.grants = []          # (start, end) windows paying 2x
+
+    def hire(self, emp, rate):
+        self.rate[emp] = rate
+
+    def enter(self, emp, ts):
+        assert emp not in self.open, "already inside"
+        if emp in self.pending:
+            self.rate[emp] = self.pending.pop(emp)     # promotion lands on the next entry
+        self.open[emp] = (ts, self.rate[emp])
+
+    def exit(self, emp, ts):
+        start, rate = self.open.pop(emp)
+        self.sessions.setdefault(emp, []).append((start, ts, rate))
+
+    def promote(self, emp, new_rate):
+        if emp in self.open:
+            self.pending[emp] = new_rate               # take effect on the next entry
+        else:
+            self.rate[emp] = new_rate
+
+    def add_double_pay(self, start, end):
+        self.grants.append((start, end))
+
+    def total_time(self, emp):
+        return sum(e - s for s, e, _ in self.sessions.get(emp, []))
+
+    def ranking(self):
+        totals = {e: self.total_time(e) for e in self.sessions}
+        return sorted(totals, key=lambda e: (-totals[e], e))
+
+    def pay(self, emp):
+        total = 0
+        for start, end, rate in self.sessions.get(emp, []):
+            double = 0
+            for gs, ge in self.grants:
+                double += max(0, min(end, ge) - max(start, gs))
+            total += rate * ((end - start) + double)     # grant overlap is paid a second time
+        return total
+
+
+w = WorkRegister()
+w.hire("ann", 10)
+w.hire("bob", 20)
+w.enter("ann", 0)
+w.enter("bob", 2)
+w.exit("ann", 5)
+w.exit("bob", 3)
+assert w.ranking() == ["ann", "bob"]
+assert w.total_time("ann") == 5 and w.pay("ann") == 50
+
+w.enter("ann", 10)
+w.promote("ann", 30)                     # while inside: applies only from the next entry
+w.exit("ann", 12)
+assert w.pay("ann") == 50 + 10 * 2       # the open session still used the old rate
+w.enter("ann", 20)
+w.exit("ann", 21)
+assert w.pay("ann") == 50 + 20 + 30 * 1  # new rate after re-entry
+
+w.add_double_pay(0, 3)                   # overlaps ann's 0-5 session by 3h and bob's 2-3 by 1h
+assert w.pay("ann") == 50 + 10 * 3 + 20 + 30
+assert w.pay("bob") == 20 * (1 + 1)
+assert w.ranking()[0] == "ann"
+```
+
+Gotchas the card hints at: a promotion made while the employee is inside must not change the open session,
+exits without entries, and whether double pay stacks with overlapping grant windows (clarify; here each
+window adds independently).
+
+### 32. System Design — Waitlist for a Listing (single report, 45 min)
+
+Card: users join a waitlist for a listing; when capacity opens, subscribers are notified in priority order.
+Booking integration is assumed; the focus is API, schema and notification fan-out.
+
+**Shape of the answer** [General]:
+
+- **API:** `POST /listings/{id}/waitlist` (join, idempotent per user + dates), `DELETE …/waitlist/{entry}`
+  (leave), `GET …/waitlist/position`. Join is a write; position is derived, not stored.
+- **Schema:** `waitlist_entry(entry_id, listing_id, user_id, check_in, check_out, priority_score, status,
+  created_at, notified_at, expires_at)`. Index on `(listing_id, check_in, status, priority_score,
+  created_at)` so "next in line for these dates" is one range scan. Priority is explicit (e.g. loyalty tier,
+  then first-come) so ordering is a sort key, not application logic.
+- **Trigger:** a cancellation or calendar change emits an event (Kafka / SQS). A waitlist worker consumes it,
+  finds eligible entries whose dates fit the freed window, and offers the slot to the head of the queue.
+- **Offer, do not auto-book:** send the notification with a hold (say 30 minutes) that reserves the dates; if
+  it expires or is declined, move to the next entry. The hold must be a conditional write on the calendar
+  (`WHERE dates are still free`) so two offers cannot hold the same night.
+- **Fan-out:** notify one person at a time per freed slot (not a stampede). Multiple freed slots for one
+  listing are processed per-listing in order to avoid races; partition the topic by `listing_id`.
+- **Notification delivery:** push / email / SMS through the existing notification service, with
+  deduplication keyed by `(entry_id, offer_id)`; retries with backoff.
+- **Scale and edge cases:** a hot listing with a huge waitlist (cap length, paginate position queries), users
+  on many waitlists at once (offer expiry releases them), partial date overlap (match on containment),
+  abuse (limit entries per user), and fairness when dates overlap between entries.
+
+Trade-off to name: strict FIFO versus priority tiers versus "best fit" for the freed window — each changes
+how simple the query is and how fair users perceive it to be.
+
+---
+
+*Total: 32 questions*
+*Last updated: 2026-11-06*

@@ -9,6 +9,7 @@ REFRESH_HEADING = "## Additions — November 2026 Refresh"
 EXPECTED_BLOCKS = {
     "openai_interview_questions.md": 6,
     "anthropic_interview_questions.md": 6,
+    "airbnb_interview_questions.md": 6,
 }
 
 
