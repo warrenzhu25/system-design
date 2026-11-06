@@ -34,6 +34,15 @@ class InterviewRefreshTest(unittest.TestCase):
                     code = compile(block, f"<{name} block {index}>", "exec")
                     exec(code, {"__name__": f"refresh_{index}"})
 
+    def test_linkedin_guide_blocks_run_and_pass_their_asserts(self):
+        blocks = python_blocks((ROOT / "linkedin_interview_questions.md").read_text(encoding="utf-8"))
+        self.assertEqual(len(blocks), 12)
+        for index, block in enumerate(blocks, start=1):
+            with self.subTest(block=index):
+                self.assertIn("assert ", block)
+                code = compile(block, f"<linkedin block {index}>", "exec")
+                exec(code, {"__name__": f"linkedin_{index}"})
+
 
 if __name__ == "__main__":
     unittest.main()
