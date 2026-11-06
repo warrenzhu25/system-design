@@ -20,11 +20,22 @@
 13. [Restore Valid IPv4 Addresses](#13-restore-valid-ipv4-addresses)
 14. [Maximum Falling Path with Limited Vertical Jumps and Bonus Scoring](#14-maximum-falling-path-with-limited-vertical-jumps-and-bonus-scoring)
 
+**Coding (November 2026 refresh)**
+17. [Social Network / Follow Graph](#17-social-network--follow-graph-very-high)
+18. [IPv4 / CIDR Iterator](#18-ipv4--cidr-iterator-medium-5-parts-revealed-one-at-a-time)
+19. [Resumable Iterator, 1D → 2D → 3D](#19-resumable-iterator-1d--2d--3d-low)
+20. [OpenSheet: Spreadsheet with Cell Dependencies](#20-opensheet-spreadsheet-with-cell-dependencies-single-report)
+21. [Streaming Entropy](#21-streaming-entropy-medium)
+22. [Time-Based Key-Value Store with Production Testing](#22-time-based-key-value-store-with-production-testing-low)
+
 **System Design**
 15. [GPU Scheduling Across Competing Jobs](#15-system-design--gpu-scheduling-across-competing-jobs)
 
 **Behavioral**
 16. [Behavioral Themes](#16-behavioral-themes)
+
+**System Design (November 2026 refresh)**
+23. [Video Generation Pipeline (Sora-style)](#23-system-design--video-generation-pipeline-sora-style-very-high)
 
 ---
 
@@ -1380,6 +1391,522 @@ is reported to weight two closely related but distinct behavioral angles heavily
   particular point — distinct from company fit, so don't conflate the two into one rehearsed answer.
 - **Leadership**: standard ownership/impact/collaboration themes, tagged alongside the two above on the
   same round.
+
+---
+
+## Additions — November 2026 Refresh
+
+Source: the OpenAI bank on 1point3acres (59 questions: 36 coding, 19 system design, 3 behavioral, 1 other),
+read on 2026-11-06. The page shows only a summary card per question; full text is member-only. Each problem
+below is restated from its card, so **clarify requirements with the interviewer** — the details (exact
+signatures, follow-ups) are my reconstruction, not the original prompt. Every Python block runs and passes
+its own asserts.
+
+Frequency labels come from the card ("very high" / "high" / "medium" / "low").
+
+### 17. Social Network / Follow Graph (very high)
+
+Card: follower/followee data structure with timestamped queries and friend-of-friend recommendations.
+
+Assumed API: `follow(a, b, t)`, `unfollow(a, b, t)`, `followers(u, at)`, `following(u, at)`, and
+`recommend(u, at, k)` — people followed by the people `u` follows, excluding `u` and anyone `u` already
+follows, ranked by number of mutual connections, ties by smaller id.
+
+Design choice: keep an append-only event list per edge so "as of time T" is a binary search; keep a live
+adjacency set for the common "now" query.
+
+```python
+import bisect
+from collections import defaultdict, Counter
+
+
+class SocialGraph:
+    def __init__(self):
+        # (a, b) -> parallel lists of times and states (True = following)
+        self._times = defaultdict(list)
+        self._states = defaultdict(list)
+        self._out = defaultdict(set)   # a -> {b} for edges ever seen
+        self._in = defaultdict(set)    # b -> {a}
+
+    def _record(self, a, b, t, state):
+        times = self._times[(a, b)]
+        assert not times or t >= times[-1], "events must arrive in time order"
+        times.append(t)
+        self._states[(a, b)].append(state)
+        self._out[a].add(b)
+        self._in[b].add(a)
+
+    def follow(self, a, b, t):
+        if a != b:
+            self._record(a, b, t, True)
+
+    def unfollow(self, a, b, t):
+        self._record(a, b, t, False)
+
+    def _is_following(self, a, b, at):
+        times = self._times.get((a, b))
+        if not times:
+            return False
+        i = bisect.bisect_right(times, at)
+        return i > 0 and self._states[(a, b)][i - 1]
+
+    def following(self, u, at):
+        return {b for b in self._out[u] if self._is_following(u, b, at)}
+
+    def followers(self, u, at):
+        return {a for a in self._in[u] if self._is_following(a, u, at)}
+
+    def recommend(self, u, at, k):
+        mine = self.following(u, at)
+        score = Counter()
+        for friend in mine:
+            for candidate in self.following(friend, at):
+                if candidate != u and candidate not in mine:
+                    score[candidate] += 1
+        ranked = sorted(score.items(), key=lambda kv: (-kv[1], kv[0]))
+        return [c for c, _ in ranked[:k]]
+
+
+g = SocialGraph()
+g.follow("a", "b", 1)
+g.follow("a", "c", 2)
+g.follow("b", "d", 3)
+g.follow("c", "d", 4)
+g.follow("c", "e", 5)
+assert g.following("a", at=10) == {"b", "c"}
+assert g.followers("d", at=10) == {"b", "c"}
+assert g.recommend("a", at=10, k=5) == ["d", "e"]      # d has 2 mutuals, e has 1
+assert g.recommend("a", at=2, k=5) == []                # b and c follow nobody yet
+g.unfollow("a", "b", 6)
+assert g.following("a", at=10) == {"c"}
+assert g.following("a", at=5) == {"b", "c"}             # time travel still works
+assert g.recommend("a", at=10, k=1) == ["d"]
+```
+
+Complexity: `recommend` is O(sum of out-degrees of `u`'s followees × log events). **Follow-ups:** celebrity
+nodes (cap or sample the second hop, precompute for hot users), top-k with a heap instead of a full sort,
+mutual-follow detection (`a in following(b) and b in following(a)`).
+
+### 18. IPv4 / CIDR Iterator (medium, 5 parts revealed one at a time)
+
+Card: parse IPv4 / CIDR, iterate a range, containment checks; the next part unlocks when tests pass.
+
+Treat an address as a 32-bit integer; everything else (range, contains, overlap) becomes integer math.
+
+```python
+def ip_to_int(ip):
+    parts = ip.split(".")
+    assert len(parts) == 4
+    value = 0
+    for p in parts:
+        assert p.isdigit() and 0 <= int(p) <= 255 and (p == "0" or not p.startswith("0")), ip
+        value = (value << 8) | int(p)
+    return value
+
+
+def int_to_ip(value):
+    return ".".join(str((value >> shift) & 255) for shift in (24, 16, 8, 0))
+
+
+class CIDR:
+    def __init__(self, text):
+        ip, _, bits = text.partition("/")
+        self.prefix = int(bits) if bits else 32
+        assert 0 <= self.prefix <= 32
+        mask = (0xFFFFFFFF << (32 - self.prefix)) & 0xFFFFFFFF
+        self.start = ip_to_int(ip) & mask        # normalise host bits to 0
+        self.end = self.start | (~mask & 0xFFFFFFFF)
+
+    def __contains__(self, ip):
+        return self.start <= ip_to_int(ip) <= self.end
+
+    def __len__(self):
+        return self.end - self.start + 1
+
+    def __iter__(self):
+        for value in range(self.start, self.end + 1):
+            yield int_to_ip(value)
+
+    def overlaps(self, other):
+        return self.start <= other.end and other.start <= self.end
+
+
+net = CIDR("192.168.1.0/30")
+assert list(net) == ["192.168.1.0", "192.168.1.1", "192.168.1.2", "192.168.1.3"]
+assert len(net) == 4
+assert "192.168.1.3" in net and "192.168.1.4" not in net
+assert CIDR("10.1.2.3/8").start == ip_to_int("10.0.0.0")      # host bits are masked off
+assert len(CIDR("0.0.0.0/0")) == 2 ** 32
+assert CIDR("10.0.0.0/8").overlaps(CIDR("10.20.0.0/16"))
+assert not CIDR("10.0.0.0/8").overlaps(CIDR("11.0.0.0/8"))
+assert CIDR("1.2.3.4") .start == CIDR("1.2.3.4/32").end       # bare address is a /32
+```
+
+Gotchas worth saying aloud: leading zeros (`01`) are invalid, `/0` shifts by 32 (Python is fine, C is
+undefined), the iterator must be lazy because a `/8` has 16M entries.
+
+### 19. Resumable Iterator, 1D → 2D → 3D (low)
+
+Card: abstract base class, then 1D list, 2D matrix, 3D nested iterator, each with `get_state` / `set_state`.
+
+State must be small, serialisable and independent of the live iterator object — a tuple of indices.
+
+```python
+from abc import ABC, abstractmethod
+
+
+class ResumableIterator(ABC):
+    @abstractmethod
+    def has_next(self): ...
+    @abstractmethod
+    def next(self): ...
+    @abstractmethod
+    def get_state(self): ...
+    @abstractmethod
+    def set_state(self, state): ...
+
+
+class NestedIterator(ResumableIterator):
+    """Iterates any depth of rectangular or ragged nesting in row-major order."""
+
+    def __init__(self, data):
+        self.data = data
+        self.path = None            # indices to the next leaf, or None when exhausted
+        self.path = self._first_leaf([], data)
+
+    def _first_leaf(self, prefix, node, start=0):
+        # Descend to the first leaf at or after position `start` of `node`.
+        if not isinstance(node, list):
+            return prefix
+        for i in range(start, len(node)):
+            found = self._first_leaf(prefix + [i], node[i])
+            if found is not None:
+                return found
+        return None
+
+    def _advance(self, path):
+        # Next leaf strictly after `path`.
+        for depth in range(len(path) - 1, -1, -1):
+            node = self.data
+            for index in path[:depth]:
+                node = node[index]
+            found = self._first_leaf(path[:depth], node, path[depth] + 1)
+            if found is not None:
+                return found
+        return None
+
+    def has_next(self):
+        return self.path is not None
+
+    def next(self):
+        if self.path is None:
+            raise StopIteration
+        value = self.data
+        for index in self.path:
+            value = value[index]
+        self.path = self._advance(self.path)
+        return value
+
+    def get_state(self):
+        return None if self.path is None else tuple(self.path)
+
+    def set_state(self, state):
+        self.path = None if state is None else list(state)
+
+
+it = NestedIterator([1, 2, 3])                      # 1D
+assert [it.next() for _ in range(3)] == [1, 2, 3] and not it.has_next()
+
+it = NestedIterator([[1, 2], [], [3], [4, 5]])      # 2D with an empty row
+assert it.next() == 1
+saved = it.get_state()
+rest = []
+while it.has_next():
+    rest.append(it.next())
+assert rest == [2, 3, 4, 5]
+it.set_state(saved)                                  # resume from the checkpoint
+assert it.next() == 2 and it.next() == 3
+
+it = NestedIterator([[[1], [2, 3]], [[4]], [[], [5]]])   # 3D
+out = []
+while it.has_next():
+    out.append(it.next())
+assert out == [1, 2, 3, 4, 5]
+assert NestedIterator([]).has_next() is False
+assert NestedIterator([[], [[]]]).has_next() is False
+```
+
+Say why `set_state` takes a copy (`list(state)`): handing out the live list would let the caller mutate
+the iterator. Also mention the data is assumed not to change between checkpoint and resume.
+
+### 20. OpenSheet: Spreadsheet with Cell Dependencies (single report)
+
+Card: cell names (A1, B2), numeric literals, arithmetic formulas referencing other cells, reject circular
+dependencies; follow-up is O(1) `get_cell` through eager recomputation with a dependency graph and
+topological order.
+
+Part 1 evaluates lazily with memoisation and a visiting set. The follow-up stores computed values and
+recomputes only the downstream cells in topological order when a cell is set.
+
+```python
+import re
+from collections import defaultdict, deque
+
+CELL = re.compile(r"[A-Z]+[0-9]+")
+
+
+class CycleError(Exception):
+    pass
+
+
+class Spreadsheet:
+    def __init__(self):
+        self.raw = {}                      # cell -> number or formula string "=A1+B2*2"
+        self.value = {}                    # cell -> computed number (eager)
+        self.deps = defaultdict(set)       # cell -> cells its formula reads
+        self.rdeps = defaultdict(set)      # cell -> cells whose formulas read it
+
+    def set_cell(self, name, content):
+        old_deps = self.deps.get(name, set())
+        new_deps = set(CELL.findall(content)) if isinstance(content, str) else set()
+        if self._reaches(new_deps, name):
+            raise CycleError(name)         # reject before mutating anything
+        for d in old_deps:
+            self.rdeps[d].discard(name)
+        self.raw[name] = content
+        self.deps[name] = new_deps
+        for d in new_deps:
+            self.rdeps[d].add(name)
+        for cell in self._downstream_order(name):
+            self.value[cell] = self._eval(cell)
+
+    def get_cell(self, name):
+        return self.value.get(name, 0)     # O(1): already computed
+
+    def _reaches(self, starts, target):
+        # Does any cell in `starts` depend (transitively) on `target`?
+        seen, stack = set(), list(starts)
+        while stack:
+            cell = stack.pop()
+            if cell == target:
+                return True
+            if cell not in seen:
+                seen.add(cell)
+                stack.extend(self.deps.get(cell, ()))
+        return False
+
+    def _downstream_order(self, start):
+        # Kahn's algorithm restricted to cells reachable from `start` via rdeps.
+        reach, stack = {start}, [start]
+        while stack:
+            for nxt in self.rdeps[stack.pop()]:
+                if nxt not in reach:
+                    reach.add(nxt)
+                    stack.append(nxt)
+        indeg = {c: len(self.deps[c] & reach) for c in reach}
+        queue, order = deque(c for c, n in indeg.items() if n == 0), []
+        while queue:
+            cell = queue.popleft()
+            order.append(cell)
+            for nxt in self.rdeps[cell]:
+                if nxt in reach:
+                    indeg[nxt] -= 1
+                    if indeg[nxt] == 0:
+                        queue.append(nxt)
+        return order
+
+    def _eval(self, cell):
+        content = self.raw[cell]
+        if not isinstance(content, str):
+            return content
+        expr = content.lstrip("=")
+        expr = CELL.sub(lambda m: repr(self.value.get(m.group(), 0)), expr)
+        assert re.fullmatch(r"[0-9+\-*/(). ]*", expr), "unsupported token"
+        return eval(expr, {"__builtins__": {}})   # safe: only digits and operators remain
+
+
+s = Spreadsheet()
+s.set_cell("A1", 5)
+s.set_cell("B1", "=A1*2")
+s.set_cell("C1", "=A1+B1")
+assert (s.get_cell("B1"), s.get_cell("C1")) == (10, 15)
+s.set_cell("A1", 7)                                  # eager recompute downstream
+assert (s.get_cell("B1"), s.get_cell("C1")) == (14, 21)
+try:
+    s.set_cell("A1", "=C1+1")                        # A1 -> C1 -> B1 -> A1
+    raise AssertionError("cycle not detected")
+except CycleError:
+    pass
+assert s.get_cell("A1") == 7 and s.get_cell("C1") == 21   # state untouched after the rejection
+s.set_cell("B1", "=A1+100")                          # rewiring dependencies
+assert s.get_cell("C1") == 114
+assert s.get_cell("Z9") == 0                         # empty cell reads as 0
+```
+
+In an interview, replace `eval` with a small recursive-descent parser (the card says arithmetic formulas),
+and say so; the regex guard here is the stand-in. **Follow-ups:** range references (`SUM(A1:A9)`), error
+propagation (`#DIV/0!` flows to dependents), batching many `set_cell` calls into one topological pass.
+
+### 21. Streaming Entropy (medium)
+
+Card: entropy of a distribution given logits, numerically stable; then logits arrive one at a time and
+entropy must be accumulated online.
+
+Use log-sum-exp: with `m = max(x)` and `Z = Σ e^(x−m)`, `H = log Z + m − Σ p_i x_i`, i.e.
+`H = (m + log Z) − E[x]`. The streaming version keeps `(m, Z, S)` where `S = Σ e^(x−m)·x` and rescales both
+sums whenever the max grows.
+
+```python
+import math
+
+
+def entropy_from_logits(logits):
+    m = max(logits)
+    z = sum(math.exp(x - m) for x in logits)
+    mean_x = sum(math.exp(x - m) * x for x in logits) / z
+    return math.log(z) + m - mean_x
+
+
+class StreamingEntropy:
+    def __init__(self):
+        self.m = -math.inf
+        self.z = 0.0      # sum exp(x - m)
+        self.s = 0.0      # sum exp(x - m) * x
+
+    def add(self, x):
+        if x > self.m:
+            scale = math.exp(self.m - x) if self.m != -math.inf else 0.0
+            self.z *= scale
+            self.s *= scale
+            self.m = x
+        w = math.exp(x - self.m)
+        self.z += w
+        self.s += w * x
+
+    def entropy(self):
+        return math.log(self.z) + self.m - self.s / self.z
+
+
+uniform = [0.0] * 8
+assert abs(entropy_from_logits(uniform) - math.log(8)) < 1e-12
+peaked = [1000.0, 0.0, 0.0]                      # naive exp(1000) overflows
+assert 0.0 <= entropy_from_logits(peaked) < 1e-6
+
+data = [0.3, -2.0, 5.0, 4.9, -100.0, 5.1]
+online = StreamingEntropy()
+for x in data:
+    online.add(x)
+assert abs(online.entropy() - entropy_from_logits(data)) < 1e-12
+
+huge = StreamingEntropy()
+for x in (1.0, 500.0, 1000.0, 999.0):
+    huge.add(x)
+assert math.isfinite(huge.entropy())
+assert abs(huge.entropy() - entropy_from_logits([1.0, 500.0, 1000.0, 999.0])) < 1e-9
+```
+
+Say: this is O(1) memory and one pass; the numerical trick is identical to FlashAttention's online softmax.
+
+### 22. Time-Based Key-Value Store with Production Testing (low)
+
+Card: multiple values per key at different timestamps, temporal queries, mock clocks, monotonic timestamp
+enforcement, thread-safe approach.
+
+Inject the clock so tests control time; keep per-key parallel lists so `get` is a binary search.
+
+```python
+import bisect
+import threading
+from collections import defaultdict
+
+
+class TimeMap:
+    def __init__(self, clock):
+        self._clock = clock                      # callable returning "now"; injected for tests
+        self._times = defaultdict(list)
+        self._values = defaultdict(list)
+        self._lock = threading.Lock()
+
+    def set(self, key, value):
+        with self._lock:
+            now = self._clock()
+            times = self._times[key]
+            if times and now < times[-1]:
+                raise ValueError("timestamps must be monotonic per key")
+            times.append(now)
+            self._values[key].append(value)
+
+    def get(self, key, at=None):
+        with self._lock:
+            at = self._clock() if at is None else at
+            i = bisect.bisect_right(self._times[key], at)
+            return self._values[key][i - 1] if i else None
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 0
+
+    def __call__(self):
+        return self.now
+
+
+clock = FakeClock()
+kv = TimeMap(clock)
+clock.now = 10
+kv.set("k", "a")
+clock.now = 20
+kv.set("k", "b")
+assert kv.get("k", at=9) is None
+assert kv.get("k", at=10) == "a" and kv.get("k", at=19) == "a"
+assert kv.get("k", at=20) == "b" and kv.get("k") == "b"
+assert kv.get("missing", at=100) is None
+clock.now = 5
+try:
+    kv.set("k", "late")
+    raise AssertionError("expected monotonic violation")
+except ValueError:
+    pass
+clock.now = 20
+assert kv.get("k") == "b"                        # rejected write left no trace
+```
+
+Testing talking points: fake clock instead of `sleep`, equal-timestamp writes (last wins vs reject —
+clarify), concurrent writers (one lock is correct but serialises reads; use a read-write lock or per-key
+locks if reads dominate), and `get` at a time before the first write.
+
+### 23. System Design — Video Generation Pipeline (Sora-style) (very high)
+
+Card: a client submits a video-generation request; design the scheduling and worker flow on a limited,
+fluctuating GPU pool; the interviewer focuses on failure handling.
+
+**Shape of the answer** [General]:
+
+1. **API:** `POST /jobs` returns `job_id` immediately (idempotency key in the header so retries do not
+   double-bill); `GET /jobs/{id}` and a webhook / SSE stream for progress. Never hold the HTTP request open.
+2. **State machine:** `QUEUED → SCHEDULED → RUNNING → (POST_PROCESSING) → SUCCEEDED | FAILED | CANCELED`,
+   stored durably in a database; every transition is a conditional update (`WHERE state = :expected`) so two
+   schedulers cannot both claim a job.
+3. **Queue + scheduler:** priority classes (paid / free / internal), per-tenant quotas and fair share so one
+   user cannot drain the pool; schedule by estimated GPU-seconds (resolution × duration × steps), and
+   bin-pack across GPU types. Admission control returns "queued, ETA" instead of accepting unbounded work.
+4. **Workers:** pull jobs under a **lease** with a heartbeat. A missed heartbeat expires the lease and the job
+   returns to `QUEUED` with `attempt += 1`.
+5. **Failure handling** (the part they probe):
+   - worker or GPU dies mid-run → lease expiry, retry from the **last checkpoint** (diffusion samplers can
+     checkpoint latents every N steps; long jobs are split into segments);
+   - poison jobs (OOM, bad prompt) → capped retries then a dead-letter state with a user-visible error;
+   - GPU pool shrinks (preemption, capacity loss) → drain gracefully, requeue with priority preserved, never
+     drop; autoscale on queue depth × estimated cost, accept cold-start lag for new GPUs;
+   - duplicate execution after a lease race → outputs are written under a deterministic key
+     (`job_id/attempt`) and the state transition is conditional, so the loser's output is discarded;
+   - downstream storage / CDN failure → output upload is its own retried step.
+6. **Safety and cost:** prompt and output moderation as separate pipeline stages (cheap rejection before
+   spending GPU time), per-request cost caps, and metrics: queue wait p50/p99, GPU utilisation, retry rate,
+   cost per second of video.
+
+Trade-off to name: checkpointing costs storage and time, so checkpoint only jobs whose expected runtime
+exceeds a threshold.
 
 ---
 
